@@ -62,7 +62,7 @@ impl PackageClient for NativePackageClient {
         revision: f64,
     ) -> BoxFuture<'_, IvyResult<Option<IvyJson>>> {
         Box::pin(async move {
-            let response = self
+            let mut response = self
                 .0
                 .get(endpoint(
                     &base,
@@ -81,9 +81,15 @@ impl PackageClient for NativePackageClient {
                 "service_unavailable",
                 "Hive package catalog is unavailable.",
             )?;
-            let bytes = response.bytes().await.map_err(|_| IvyError::internal())?;
+            let maximum = package_validation::CATALOG_BYTES;
+            require(response.content_length().is_none_or(|length| length <= maximum as u64), "limit_exceeded", "Package catalog exceeds its byte limit.")?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| IvyError::internal())? {
+                require(chunk.len() <= maximum.saturating_sub(bytes.len()), "limit_exceeded", "Package catalog exceeds its byte limit.")?;
+                bytes.extend_from_slice(&chunk);
+            }
             let text = String::from_utf8_lossy(&bytes);
-            let value = json::parse(text.strip_prefix('\u{feff}').unwrap_or(&text), usize::MAX)
+            let value = json::parse(text.strip_prefix('\u{feff}').unwrap_or(&text), maximum)
                 .map_err(|_| IvyError::internal())?;
             Ok(Some(value))
         })
@@ -210,11 +216,7 @@ impl PackageUpdater {
         .map_err(|_| IvyError::internal())?
     }
     pub async fn import_package(&self, entry: IvyJson) -> IvyResult<IvyJson> {
-        package_validation::validate_package_catalog(&IvyJson::object([
-            ("schemaVersion", IvyJson::Number(1.0)),
-            ("revision", IvyJson::Number(0.0)),
-            ("packages", IvyJson::Array(vec![entry.clone()])),
-        ]))?;
+        package_validation::PackageIndex::read(&entry)?.validate()?;
         let inner = self.0.clone();
         tokio::spawn(async move { inner.import_package(&entry).await })
             .await
@@ -236,12 +238,6 @@ fn instances(value: &IvyJson) -> IvyResult<&[IvyJson]> {
         .required("instances")?
         .as_array()
         .ok_or_else(IvyError::internal)
-}
-fn newer(left: &IvyJson, right: &IvyJson) -> IvyResult<bool> {
-    Ok(
-        json::compare_versions(&text(left, "version")?, &text(right, "version")?)?
-            == Ordering::Greater,
-    )
 }
 fn platform(node: Option<&NodeRuntime>) -> IvyJson {
     IvyJson::object([
@@ -273,13 +269,12 @@ fn platform(node: Option<&NodeRuntime>) -> IvyJson {
         ),
     ])
 }
-fn supported(entry: &IvyJson, node: Option<&NodeRuntime>) -> IvyResult<bool> {
-    let current = platform(node);
+fn supported(manifest: &IvyJson, node: Option<&NodeRuntime>) -> IvyResult<bool> {
     match artifact::verify_runtime_requirements(
-        entry.required("manifest")?,
+        manifest,
         node.map(|node| node.version.as_str()),
-        &text(&current, "os")?,
-        &text(&current, "arch")?,
+        crate::native_plan::host_os(),
+        match std::env::consts::ARCH { "x86_64" => "x64", "aarch64" => "arm64", arch => arch },
     ) {
         Ok(()) => Ok(true),
         Err(error) if error.code == "unsupported_runtime" => Ok(false),
@@ -365,7 +360,7 @@ impl Inner {
         }
     }
     async fn import_package(&self, entry: &IvyJson) -> IvyResult<IvyJson> {
-        let host = self.journal.config().await?;
+        let host = self.journal.configuration().await?;
         let lock = ExecutorLock::acquire(
             config::path_value(host.required("stagingRoot")?)?
                 .join("build-locks")
@@ -518,7 +513,7 @@ impl Inner {
         result
     }
     async fn sync(&self, state: &mut State) -> IvyResult<PackageSyncResult> {
-        let host = self.journal.config().await?;
+        let host = self.journal.configuration().await?;
         let Some(value) = self
             .client
             .catalog(
@@ -530,8 +525,8 @@ impl Inner {
         else {
             return self.result(state).await;
         };
-        let index = package_validation::validate_package_catalog_index(&value)?;
-        let host = self.journal.config().await?;
+        let index = package_validation::CatalogIndex::read(&value)?;
+        let host = self.journal.configuration().await?;
         if let Some(executor) = instances(&host)?
             .iter()
             .find(|v| v.get("componentId") == Some(&"host-executor".into()))
@@ -542,91 +537,64 @@ impl Inner {
                 .is_some()
             && requires_bootstrap_replacement(executor)
         {
-            let mut newest = None;
-            for entry in index
-                .required("packages")?
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|v| v.get("componentId") == Some(&"host-executor".into()))
-            {
-                if newest.is_none() || newer(entry, newest.unwrap())? {
+            let id = text(executor, "instanceId")?;
+            let current = self.installed_version(&id).await?;
+            let mut newest: Option<package_validation::PackageEntry<'_>> = None;
+            for entry in index.packages.iter().filter(|entry| entry.component_id == "host-executor") {
+                if let Some(current) = &current && json::compare_versions(&entry.version, current)? != Ordering::Greater { continue; }
+                let entry = entry.clone().validate()?;
+                if supported(entry.manifest, self.node.as_ref())?
+                    && (newest.is_none() || json::compare_versions(&entry.version, &newest.as_ref().unwrap().version)? == Ordering::Greater) {
                     newest = Some(entry);
                 }
             }
             if let Some(entry) = newest {
-                package_validation::validate_package_catalog(&IvyJson::object([
-                    ("schemaVersion", IvyJson::Number(1.0)),
-                    ("revision", index.required("revision")?.clone()),
-                    ("packages", IvyJson::Array(vec![entry.clone()])),
-                ]))?;
-                let id = text(executor, "instanceId")?;
-                let current = self.installed_version(&id).await?;
-                if (current.is_none()
-                    || json::compare_versions(
-                        &text(entry, "version")?,
-                        current.as_deref().unwrap(),
-                    )? == Ordering::Greater)
-                    && supported(entry, self.node.as_ref())?
-                {
-                    let candidate = self.import_package(entry).await?;
-                    state.pending(BootstrapPackageComponent {
-                        instance_id: id,
-                        candidate,
-                        manifest: entry.required("manifest")?.clone(),
-                    });
-                    state.revision = state
-                        .revision
-                        .max(index.required("revision")?.as_f64().unwrap());
-                    return self.result(state).await;
-                }
+                let candidate = self.import_package(entry.value).await?;
+                state.pending(BootstrapPackageComponent { instance_id: id, candidate, manifest: entry.manifest.clone() });
+                state.revision = state.revision.max(index.revision);
+                return self.result(state).await;
             }
         }
-        let catalog = package_validation::validate_package_catalog(&index)?;
+        let catalog = index.validate()?;
         // A vector preserves Map's first-insertion order, including replacements.
-        let mut newest: Vec<IvyJson> = Vec::new();
-        for entry in catalog.required("packages")?.as_array().unwrap() {
+        let mut newest: Vec<package_validation::PackageEntry<'_>> = Vec::new();
+        for entry in catalog.packages {
+            if entry.manifest.get("kind") == Some(&"app".into()) || !supported(entry.manifest, self.node.as_ref())? { continue; }
             if let Some(previous) = newest
                 .iter_mut()
-                .find(|v| v.get("componentId") == entry.get("componentId"))
+                .find(|v| v.component_id == entry.component_id)
             {
-                if newer(entry, previous)? {
-                    *previous = entry.clone();
+                if json::compare_versions(&entry.version, &previous.version)? == Ordering::Greater {
+                    *previous = entry;
                 }
             } else {
-                newest.push(entry.clone());
+                newest.push(entry);
             }
         }
         for entry in newest {
-            if entry.required("manifest")?.get("kind") == Some(&"app".into())
-                || !supported(&entry, self.node.as_ref())?
-            {
-                continue;
-            }
-            let host = self.journal.config().await?;
+            let host = self.journal.configuration().await?;
+            let component = IvyJson::from(entry.component_id.as_str());
             let instances = instances(&host)?
                 .iter()
-                .filter(|v| v.get("componentId") == entry.get("componentId"))
-                .cloned()
-                .collect::<Vec<_>>();
+                .filter(|v| v.get("componentId") == Some(&component));
             let mut candidate: Option<IvyJson> = None;
             for instance in instances {
                 let id = text(&instance, "instanceId")?;
                 let installed = self.journal.installed(&id).await?;
                 if installed.is_some()
                     && let Some(current) = self.installed_version(&id).await?
-                    && json::compare_versions(&text(&entry, "version")?, &current)?
+                    && json::compare_versions(&entry.version, &current)?
                         != Ordering::Greater
                 {
                     continue;
                 }
-                if entry.required("manifest")?.get("kind") == Some(&"hive".into()) {
+                if entry.manifest.get("kind") == Some(&"hive".into()) {
                     continue;
                 }
                 let candidate = match &candidate {
                     Some(value) => value.clone(),
                     None => {
-                        let value = self.import_package(&entry).await?;
+                        let value = self.import_package(entry.value).await?;
                         candidate = Some(value.clone());
                         value
                     }
@@ -635,11 +603,11 @@ impl Inner {
                     state.pending(BootstrapPackageComponent {
                         instance_id: id,
                         candidate,
-                        manifest: entry.required("manifest")?.clone(),
+                        manifest: entry.manifest.clone(),
                     });
                     continue;
                 }
-                let host = self.journal.config().await?;
+                let host = self.journal.configuration().await?;
                 // HE02: instance identity is configured independently of component
                 // identity. Keep the exact running executor build in replay IDs.
                 let executor = instances_for_executor(&host)?;
@@ -654,8 +622,8 @@ impl Inner {
                 };
                 let hash = hash_json(&IvyJson::object([
                     ("instanceId", id.clone().into()),
-                    ("version", entry.required("version")?.clone()),
-                    ("buildId", entry.required("buildId")?.clone()),
+                    ("version", entry.version.clone().into()),
+                    ("buildId", IvyJson::String(entry.build_id.clone())),
                     ("configurationHash", hash_json(&host)?.into()),
                     ("executorBuildId", executor_build),
                 ]))?;
@@ -674,7 +642,7 @@ impl Inner {
         }
         state.revision = state
             .revision
-            .max(catalog.required("revision")?.as_f64().unwrap());
+            .max(catalog.revision);
         self.result(state).await
     }
 }

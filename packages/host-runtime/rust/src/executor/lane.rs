@@ -217,10 +217,6 @@ async fn drive(
     runtime: &dyn ActivationRuntime,
     mut entry: IvyJson,
 ) -> IvyResult<()> {
-    context
-        .journal
-        .use_configuration(context.config.clone())
-        .await?;
     context.journal.instance(&context.instance_id).await?;
     if phase(&entry)? == "preparing" {
         let snapshot = selected(&entry, "sourceSnapshot").ok_or_else(|| {

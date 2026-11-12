@@ -789,6 +789,11 @@ op(
   }),
 );
 op(
+  "hosts.configurationRevisions",
+  obj({ hostIds: { type: "array", items: id, minItems: 1, maxItems: 50, uniqueItems: true } }),
+  obj({ items: array(obj({ hostId: id, configurationRevision: nullable(uint(1)) }), 50) }),
+);
+op(
   "hostConfigurations.list",
   obj({ ...page }, []),
   paged(ref("HostConfigurationSummary")),

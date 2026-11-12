@@ -44,7 +44,7 @@ impl NativeActivationRuntime {
         let stopped = self
             .docker
             .stop_container(
-                c.config.clone(),
+                (*c.config).clone(),
                 c.instance_id.clone().into(),
                 manifest
                     .as_ref()
@@ -150,7 +150,7 @@ impl NativeActivationRuntime {
         if handles.container.is_none() && !allow_start {
             let Some(current) = self
                 .docker
-                .inspect_container(c.config.clone(), c.instance_id.clone().into())
+                .inspect_container((*c.config).clone(), c.instance_id.clone().into())
                 .await?
             else {
                 return self
@@ -262,7 +262,7 @@ impl NativeActivationRuntime {
             let managed = self
                 .docker
                 .start_container(
-                    c.config.clone(),
+                    (*c.config).clone(),
                     instance.clone(),
                     target.clone(),
                     config.json().clone(),

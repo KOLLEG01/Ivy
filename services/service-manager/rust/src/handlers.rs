@@ -8,14 +8,16 @@ use ivy_host_runtime::{
 use ivy_sdk::service::ToolHandler;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-pub fn mutations(reload: Reload, bootstrap_root: PathBuf) -> HashMap<JsString, ToolHandler> {
+pub fn mutations(reload: Reload, bootstrap_root: PathBuf, journal: HostJournal) -> HashMap<JsString, ToolHandler> {
     [Action::Deploy, Action::Rollback, Action::Restart, Action::Enable, Action::Disable]
         .into_iter().map(|action| {
             let reload = reload.clone();
             let bootstrap_root = bootstrap_root.clone();
+            let journal = journal.clone();
             let handler: ToolHandler = Arc::new(move |args, context| {
                 let reload = reload.clone();
                 let bootstrap_root = bootstrap_root.clone();
+                let journal = journal.clone();
                 Box::pin(async move {
                     // Operation binding precedes configuration IO, as in the
                     // original manager. Cancellation after admission cannot
@@ -23,12 +25,10 @@ pub fn mutations(reload: Reload, bootstrap_root: PathBuf) -> HashMap<JsString, T
                     let action = LocalAction::from_manager(action, &args, context.operation_id.as_ref())?;
                     let configuration = reload().await?;
                     tokio::spawn(async move {
-                        let journal = HostJournal::open(configuration).await?;
+                        let journal = journal.bind(configuration).await?;
                         let accepted = accept_local_action(journal.clone(), action, bootstrap_root).await;
-                        let closed = journal.close().await;
                         match accepted {
                             Ok(entry) => {
-                                closed?;
                                 record(entry)
                             }
                             Err(mut error) => {

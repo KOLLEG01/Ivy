@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 /// The host authority owns association lookup and the approved legacy fallback.
 /// There is deliberately no default that treats a missing implementation as legacy.
 pub type TargetPolicyResolver = Arc<
-    dyn Fn(HostJournal, IvyJson) -> Pin<Box<dyn Future<Output = IvyResult<IvyJson>> + Send>>
+    dyn Fn(HostJournal, IvyJson) -> Pin<Box<dyn Future<Output = IvyResult<Arc<IvyJson>>> + Send>>
         + Send
         + Sync,
 >;
@@ -50,14 +50,14 @@ impl Drop for Control {
 #[derive(Clone)]
 pub struct RuntimeOwner(Arc<Control>);
 impl RuntimeOwner {
-    pub(crate) async fn for_host_with_launcher(
-        host: IvyJson,
+    pub(crate) async fn for_journal_with_launcher(
+        journal: HostJournal,
         instance_id: String,
         bootstrap_root: PathBuf,
         node: Option<NodeRuntime>,
         job_launcher: PathBuf,
     ) -> IvyResult<Self> {
-        let owner = Self::for_host(host, instance_id, bootstrap_root, node).await?;
+        let owner = Self::for_journal(journal, instance_id, bootstrap_root, node).await?;
         owner
             .0
             .pending
@@ -76,17 +76,26 @@ impl RuntimeOwner {
         bootstrap_root: PathBuf,
         node: impl Into<Option<NodeRuntime>>,
     ) -> IvyResult<Self> {
-        let startup = host.clone();
+        let journal = HostJournal::open(host).await?;
+        Self::for_journal(journal, instance_id, bootstrap_root, node).await
+    }
+    pub async fn for_journal(
+        journal: HostJournal,
+        instance_id: String,
+        bootstrap_root: PathBuf,
+        node: impl Into<Option<NodeRuntime>>,
+    ) -> IvyResult<Self> {
+        let startup = journal.configuration().await?;
         let resolver: TargetPolicyResolver = Arc::new(move |journal, target| {
             let startup = startup.clone();
             Box::pin(async move {
                 Ok(journal
-                    .accepted_target_policy(target)
+                    .accepted_target_policy_shared(target)
                     .await?
                     .unwrap_or(startup))
             })
         });
-        Self::open(host, instance_id, bootstrap_root, node, resolver).await
+        Self::open_journal(journal, instance_id, bootstrap_root, node, resolver).await
     }
     pub async fn open(
         host: IvyJson,
@@ -95,7 +104,18 @@ impl RuntimeOwner {
         node: impl Into<Option<NodeRuntime>>,
         resolve_policy: TargetPolicyResolver,
     ) -> IvyResult<Self> {
+        let journal = HostJournal::open(host).await?;
+        Self::open_journal(journal, instance_id, bootstrap_root, node, resolve_policy).await
+    }
+    async fn open_journal(
+        journal: HostJournal,
+        instance_id: String,
+        bootstrap_root: PathBuf,
+        node: impl Into<Option<NodeRuntime>>,
+        resolve_policy: TargetPolicyResolver,
+    ) -> IvyResult<Self> {
         let node = node.into();
+        let host = journal.configuration().await?;
         require(
             cfg!(windows) || cfg!(target_os = "macos"),
             "unsupported_runtime",
@@ -115,7 +135,7 @@ impl RuntimeOwner {
             false,
         )
         .await?;
-        let journal = match HostJournal::open(host.clone()).await {
+        let journal = match journal.bind(host.clone()).await {
             Ok(value) => value,
             Err(error) => {
                 let _ = lock.close().await;
@@ -203,12 +223,12 @@ impl RuntimeOwner {
 
 struct Selected {
     target: IvyJson,
-    host: IvyJson,
+    host: Arc<IvyJson>,
     config: Option<InstanceConfig>,
     manifest: IvyJson,
 }
 struct Owner {
-    host: IvyJson,
+    host: Arc<IvyJson>,
     instance_id: String,
     job_launcher: PathBuf,
     node: Option<NodeRuntime>,

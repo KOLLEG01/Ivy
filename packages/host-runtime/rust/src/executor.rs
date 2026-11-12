@@ -60,11 +60,11 @@ pub struct ExecutorOptions {
     pub build_id: Option<JsString>,
 }
 
-/// Each lane owns a distinct journal handle and a fixed accepted configuration.
-/// It never switches the base journal or borrows desired settings for rollback.
+/// Each lane binds the shared journal to its fixed accepted configuration.
+/// Desired configuration changes cannot alter its activation or rollback policy.
 pub struct OperationContext {
     pub journal: HostJournal,
-    pub config: IvyJson,
+    pub config: Arc<IvyJson>,
     pub instance_id: String,
     pub options: ExecutorOptions,
     pub cancel: CancellationToken,
@@ -79,8 +79,8 @@ impl OperationContext {
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
         let source = config::path_value(entry.required("configurationPath")?)?;
-        let config = base.accepted_configuration(source).await?;
-        let journal = HostJournal::open_with_clock(config.clone(), clock.clone()).await?;
+        let config = base.accepted_configuration_shared(source).await?;
+        let journal = base.bind(config.clone()).await?;
         Ok(Self {
             journal,
             config,
@@ -116,9 +116,7 @@ pub async fn execute_with_clock(
 ) -> IvyResult<()> {
     tokio::spawn(async move {
         let context = OperationContext::open(&base, &entry, options, cancel, clock).await?;
-        let result = lane::execute(&context, runtime.as_ref(), entry).await;
-        let closed = context.journal.close().await;
-        result.and(closed)
+        lane::execute(&context, runtime.as_ref(), entry).await
     })
     .await
     .map_err(|_| IvyError::internal())?

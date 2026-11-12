@@ -47,7 +47,7 @@ impl NativeActivationRuntime {
         let unit = systemd::systemd_unit_name(&c.config, &c.instance_id.clone().into())?;
         let definition = self
             .systemd
-            .read_unit(c.config.clone(), unit.clone().into())
+            .read_unit((*c.config).clone(), unit.clone().into())
             .await?;
         handles.unit = None;
         if definition.is_none() {
@@ -55,7 +55,7 @@ impl NativeActivationRuntime {
         }
         let current = self
             .systemd
-            .inspect_unit(c.config.clone(), unit.clone().into())
+            .inspect_unit((*c.config).clone(), unit.clone().into())
             .await?;
         if inactive(&current) {
             return Ok(Some(current));
@@ -67,7 +67,7 @@ impl NativeActivationRuntime {
             None => StopPolicy::Deadline(Duration::from_secs(15)),
         };
         self.systemd
-            .stop_unit(c.config.clone(), unit.into(), policy)
+            .stop_unit((*c.config).clone(), unit.into(), policy)
             .await
             .map(Some)
     }
@@ -150,7 +150,7 @@ impl NativeActivationRuntime {
         )?;
         let definition = self
             .systemd
-            .read_unit(c.config.clone(), unit.clone().into())
+            .read_unit((*c.config).clone(), unit.clone().into())
             .await?;
         if handles
             .unit
@@ -160,7 +160,7 @@ impl NativeActivationRuntime {
         {
             let observed = self
                 .systemd
-                .inspect_unit(c.config.clone(), unit.clone().into())
+                .inspect_unit((*c.config).clone(), unit.clone().into())
                 .await?;
             return self
                 .unit_observation(
@@ -184,12 +184,12 @@ impl NativeActivationRuntime {
             if definition.is_some() {
                 let current = self
                     .systemd
-                    .inspect_unit(c.config.clone(), unit.clone().into())
+                    .inspect_unit((*c.config).clone(), unit.clone().into())
                     .await?;
                 if !inactive(&current) {
                     self.systemd
                         .stop_unit(
-                            c.config.clone(),
+                            (*c.config).clone(),
                             unit.clone().into(),
                             StopPolicy::for_manifest(&manifest),
                         )
@@ -232,11 +232,11 @@ impl NativeActivationRuntime {
                 .await?;
             }
             self.systemd
-                .replace_unit(c.config.clone(), unit.clone().into(), rendered.content)
+                .replace_unit((*c.config).clone(), unit.clone().into(), rendered.content)
                 .await?;
-            self.systemd.reload(c.config.clone()).await?;
+            self.systemd.reload((*c.config).clone()).await?;
             self.systemd
-                .start_unit(c.config.clone(), unit.clone().into())
+                .start_unit((*c.config).clone(), unit.clone().into())
                 .await?;
             handles.unit = Some(Unit {
                 target: target.clone(),
@@ -256,7 +256,7 @@ impl NativeActivationRuntime {
         }
         let mut observed = self
             .systemd
-            .inspect_unit(c.config.clone(), unit.clone().into())
+            .inspect_unit((*c.config).clone(), unit.clone().into())
             .await?;
         if inactive(&observed) {
             if !allow_start {
@@ -278,11 +278,11 @@ impl NativeActivationRuntime {
                     .await;
             }
             self.systemd
-                .start_unit(c.config.clone(), unit.clone().into())
+                .start_unit((*c.config).clone(), unit.clone().into())
                 .await?;
             observed = self
                 .systemd
-                .inspect_unit(c.config.clone(), unit.clone().into())
+                .inspect_unit((*c.config).clone(), unit.clone().into())
                 .await?;
         }
         if observed.active_state != JsString::from("active")

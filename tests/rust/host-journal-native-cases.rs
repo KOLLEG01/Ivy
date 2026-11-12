@@ -6,6 +6,47 @@ use ivy_sdk::clock::Clock;
 use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 const DATE: &str = "2026-01-01T00:00:00.000Z";
+
+#[tokio::test]
+async fn shared_connection_keeps_accepted_configuration_and_observes_external_writes() {
+    let f = ServiceFixture::new();
+    save(&f).await;
+    seed(&f).await;
+    let base = journal(&f).await;
+    let mut input = request("deploy", "shared-original");
+    input.insert("candidateId", hash("a"));
+    let entry = base.accept(input, None).await.unwrap();
+    let source = node_path::to_native(entry.required("configurationPath").unwrap().as_js_string().unwrap());
+    let accepted = base.accepted_configuration_shared(source.clone()).await.unwrap();
+    let second = base.accepted_configuration_shared(source).await.unwrap();
+    assert!(Arc::ptr_eq(&accepted, &second));
+    let bound = base.bind(accepted.clone()).await.unwrap();
+    let mut changed = (*accepted).clone();
+    let mut instances = changed.required("instances").unwrap().as_array().unwrap().to_vec();
+    instances[0].insert("settings", J::object([("revision", "next".into())]));
+    changed.insert("instances", J::Array(instances));
+    base.use_configuration(changed).await.unwrap();
+    assert_eq!(bound.configuration().await.unwrap().as_ref(), accepted.as_ref());
+    assert_ne!(base.instance("fixture").await.unwrap(), bound.instance("fixture").await.unwrap());
+    bound.close().await.unwrap();
+    let before = base.report_versions().await.unwrap();
+    let peer = HostJournal::open(base.config().await.unwrap()).await.unwrap();
+    let id = entry.required("record").unwrap().required("deploymentId").unwrap().as_str().unwrap();
+    let advanced = peer.advance(&id, "prepared", "checking", empty()).await.unwrap();
+    let after = base.report_versions().await.unwrap();
+    assert!(after.host > before.host && after.deployments > before.deployments);
+    let heads = base.deployment_queue().await.unwrap();
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads[0].operation_id, "shared-original");
+    assert_eq!(heads[0].deployment_id, id);
+    assert_eq!(heads[0].phase, "checking");
+    assert!(!heads[0].exclusive);
+    let (revision, records) = base.deployment_report().await.unwrap();
+    assert_eq!(revision, after.deployments);
+    assert_json(&records.as_array().unwrap()[0], advanced.required("record").unwrap());
+    peer.close().await.unwrap();
+    base.close().await.unwrap();
+}
 struct FixedClock;
 impl Clock for FixedClock {
     fn utc_millis(&self) -> i64 {

@@ -6,7 +6,7 @@ use ivy_sdk::service::ServiceFuture;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
-pub type Reload = Arc<dyn Fn() -> ServiceFuture<IvyJson> + Send + Sync>;
+pub type Reload = Arc<dyn Fn() -> ServiceFuture<Arc<IvyJson>> + Send + Sync>;
 
 pub(crate) struct Configuration {
     pub path: PathBuf,
@@ -19,7 +19,7 @@ pub(crate) struct Configuration {
     pub source: Mutex<Option<IvyJson>>,
 }
 impl Configuration {
-    async fn apply(&self, next: IvyJson) -> IvyResult<IvyJson> {
+    async fn apply(&self, next: IvyJson) -> IvyResult<Arc<IvyJson>> {
         self.admission.check()?;
         if next.get("hostId") != Some(&self.host_id) {
             return Err(IvyError::new(
@@ -27,21 +27,22 @@ impl Configuration {
                 "Reloaded host configuration belongs to another host.",
             ));
         }
-        self.journal.use_configuration(next.clone()).await?;
+        self.journal.use_configuration(next).await?;
+        let next = self.journal.configuration().await?;
         self.admission.check()?;
         self.owners
             .lock()
             .await
-            .reconcile(ivy_host_runtime::native_plan::host_os(), &next)
+            .reconcile(ivy_host_runtime::native_plan::host_os(), next.clone())
             .await?;
         Ok(next)
     }
-    async fn reload(&self, validate_unchanged: bool) -> IvyResult<IvyJson> {
+    async fn reload(&self, validate_unchanged: bool) -> IvyResult<Arc<IvyJson>> {
         let mut source = self.source.lock().await;
         self.admission.check()?;
         let input = config::json_file(self.path.clone(), config::CONFIGURATION_BYTES).await?;
         if !validate_unchanged && source.as_ref() == Some(&input) {
-            return self.journal.config().await;
+            return self.journal.configuration().await;
         }
         let next = checked_host_config(input.clone(), self.path.clone()).await?;
         let next = self.apply(next).await?;

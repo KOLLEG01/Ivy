@@ -19,6 +19,7 @@ pub(super) const METHODS: &[&str] = &[
     "contracts.list",
     "contracts.summaries",
     "hosts.observations",
+    "hosts.configurationRevisions",
     "hosts.list",
     "serviceNodes.list",
     "serviceNodes.get",
@@ -148,6 +149,7 @@ pub(super) fn handle(
         "hosts.observations" => call.registry.observation_page(
             call.store, params, call.runtime, (call.clock)(),
         ),
+        "hosts.configurationRevisions" => call.registry.configuration_revisions(call.store, params),
         "hosts.list" => call.registry.host_page(call.store, params),
         "serviceNodes.list" => call.registry.node_page(
             call.store, params, call.runtime, (call.clock)(),
@@ -247,3 +249,6 @@ fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult
 #[cfg(test)]
 #[path = "../../../../tests/rust/hive_catalog_reads.rs"]
 mod read_tests;
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive-host-configuration-revisions.rs"]
+mod configuration_revision_tests;

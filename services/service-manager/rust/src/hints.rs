@@ -13,20 +13,29 @@ pub async fn desired_subscription(
 ) -> IvyResult<(IvyJson, IvyJson, IvyJson)> {
     let catalog = connection
         .request(
-            "packages.catalog",
-            IvyJson::object([("after", IvyJson::Number(0.0)), ("includeUis", true.into())]),
+            "objects.query",
+            IvyJson::object([
+                ("contractKey", "ivy/package-catalog".into()),
+                ("select", IvyJson::Array(vec!["object.id".into()])),
+                ("limit", 2.0.into()),
+            ]),
             RequestOptions::default(),
         )
         .await?;
     let configuration = connection
         .request(
-            "hostConfigurations.get",
-            IvyJson::object([("hostId", host_id)]),
+            "objects.query",
+            IvyJson::object([
+                ("contractKey", "ivy/host-configuration".into()),
+                ("where", IvyJson::object([("op", "eq".into()), ("field", "data:/hostId".into()), ("value", host_id)])),
+                ("select", IvyJson::Array(vec!["object.id".into()])),
+                ("limit", 2.0.into()),
+            ]),
             RequestOptions::default(),
         )
         .await?;
-    let configuration_id = configuration.required("objectId")?.clone();
-    let catalog_id = catalog.required("objectId")?.clone();
+    let configuration_id = single_object_id(&configuration)?;
+    let catalog_id = single_object_id(&catalog)?;
     let joined = format!("{}:{}", configuration_id.as_str()?, catalog_id.as_str()?);
     let digest = ivy_contracts::hash::digest(joined);
     let subscription = IvyJson::object([
@@ -44,6 +53,13 @@ pub async fn desired_subscription(
     ]);
     Ok((subscription, configuration_id, catalog_id))
 }
+fn single_object_id(page: &IvyJson) -> IvyResult<IvyJson> {
+    let items = page.required("items")?.as_array().ok_or_else(IvyError::internal)?;
+    if items.len() != 1 || page.get("nextCursor").is_some_and(|v| !v.is_null()) {
+        return Err(IvyError::new("invalid_response", "Desired state must identify one authoritative object."));
+    }
+    Ok(items[0].required("objectId")?.clone())
+}
 
 pub async fn persist_hint(
     path: PathBuf,
@@ -58,40 +74,49 @@ pub async fn persist_hint(
     Ok(())
 }
 
-/// Start after reports have reconciled. The SDK acknowledges only after the
-/// atomic write returns; a failed consumer retires just its own connection.
+/// The subscription is advisory and recovers independently of host tools.
+/// HostExecutor's periodic authoritative read also catches missed hints.
 pub fn consume_desired(
     connection: ServiceConnection,
     runtime_root: PathBuf,
-    subscription: IvyJson,
-    configuration_id: IvyJson,
-    catalog_id: IvyJson,
+    host_id: IvyJson,
+    admission: crate::connection::Admission,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let persist = Arc::new(move |batch: IvyJson, _signal| {
-            let path = runtime_root.join("desired-state-hint.json");
-            let configuration_id = configuration_id.clone();
-            let catalog_id = catalog_id.clone();
-            Box::pin(async move {
-                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                persist_hint(path, &batch, &configuration_id, &catalog_id, &now).await
-            }) as ivy_sdk::service::ServiceFuture<()>
-        });
-        if consume_events(
-            &connection,
-            subscription,
-            persist,
-            ConsumeEventsOptions {
-                poll: Duration::from_secs(60),
-                on_failure: None,
-            },
-        )
-        .await
-        .is_err()
-            && !connection.signal().is_cancelled()
-        {
-            connection.close();
-        }
+        let _ = admission.run(Box::pin(async move {
+            let signal = connection.signal();
+            while !signal.is_cancelled() {
+                let attempt = async {
+                    let (subscription, configuration_id, catalog_id) =
+                        desired_subscription(&connection, host_id.clone()).await?;
+                    let runtime_root = runtime_root.clone();
+                    let persist = Arc::new(move |batch: IvyJson, _signal| {
+                        let path = runtime_root.join("desired-state-hint.json");
+                        let configuration_id = configuration_id.clone();
+                        let catalog_id = catalog_id.clone();
+                        Box::pin(async move {
+                            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                            persist_hint(path, &batch, &configuration_id, &catalog_id, &now).await
+                        }) as ivy_sdk::service::ServiceFuture<()>
+                    });
+                    consume_events(
+                        &connection,
+                        subscription,
+                        persist,
+                        ConsumeEventsOptions {
+                            poll: Duration::from_secs(60),
+                            on_failure: None,
+                        },
+                    ).await
+                }.await;
+                if attempt.is_ok() || signal.is_cancelled() { break; }
+                tokio::select! {
+                    _ = signal.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => (),
+                }
+            }
+            Ok(())
+        })).await;
     })
 }
 

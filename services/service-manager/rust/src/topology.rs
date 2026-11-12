@@ -1,6 +1,6 @@
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::{node_runtime::NodeRuntime, runtime_owner::RuntimeOwner};
-use std::path::PathBuf;
+use ivy_host_runtime::{journal::HostJournal, node_runtime::NodeRuntime, runtime_owner::RuntimeOwner};
+use std::{path::PathBuf, sync::Arc};
 
 /// Construction order is retained for reverse cleanup. Existing owners retain
 /// accepted target policy and never restart for unrelated topology edits.
@@ -8,28 +8,31 @@ pub struct Owners {
     owners: Vec<(JsString, RuntimeOwner)>,
     bootstrap_root: PathBuf,
     node: Option<NodeRuntime>,
+    journal: HostJournal,
     closed: bool,
 }
 impl Owners {
-    pub fn new(bootstrap_root: PathBuf, node: impl Into<Option<NodeRuntime>>) -> Self {
+    pub fn new(bootstrap_root: PathBuf, node: impl Into<Option<NodeRuntime>>, journal: HostJournal) -> Self {
         Self {
             owners: Vec::new(),
             bootstrap_root,
             node: node.into(),
+            journal,
             closed: false,
         }
     }
     pub fn ids(&self) -> Vec<JsString> {
         self.owners.iter().map(|(id, _)| id.clone()).collect()
     }
-    pub async fn reconcile(&mut self, platform: &str, accepted: &IvyJson) -> IvyResult<()> {
+    pub async fn reconcile(&mut self, platform: &str, accepted: Arc<IvyJson>) -> IvyResult<()> {
         if self.closed {
             return Err(IvyError::new(
                 "service_unavailable",
                 "ServiceManager owner admission is stopped.",
             ));
         }
-        let desired = owner_ids(platform, accepted)?;
+        let desired = owner_ids(platform, &accepted)?;
+        let journal = self.journal.bind(accepted).await?;
         let mut removed = Vec::new();
         self.owners.retain(|(id, owner)| {
             if desired.contains(id) {
@@ -50,8 +53,8 @@ impl Owners {
             .iter()
             .filter(|id| !self.owners.iter().any(|(current, _)| current == *id))
         {
-            match RuntimeOwner::for_host(
-                accepted.clone(),
+            match RuntimeOwner::for_journal(
+                journal.clone(),
                 id.to_utf8()?,
                 self.bootstrap_root.clone(),
                 self.node.clone(),
@@ -121,27 +124,4 @@ pub fn owner_ids(platform: &str, configuration: &IvyJson) -> IvyResult<Vec<JsStr
             )),
         })
         .collect()
-}
-
-pub struct Changes {
-    pub added: Vec<JsString>,
-    pub removed: Vec<JsString>,
-}
-
-/// Existing owners remain alive. Configuration refresh must not tear down an
-/// unrelated child or replace its accepted target settings with desired settings.
-pub fn changes(current: &[JsString], desired: &[JsString]) -> Changes {
-    Changes {
-        added: desired
-            .iter()
-            .filter(|id| !current.contains(id))
-            .cloned()
-            .collect(),
-        removed: current
-            .iter()
-            .rev()
-            .filter(|id| !desired.contains(id))
-            .cloned()
-            .collect(),
-    }
 }

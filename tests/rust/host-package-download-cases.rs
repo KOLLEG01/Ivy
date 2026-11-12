@@ -1,5 +1,44 @@
 use super::*;
 
+#[tokio::test]
+async fn catalog_receive_enforces_the_byte_limit_with_and_without_a_length() {
+    use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
+    let maximum = package_validation::CATALOG_BYTES;
+    for (mode, total, allowed) in [("length", maximum, true), ("declared", maximum + 1, false), ("chunked", maximum + 1, false)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let sender = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 { return; }
+                request.extend_from_slice(&chunk[..count]);
+                assert!(request.len() < 8192);
+            }
+            let header = if mode == "chunked" { "Transfer-Encoding: chunked".to_owned() } else { format!("Content-Length: {total}") };
+            socket.write_all(format!("HTTP/1.1 200 OK\r\n{header}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            if mode == "declared" { return; }
+            let mut sent = 0;
+            while sent < total {
+                let size = (total - sent).min(16384);
+                let mut chunk = vec![b' '; size];
+                if sent == 0 { chunk[..2].copy_from_slice(b"{}"); }
+                if mode == "chunked" && socket.write_all(format!("{size:x}\r\n").as_bytes()).await.is_err() { return; }
+                if socket.write_all(&chunk).await.is_err() { return; }
+                if mode == "chunked" && socket.write_all(b"\r\n").await.is_err() { return; }
+                sent += size;
+            }
+            if mode == "chunked" { let _ = socket.write_all(b"0\r\n\r\n").await; }
+        });
+        let result = client().catalog(base, "fixture-credential".into(), 0.0).await;
+        if allowed { assert_json_eq(&result.unwrap().unwrap(), &empty()); }
+        else { assert_eq!(result.unwrap_err().code, "limit_exceeded", "{mode}"); }
+        sender.await.unwrap();
+    }
+}
+
 struct Server {
     base: String,
     requests: Arc<Mutex<Vec<String>>>,

@@ -50,10 +50,46 @@ struct Handles {
     unit: Option<Unit>,
 }
 #[derive(Default)]
-struct Resources {
-    loaded: bool,
-    value: Option<IvyJson>,
+struct Resources(Option<Option<IvyJson>>);
+impl Resources {
+    async fn scope(&mut self, platform: &str, config: &IvyJson) -> IvyResult<Option<IvyJson>> {
+        if let Some(value) = &self.0 {
+            return Ok(value.clone());
+        }
+        let value = if platform == "linux" {
+            let identity = linux_resources::installation_identity(config)?;
+            let path = config::path_value(config.required("runtimeRoot")?)?
+                .join("bootstrap")
+                .join(format!("{identity}.json"));
+            if let Some(plan) = config::json_file_if_present(path, config::CONFIGURATION_BYTES).await? {
+                validate_host("BootstrapPlan", &plan)?;
+                require(
+                    plan.get("installationId") == Some(&IvyJson::from(identity.clone()))
+                        && plan.get("hostId") == config.get("hostId")
+                        && plan.get("runtimeRoot") == config.get("runtimeRoot"),
+                    "target_conflict",
+                    "The retained Linux bootstrap plan belongs to another installation.",
+                )?;
+                let scope = selected(&plan, "linuxResources").cloned();
+                if let Some(scope) = &scope {
+                    linux_resources::validate_linux_resource_scope(scope, Some(&identity))?;
+                }
+                scope
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // Errors leave the cache unread, including failures after decoding.
+        self.0 = Some(value.clone());
+        Ok(value)
+    }
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/rust/host-resource-cache.rs"]
+mod resource_cache_tests;
 
 /// Production host effects for durable activation. Each instance has its own
 /// observation lock; an ordinary lane never borrows another lane's config.
@@ -122,35 +158,7 @@ impl NativeActivationRuntime {
             .clone())
     }
     async fn resource_scope(&self, c: &OperationContext) -> IvyResult<Option<IvyJson>> {
-        let mut state = self.resources.lock().await;
-        if state.loaded {
-            return Ok(state.value.clone());
-        }
-        state.loaded = true;
-        if self.platform != "linux" {
-            return Ok(None);
-        }
-        let identity = linux_resources::installation_identity(&c.config)?;
-        let path = config::path_value(c.config.required("runtimeRoot")?)?
-            .join("bootstrap")
-            .join(format!("{identity}.json"));
-        let Some(value) = config::json_file_if_present(path, config::CONFIGURATION_BYTES).await?
-        else {
-            return Ok(None);
-        };
-        validate_host("BootstrapPlan", &value)?;
-        require(
-            value.get("installationId") == Some(&IvyJson::from(identity.clone()))
-                && value.get("hostId") == c.config.get("hostId")
-                && value.get("runtimeRoot") == c.config.get("runtimeRoot"),
-            "target_conflict",
-            "The retained Linux bootstrap plan belongs to another installation.",
-        )?;
-        state.value = selected(&value, "linuxResources").cloned();
-        if let Some(scope) = &state.value {
-            linux_resources::validate_linux_resource_scope(scope, Some(&identity))?;
-        }
-        Ok(state.value.clone())
+        self.resources.lock().await.scope(&self.platform, &c.config).await
     }
     async fn observation(
         &self,
@@ -261,7 +269,7 @@ impl ActivationRuntime for NativeActivationRuntime {
             crate::prepare::prepare_candidate(
                 snapshot.clone(),
                 component.into(),
-                c.config.clone(),
+                (*c.config).clone(),
                 self.bootstrap_root.clone(),
                 self.preparation.clone(),
             )
@@ -335,8 +343,8 @@ impl ActivationRuntime for NativeActivationRuntime {
                     {
                         return Ok(());
                     }
-                    let owner = RuntimeOwner::for_host_with_launcher(
-                        c.config.clone(),
+                    let owner = RuntimeOwner::for_journal_with_launcher(
+                        c.journal.clone(),
                         c.instance_id.clone(),
                         self.bootstrap_root.clone(),
                         self.preparation.node.clone(),

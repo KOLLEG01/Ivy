@@ -135,7 +135,7 @@ impl Manager {
         };
         let health = HealthReporter::new(health_file.clone());
         let admission = Admission::default();
-        let owners = Arc::new(Mutex::new(Owners::new(bootstrap_root.clone(), node)));
+        let owners = Arc::new(Mutex::new(Owners::new(bootstrap_root.clone(), node, journal.clone())));
         let configuration = Arc::new(Configuration {
             path: to_native(
                 source
@@ -156,7 +156,7 @@ impl Manager {
             &config,
             journal.clone(),
             health.clone(),
-            crate::handlers::mutations(reload.clone(), bootstrap_root),
+            crate::handlers::mutations(reload.clone(), bootstrap_root, journal.clone()),
             admission.clone(),
             refresh.clone(),
         );
@@ -212,7 +212,7 @@ impl Manager {
             owners
                 .lock()
                 .await
-                .reconcile(ivy_host_runtime::native_plan::host_os(), &accepted)
+                .reconcile(ivy_host_runtime::native_plan::host_os(), journal.configuration().await?)
                 .await?;
             health
                 .write(false, None, "Connecting and reconciling host state.".into())

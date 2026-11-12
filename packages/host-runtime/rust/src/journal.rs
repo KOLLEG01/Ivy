@@ -4,7 +4,7 @@ use crate::{IvyError, IvyJson, IvyResult, accepted_configuration::{installation_
 use ivy_contracts::{JsString, core_schema::{validate_host, validate_shared}, hash::hash_json, json};
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use ivy_store::{rusqlite::{Connection, OptionalExtension, Params, params}, sqlite};
-use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::{BTreeMap, BTreeSet}, fs, ops::{Deref, DerefMut}, path::PathBuf, sync::{Arc, Mutex, Weak}, time::Duration};
 #[path = "journal_policy_import.rs"]
 mod policy_import_records;
 
@@ -24,6 +24,22 @@ CREATE INDEX IF NOT EXISTS candidates_by_build ON candidates(component_id,build_
 CREATE TABLE IF NOT EXISTS installed(instance_id TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS observations(instance_id TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS runtime_targets(instance_id TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS report_versions(kind TEXT PRIMARY KEY,revision INTEGER NOT NULL) STRICT;
+INSERT OR IGNORE INTO report_versions VALUES ('host',1),('deployments',1);
+CREATE TRIGGER IF NOT EXISTS report_operations_insert AFTER INSERT ON operations BEGIN UPDATE report_versions SET revision=revision+1; END;
+CREATE TRIGGER IF NOT EXISTS report_operations_update AFTER UPDATE ON operations BEGIN UPDATE report_versions SET revision=revision+1; END;
+CREATE TRIGGER IF NOT EXISTS report_operations_delete AFTER DELETE ON operations BEGIN UPDATE report_versions SET revision=revision+1; END;
+CREATE TRIGGER IF NOT EXISTS report_installed_insert AFTER INSERT ON installed BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_installed_update AFTER UPDATE ON installed BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_installed_delete AFTER DELETE ON installed BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_targets_insert AFTER INSERT ON runtime_targets BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_targets_update AFTER UPDATE ON runtime_targets BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_targets_delete AFTER DELETE ON runtime_targets BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_observations_insert AFTER INSERT ON observations BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_observations_update AFTER UPDATE ON observations BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_observations_delete AFTER DELETE ON observations BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_retention_insert AFTER INSERT ON meta WHEN NEW.key='storage-retention' BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
+CREATE TRIGGER IF NOT EXISTS report_retention_update AFTER UPDATE ON meta WHEN NEW.key='storage-retention' BEGIN UPDATE report_versions SET revision=revision+1 WHERE kind='host'; END;
 PRAGMA user_version=1; COMMIT;";
 
 fn internal<T>(result: Result<T, impl std::fmt::Debug>) -> IvyResult<T> { result.map_err(|_| IvyError::internal()) }
@@ -63,10 +79,20 @@ pub(crate) fn bootstrap_launch_id_js(plan: &IvyJson, instance_id: &JsString) -> 
 
 pub use crate::executor_lock::ExecutorLock;
 
-#[derive(Clone, Copy)]
-pub struct HistoryLimits { pub count: usize, pub bytes: usize }
-impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
-struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, storage_space: Option<(i64, IvyJson)>, wake: Arc<std::sync::atomic::AtomicBool>, wake_path: PathBuf }
+struct JournalState {
+    db: Connection,
+    config: Arc<IvyJson>,
+    configurations: BTreeMap<PathBuf, Weak<IvyJson>>,
+    clock: Arc<dyn Clock>,
+    storage_space: Option<(i64, IvyJson)>,
+    wake: Arc<std::sync::atomic::AtomicBool>,
+    wake_path: PathBuf,
+}
+/// A call borrows the connection with its own immutable configuration binding.
+/// Updating the root handle cannot rebind a running operation or process owner.
+struct State<'a> { shared: &'a mut JournalState, config: Arc<IvyJson> }
+impl Deref for State<'_> { type Target = JournalState; fn deref(&self) -> &JournalState { self.shared } }
+impl DerefMut for State<'_> { fn deref_mut(&mut self) -> &mut JournalState { self.shared } }
 
 /// A replaceable wake hint, never an alternative source of deployment state.
 pub fn change_path(config: &IvyJson) -> IvyResult<PathBuf> { Ok(path(config.required("runtimeRoot")?)?.join("runtime-change.json")) }
@@ -75,25 +101,35 @@ struct RetentionIds { seen:BTreeSet<String>, order:Vec<String> }
 impl RetentionIds {
     fn insert(&mut self,id:String) { if self.seen.insert(id.clone()){self.order.push(id);} }
 }
-/// Clones share one connection and configuration. Call `close` before releasing
-/// the final handle when shutdown must wait for all journal work to finish.
+#[derive(Clone, Debug)]
+pub struct DeploymentHead {
+    pub operation_id: String,
+    pub deployment_id: String,
+    pub instance_id: String,
+    pub phase: String,
+    pub exclusive: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReportVersions { pub host: i64, pub deployments: i64 }
+/// Clones share one connection. Bound handles retain an accepted configuration;
+/// only the root handle closes the connection after all its work has drained.
 #[derive(Clone)]
-pub struct HostJournal { state: Arc<Mutex<Option<State>>> }
+pub struct HostJournal { state: Arc<Mutex<Option<JournalState>>>, binding: Option<Arc<IvyJson>> }
 impl HostJournal {
     pub async fn open(config: IvyJson) -> IvyResult<Self> { Self::open_with_clock(config, Arc::new(SystemClock)).await }
     pub async fn open_with_clock(config: IvyJson, clock: Arc<dyn Clock>) -> IvyResult<Self> {
-        Self::open_with_options(config, HistoryLimits::default(), clock).await
+        let state = internal(tokio::task::spawn_blocking(move || State::open(config, clock)).await)??;
+        Ok(Self { state: Arc::new(Mutex::new(Some(state))), binding: None })
     }
-    pub async fn open_with_options(config: IvyJson, history_limits: HistoryLimits, clock: Arc<dyn Clock>) -> IvyResult<Self> {
-        let state = internal(tokio::task::spawn_blocking(move || State::open(config, clock, history_limits)).await)??;
-        Ok(Self { state: Arc::new(Mutex::new(Some(state))) })
-    }
-    async fn with<T: Send + 'static>(&self, work: impl FnOnce(&mut State) -> IvyResult<T> + Send + 'static) -> IvyResult<T> {
+    async fn with<T: Send + 'static>(&self, work: impl FnOnce(&mut State<'_>) -> IvyResult<T> + Send + 'static) -> IvyResult<T> {
         let state = self.state.clone();
+        let binding = self.binding.clone();
         internal(tokio::task::spawn_blocking(move || {
             let mut state = internal(state.lock())?;
-            let state = state.as_mut().ok_or_else(IvyError::internal)?;
-            let result = work(state);
+            let shared = state.as_mut().ok_or_else(IvyError::internal)?;
+            let config = binding.unwrap_or_else(|| shared.config.clone());
+            let mut state = State { shared, config };
+            let result = work(&mut state);
             // Publish only after the outer transaction ended. SQLite hooks also
             // see rolled-back changes; an extra hint is harmless. Heartbeat and
             // observation writes deliberately never feed back into this wakeup.
@@ -106,6 +142,7 @@ impl HostJournal {
         }).await)?
     }
     pub async fn close(&self) -> IvyResult<()> {
+        if self.binding.is_some() { return Ok(()); }
         let state = self.state.clone();
         internal(tokio::task::spawn_blocking(move || { internal(state.lock())?.take(); Ok(()) }).await)?
     }
@@ -120,18 +157,46 @@ impl HostJournal {
     pub(crate) async fn rollback_maintenance(&self) -> IvyResult<()> {
         self.with(|s| if s.db.is_autocommit() { Ok(()) } else { internal(s.db.execute_batch("ROLLBACK")) }).await
     }
-    pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok(s.config.clone())).await }
+    pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok((*s.config).clone())).await }
+    pub async fn configuration(&self) -> IvyResult<Arc<IvyJson>> { self.with(|s| Ok(s.config.clone())).await }
+    pub async fn bind(&self, config: Arc<IvyJson>) -> IvyResult<Self> {
+        let binding = config.clone();
+        self.with(move |s| {
+            same_installation(&s.config, &config)
+        }).await?;
+        Ok(Self { state: self.state.clone(), binding: Some(binding) })
+    }
     pub async fn storage_format(&self) -> IvyResult<f64> {
         self.with(|s| internal(s.db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))).map(|value| value as f64)).await
     }
-    pub async fn accepted_configuration(&self, source: PathBuf) -> IvyResult<IvyJson> { self.with(move |s| read_accepted_configuration(&s.config, &source)).await }
+    pub async fn accepted_configuration(&self, source: PathBuf) -> IvyResult<IvyJson> { self.accepted_configuration_shared(source).await.map(|v| (*v).clone()) }
+    pub async fn accepted_configuration_shared(&self, source: PathBuf) -> IvyResult<Arc<IvyJson>> {
+        self.with(move |s| {
+            let config = read_accepted_configuration(&s.config, &source)?;
+            Ok(s.share_configuration(source, config))
+        }).await
+    }
     /// None needs an explicit one-time policy import before normal ownership.
     /// Present but invalid evidence is always an error, never a fallback.
     pub async fn accepted_target_policy(&self, target: IvyJson) -> IvyResult<Option<IvyJson>> {
         self.with(move |s| s.policy(&target).map(|policy| policy.map(|(_, config)| config))).await
     }
+    pub async fn accepted_target_policy_shared(&self, target: IvyJson) -> IvyResult<Option<Arc<IvyJson>>> {
+        self.with(move |s| {
+            s.policy(&target)?.map(|(source, config)| Ok(s.share_configuration(path(&source)?, config))).transpose()
+        }).await
+    }
     pub async fn use_configuration(&self, config: IvyJson) -> IvyResult<()> {
-        self.with(move |s| { same_installation(&s.config, &config)?; s.transaction(|s| s.identities(&config))?; if s.config != config { s.wake.store(true, std::sync::atomic::Ordering::Release); } s.config = config; Ok(()) }).await
+        require(self.binding.is_none(), "target_conflict", "A bound journal cannot adopt another configuration.")?;
+        self.with(move |s| {
+            same_installation(&s.config, &config)?;
+            s.transaction(|s| s.identities(&config))?;
+            if *s.config != config {
+                s.wake.store(true, std::sync::atomic::Ordering::Release);
+                s.shared.config = Arc::new(config);
+            }
+            Ok(())
+        }).await
     }
     pub async fn configuration_adoption(&self) -> IvyResult<Option<IvyJson>> {
         self.with(|s| s.configuration_adoption()).await
@@ -173,6 +238,34 @@ impl HostJournal {
     }
     pub async fn unfinished(&self) -> IvyResult<Vec<IvyJson>> {
         self.with(|s| s.entries("SELECT entry_json FROM operations WHERE phase NOT IN ('succeeded','rolled_back','failed','needs_attention') AND json_extract(entry_json,'$.configurationHash') IS NULL ORDER BY created_at,deployment_id LIMIT 200", [])).await
+    }
+    pub async fn deployment_queue(&self) -> IvyResult<Vec<DeploymentHead>> {
+        self.with(|s| {
+            let mut query = internal(s.db.prepare("SELECT o.operation_id,o.deployment_id,json_extract(o.entry_json,'$.record.instanceId'),o.phase,
+                o.phase='preparing' OR json_extract(o.entry_json,'$.record.componentId')='host-executor' OR
+                CASE WHEN json_extract(o.entry_json,'$.candidateId') IS NULL THEN json_extract(o.entry_json,'$.record.componentId')='hive'
+                     ELSE json_extract(c.manifest_json,'$.kind')='hive' END
+                FROM operations o LEFT JOIN candidates c ON c.candidate_id=json_extract(o.entry_json,'$.candidateId')
+                WHERE o.phase NOT IN ('succeeded','rolled_back','failed','needs_attention') AND json_extract(o.entry_json,'$.configurationHash') IS NULL
+                ORDER BY o.created_at,o.deployment_id LIMIT 200"))?;
+            let rows = internal(query.query_map([], |row| Ok(DeploymentHead {
+                operation_id: row.get(0)?, deployment_id: row.get(1)?, instance_id: row.get(2)?, phase: row.get(3)?, exclusive: row.get(4)?,
+            })))?;
+            internal(rows.collect())
+        }).await
+    }
+    /// Public records omit accepted configuration, source and rollback payloads.
+    pub async fn deployment_records(&self, unfinished: bool) -> IvyResult<Vec<IvyJson>> {
+        self.with(move |s| s.deployment_records(unfinished)).await
+    }
+    pub async fn report_versions(&self) -> IvyResult<ReportVersions> { self.with(|s| s.report_versions()).await }
+    pub async fn deployment_report(&self) -> IvyResult<(i64, IvyJson)> {
+        self.with(|s| {
+            internal(s.db.execute_batch("BEGIN"))?;
+            let result = (|| Ok((s.report_versions()?.deployments, IvyJson::Array(s.deployment_records(false)?))))();
+            internal(s.db.execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" }))?;
+            result
+        }).await
     }
     pub async fn installed(&self, instance_id: &str) -> IvyResult<Option<IvyJson>> {
         let id = instance_id.to_owned(); self.with(move |s| s.value("SELECT value FROM installed WHERE instance_id=?", &id)).await
@@ -217,7 +310,7 @@ impl HostJournal {
     }
     pub(crate) async fn materialization_snapshot(&self, instance_id: &JsString, candidate_id: &str) -> IvyResult<(IvyJson,IvyJson,IvyJson,IvyJson)> {
         let instance_id=instance_id.clone();let candidate_id=candidate_id.to_owned();
-        self.with(move |s| Ok((s.config.clone(),s.instance_js(&instance_id)?.clone(),s.candidate(&candidate_id)?,s.manifest(&candidate_id)?))).await
+        self.with(move |s| Ok(((*s.config).clone(),s.instance_js(&instance_id)?.clone(),s.candidate(&candidate_id)?,s.manifest(&candidate_id)?))).await
     }
     pub async fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> { self.with(|s| s.retention_candidate_ids()).await }
     pub(crate) async fn retention_candidate_order(&self) -> IvyResult<Vec<String>> { self.with(|s| s.retention_candidate_order()).await }
@@ -340,12 +433,63 @@ impl HostJournal {
                 let snapshot = IvyJson::object([("sequence", IvyJson::Number(sequence)), ("status", status)]);
                 validate_host("ManagementSnapshot", &snapshot)?;
                 internal(s.db.execute("INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params!["hostReportSequence", sequence.to_string()]))?;
+                s.save_meta("hostReportPending", &encoded(&snapshot)?)?;
                 Ok(snapshot)
             })
         }).await
     }
+    pub async fn pending_management_snapshot(&self) -> IvyResult<Option<IvyJson>> {
+        self.with(|s| {
+            let value = s.value("SELECT value FROM meta WHERE key=?", "hostReportPending")?;
+            if let Some(value) = &value { validate_host("ManagementSnapshot", value)?; }
+            Ok(value)
+        }).await
+    }
+    pub async fn acknowledge_management_snapshot(&self, through: u64) -> IvyResult<()> {
+        self.with(move |s| s.transaction(|s| {
+            if let Some(value) = s.value("SELECT value FROM meta WHERE key=?", "hostReportPending")? {
+                if value.required("sequence")?.as_f64().ok_or_else(IvyError::internal)? <= through as f64 {
+                    internal(s.db.execute("DELETE FROM meta WHERE key=?", ["hostReportPending"]))?;
+                }
+            }
+            Ok(())
+        })).await
+    }
 }
-impl State {
+impl State<'_> {
+    fn report_versions(&self) -> IvyResult<ReportVersions> {
+        internal(self.db.query_row("SELECT (SELECT revision FROM report_versions WHERE kind='host'),(SELECT revision FROM report_versions WHERE kind='deployments')", [], |row| Ok(ReportVersions { host: row.get(0)?, deployments: row.get(1)? })))
+    }
+    fn deployment_records(&self, unfinished: bool) -> IvyResult<Vec<IvyJson>> {
+        let sql = if unfinished {
+            "SELECT json_extract(entry_json,'$.record'),json_type(entry_json,'$.configurationHash') IS NOT NULL FROM operations WHERE phase NOT IN ('succeeded','rolled_back','failed','needs_attention') ORDER BY created_at,deployment_id LIMIT 200"
+        } else {
+            "SELECT json_extract(entry_json,'$.record'),json_type(entry_json,'$.configurationHash') IS NOT NULL FROM operations ORDER BY created_at DESC,deployment_id DESC LIMIT 200"
+        };
+        let mut query = internal(self.db.prepare(sql))?;
+        let rows = internal(query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?))))?;
+        rows.map(|row| {
+            let (record, legacy) = internal(row)?;
+            let mut record = decoded(&record)?;
+            validate_shared("DeploymentRecord", &record)?;
+            if legacy && !TERMINAL.contains(&record.required("phase")?.as_str()?.as_str()) {
+                record.insert("phase", "needs_attention".into());
+                record.insert("errorCode", "legacy_activation_requires_reconciliation".into());
+            }
+            Ok(record)
+        }).collect()
+    }
+    fn share_configuration(&mut self, source: PathBuf, config: IvyJson) -> Arc<IvyJson> {
+        // Re-read and validate retained bytes before sharing; a changed file is
+        // never hidden by the immutable-revision cache. Only weak handles stay here.
+        if let Some(prior) = self.configurations.get(&source).and_then(Weak::upgrade) {
+            if *prior == config { return prior; }
+        }
+        self.configurations.retain(|_, value| value.strong_count() != 0);
+        let config = Arc::new(config);
+        if self.configurations.len() < 64 { self.configurations.insert(source, Arc::downgrade(&config)); }
+        config
+    }
     fn now(&self) -> IvyResult<String> {
         Ok(chrono::DateTime::from_timestamp_millis(self.clock.utc_millis()).ok_or_else(IvyError::internal)?.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
     }
@@ -447,7 +591,7 @@ impl State {
         require(values.len() == 1, if values.is_empty() { "not_found" } else { "ambiguous_candidate" }, "The retained build must identify one exact local candidate.")?;
         normalize_candidate(&decoded(&values[0])?)
     }
-    fn open(config: IvyJson, clock: Arc<dyn Clock>, _history_limits: HistoryLimits) -> IvyResult<Self> {
+    fn open(config: IvyJson, clock: Arc<dyn Clock>) -> IvyResult<JournalState> {
         validate_host("HostConfig", &config)?;
         let root = path(config.required("runtimeRoot")?)?;
         internal(fs::create_dir_all(&root))?;
@@ -458,7 +602,8 @@ impl State {
         internal(db.execute_batch(SCHEMA))?;
         let wake_path = change_path(&config)?;
         let wake = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let state = Self { db, config, clock, storage_space: None, wake: wake.clone(), wake_path };
+        let mut shared = JournalState { db, config: Arc::new(config), configurations: BTreeMap::new(), clock, storage_space: None, wake: wake.clone(), wake_path };
+        let state = State { config: shared.config.clone(), shared: &mut shared };
         state.transaction(|s| {
             let host = s.config.required("hostId")?.as_str()?;
             require(s.text("SELECT value FROM meta WHERE key=?", "hostId")?.is_none_or(|v| v == host), "target_conflict", "A host journal cannot be reused for another host identity.")?;
@@ -487,7 +632,8 @@ impl State {
                 wake.store(true, std::sync::atomic::Ordering::Release);
             }
         })))?;
-        Ok(state)
+        drop(state);
+        Ok(shared)
     }
     fn transaction<T>(&self, work: impl FnOnce(&Self) -> IvyResult<T>) -> IvyResult<T> {
         internal(self.db.execute_batch("BEGIN IMMEDIATE"))?;
@@ -652,7 +798,7 @@ impl State {
             };
             value.insert("message", message); instances.push(value);
         }
-        let unfinished = self.entries("SELECT entry_json FROM operations WHERE phase NOT IN ('succeeded','rolled_back','failed','needs_attention') ORDER BY created_at,deployment_id LIMIT 200", [])?.into_iter().map(|v| v.required("record").cloned()).collect::<IvyResult<Vec<_>>>()?;
+        let unfinished = self.deployment_records(true)?;
         let mut status = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("hostId", self.config.required("hostId")?.clone()), ("observedAt", now.into()), ("executor", executor.cloned().unwrap_or(IvyJson::Null)), ("instances", IvyJson::Array(instances)), ("unfinished", IvyJson::Array(unfinished))]);
         if let Some(retention) = retention { status.insert("storageRetention", retention); }
         let at = self.clock.utc_millis();
@@ -671,13 +817,6 @@ fn normalize_candidate(value: &IvyJson) -> IvyResult<IvyJson> {
 }
 
 fn completed(value: &IvyJson) -> bool { ["succeeded", "rolled_back"].iter().any(|phase| value == &IvyJson::from(*phase)) }
-fn protect_references(ids: &mut BTreeSet<String>, entry: &IvyJson) {
-    let mut values = vec![entry];
-    while let Some(value) = values.pop() { match value {
-        IvyJson::String(value) => { if let Ok(value) = value.to_utf8() { ids.insert(value); } },
-        IvyJson::Array(value) => values.extend(value), IvyJson::Object(value) => values.extend(value.iter().map(|(_, v)| v)), _ => (),
-    } }
-}
 fn transition_allowed(previous: &str, next: &str) -> bool {
     if previous == next { return !TERMINAL.contains(&previous); }
     let allowed: &[&str] = match previous {
@@ -691,7 +830,7 @@ fn transition_allowed(previous: &str, next: &str) -> bool {
     };
     allowed.contains(&next)
 }
-impl State {
+impl State<'_> {
     fn accept(&self, request: &IvyJson, source_snapshot: Option<&IvyJson>) -> IvyResult<IvyJson> {
         validate_host("LocalRequest", request)?;
         let request_hash = hash_json(request)?;
@@ -815,41 +954,51 @@ impl State {
         let mut protected = BTreeSet::from([protected_operation.to_owned()]);
         let mut latest = BTreeSet::new(); let mut successful = BTreeSet::new();
         let observations = self.current_owner_observations()?;
-        let mut statement = internal(self.db.prepare("SELECT operation_id,entry_json FROM operations ORDER BY rowid DESC"))?;
-        let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+        let mut statement = internal(self.db.prepare("SELECT operation_id,deployment_id,request_hash,json_extract(entry_json,'$.record.instanceId'),
+            CASE WHEN json_type(entry_json,'$.configurationHash') IS NOT NULL AND phase NOT IN ('succeeded','rolled_back','failed','needs_attention') THEN 'needs_attention' ELSE phase END,
+            json_extract(entry_json,'$.record.updatedAt') FROM operations ORDER BY rowid DESC"))?;
+        let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))))?;
         let rows = internal(rows.collect::<Result<Vec<_>, _>>())?;
+        let configured = self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter()
+            .map(|i| i.required("instanceId")?.as_str()).collect::<IvyResult<BTreeSet<_>>>()?;
         if let Some(adoption) = self.configuration_adoption()? {
             for action in adoption.required("actions")?.as_array().ok_or_else(IvyError::internal)? { protected.insert(action.required("operationId")?.as_str()?); }
         }
-        for (operation, text) in &rows {
-            let entry = self.normalize_entry(decoded(text)?)?; let record = entry.required("record")?;
-            let instance = record.required("instanceId")?.as_str()?; let phase = record.required("phase")?;
-            if !TERMINAL.iter().any(|p| phase == &IvyJson::from(*p)) {
-                protect_references(&mut protected, &entry);
+        for (operation, _, _, instance, phase, updated_at) in &rows {
+            if !TERMINAL.contains(&phase.as_str()) || phase == "needs_attention" {
+                self.protect_references(&mut protected, operation)?;
                 continue;
             }
             let installed = self.value("SELECT value FROM installed WHERE instance_id=?", &instance)?.unwrap_or(IvyJson::Null);
-            let configured = self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().any(|i| i.get("instanceId") == record.get("instanceId"));
-            if !configured && installed.is_null() { continue; }
+            if !configured.contains(instance) && installed.is_null() { continue; }
             let observed = field(&observations, &instance);
-            let replaced = field(&installed, "installedAt").as_js_string().zip(field(record, "updatedAt").as_js_string()).is_some_and(|(a,b)| a > b)
+            let replaced = field(&installed, "installedAt").as_str().is_ok_and(|at| at.as_str() > updated_at.as_str())
                 && observed.get("state") == Some(&"ready".into()) && observed.get("candidateId") == installed.get("candidateId")
                 && fresh(field(observed, "observedAt"), self.clock.as_ref());
             if replaced { continue; }
-            if completed(phase) {
-                if !successful.contains(&instance) { protected.insert(operation.clone()); }
+            if ["succeeded", "rolled_back"].contains(&phase.as_str()) {
+                if !successful.contains(instance) { protected.insert(operation.clone()); }
                 successful.insert(instance.clone());
-            } else if !successful.contains(&instance) && !latest.contains(&instance) {
-                protect_references(&mut protected, &entry);
+            } else if !successful.contains(instance) && !latest.contains(instance) {
+                self.protect_references(&mut protected, operation)?;
             }
-            latest.insert(instance);
+            latest.insert(instance.clone());
         }
-        for (operation, text) in rows.iter().rev() {
-            let entry = self.normalize_entry(decoded(text)?)?; let record = entry.required("record")?; let id = record.required("deploymentId")?.as_str()?;
-            if !TERMINAL.iter().any(|p| record.get("phase") == Some(&IvyJson::from(*p))) || protected.contains(operation) || protected.contains(&id) { continue; }
-            self.retire_identity(operation, &record.required("requestHash")?.as_str()?, &id)?;
+        for (operation, id, hash, _, phase, _) in rows.iter().rev() {
+            if !TERMINAL.contains(&phase.as_str()) || protected.contains(operation) || protected.contains(id) { continue; }
+            self.retire_identity(operation, hash, id)?;
             internal(self.db.execute("DELETE FROM operations WHERE operation_id=?", [operation]))?;
         }
+        Ok(())
+    }
+    fn protect_references(&self, ids: &mut BTreeSet<String>, operation: &str) -> IvyResult<()> {
+        // Only strings which name an actual original operation can protect a
+        // history row. Traverse in SQLite without retaining decoded payloads.
+        let mut query = internal(self.db.prepare("SELECT DISTINCT j.atom FROM operations o,json_tree(o.entry_json) j
+            WHERE o.operation_id=? AND j.type='text' AND
+            (EXISTS(SELECT 1 FROM operations r WHERE r.operation_id=j.atom) OR EXISTS(SELECT 1 FROM operations r WHERE r.deployment_id=j.atom))"))?;
+        let rows = internal(query.query_map([operation], |r| r.get::<_,String>(0)))?;
+        for row in rows { ids.insert(internal(row)?); }
         Ok(())
     }
     fn current_owner_observations(&self) -> IvyResult<IvyJson> {

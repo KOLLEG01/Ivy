@@ -644,7 +644,7 @@ async fn deployment_drain_keeps_its_original_owner_past_deadline_and_respects_ca
         journal.save_candidate(candidate, manifest).await.unwrap();
         let context = OperationContext {
             journal,
-            config,
+            config: config.into(),
             instance_id: "fixture".into(),
             cancel: Default::default(),
             clock: clock.clone(),

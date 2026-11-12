@@ -581,6 +581,11 @@ async fn executor_automatically_collects_real_storage_and_resumes_its_daily_sche
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(journal.storage_retention_status().await.unwrap().is_none());
         clock.0.fetch_add(60_000, Ordering::SeqCst);
+        // Advancing the injected wall clock does not wake the native watcher.
+        // Trigger its ordinary reconciliation hint instead of waiting 30 real seconds.
+        ivy_host_runtime::config::atomic_json(runtime.join("runtime-change.json"), J::object([
+            ("schemaVersion", 1.0.into()), ("generation", uuid::Uuid::new_v4().to_string().into()),
+        ])).await.unwrap();
     }
     let first = wait_collection(&journal, None).await;
     assert_eq!(first.get("trigger"), Some(&if low { "storage_pressure" } else { "scheduled" }.into()));
@@ -594,6 +599,9 @@ async fn executor_automatically_collects_real_storage_and_resumes_its_daily_sche
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(journal.storage_retention_status().await.unwrap().unwrap().get("startedAt"), Some(&first_started));
     clock.0.fetch_add(86_400_000, Ordering::SeqCst);
+    ivy_host_runtime::config::atomic_json(runtime.join("runtime-change.json"), J::object([
+        ("schemaVersion", 1.0.into()), ("generation", uuid::Uuid::new_v4().to_string().into()),
+    ])).await.unwrap();
     let second = wait_collection(&journal, Some(first_started)).await;
     assert_eq!(second.get("trigger"), Some(&"scheduled".into()));
     owner.close().await.unwrap(); journal.close().await.unwrap();

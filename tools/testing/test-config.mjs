@@ -134,6 +134,15 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/hive-host-configuration-revisions.rs": {
+    package: "ivy-hive", lib: true, filter: "kernel::catalogs::configuration_revision_tests::",
+  },
+  "tests/rust/service-manager-health.rs": {
+    package: "ivy-service-manager", lib: true, filter: "health::tests::",
+  },
+  "tests/rust/host-resource-cache.rs": {
+    package: "ivy-host-runtime", lib: true, filter: "executor::runtime::resource_cache_tests::",
+  },
   "tests/rust/host-journal-native-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-actions",
@@ -1424,17 +1433,6 @@ export const rustTests = {
   "tests/rust/host-native-plan.rs": {
     "package": "ivy-host-runtime",
     "test": "host-native-plan",
-    "prerequisites": [
-      {
-        "package": "ivy-host-runtime",
-        "bin": "ivy-job",
-        "platform": "win32"
-      }
-    ]
-  },
-  "tests/rust/host-executor-entry.rs": {
-    "package": "ivy-host-executor",
-    "test": "host-executor-entry",
     "prerequisites": [
       {
         "package": "ivy-host-runtime",

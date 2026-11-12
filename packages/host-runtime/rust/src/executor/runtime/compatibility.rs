@@ -37,7 +37,7 @@ impl NativeActivationRuntime {
             None
         };
         service_storage::verify_service_storage(
-            c.config.clone(),
+            (*c.config).clone(),
             c.instance_id.clone().into(),
             plan.clone(),
             running,
@@ -102,7 +102,7 @@ impl NativeActivationRuntime {
         if instance.get("engine") == Some(&"docker".into()) {
             self.docker
                 .verify_container_image(
-                    c.config.clone(),
+                    (*c.config).clone(),
                     instance.clone(),
                     candidate.clone(),
                     manifest.clone(),
@@ -238,7 +238,7 @@ impl NativeActivationRuntime {
                     )?;
                     let state = self
                         .systemd
-                        .inspect_unit(c.config.clone(), unit.clone().into())
+                        .inspect_unit((*c.config).clone(), unit.clone().into())
                         .await?;
                     state.load_state == JsString::from("not-found")
                         && state.active_state == JsString::from("inactive")
@@ -246,7 +246,7 @@ impl NativeActivationRuntime {
                         && state.main_pid.is_none()
                         && self
                             .systemd
-                            .read_unit(c.config.clone(), unit.into())
+                            .read_unit((*c.config).clone(), unit.into())
                             .await?
                             .is_none()
                 } else {
@@ -286,7 +286,7 @@ impl NativeActivationRuntime {
                         )?,
                         artifact_root: root,
                         contracts: contracts.clone(),
-                        host: c.config.clone(),
+                        host: (*c.config).clone(),
                     })
                     .await?;
                 validate_host("StorageInspection", &value)?;

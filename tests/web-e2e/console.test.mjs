@@ -527,12 +527,41 @@ test(
     reapplied.instances[0].credential = "replacement-instance-secret";
     reapplied.instances[0].settings.apiToken = "replacement-api-secret";
     await editor.fill(JSON.stringify(reapplied, null, 2));
+    let acceptedSave = false;
+    const blockedRefreshes = [];
+    let releaseRefreshes;
+    const refreshGate = new Promise(resolve => { releaseRefreshes = resolve; });
+    t.after(() => releaseRefreshes());
+    await f.page.route("**/api/v1/rpc", async route => {
+      const body = route.request().postDataJSON();
+      const calls = Array.isArray(body) ? body : [body];
+      if (calls.some(call => call.method === "hostConfigurations.save")) {
+        const response = await route.fetch();
+        acceptedSave = true;
+        return route.fulfill({ response });
+      }
+      const refreshes = calls.filter(call => ["hostConfigurations.list", "hostConfigurations.history"].includes(call.method));
+      if (acceptedSave && refreshes.length) {
+        blockedRefreshes.push(...refreshes.map(call => call.method));
+        await refreshGate;
+      }
+      return route.continue();
+    });
     await f.page
       .getByRole("button", { name: "Save new revision", exact: true })
       .click();
     await expect(
       f.page.getByText("Saved revision 3.", { exact: true }),
     ).toBeVisible();
+    await expect.poll(() => blockedRefreshes.length).toBeGreaterThan(0);
+    for (const width of [1440, 390]) {
+      await f.page.setViewportSize({ width, height: 900 });
+      await expect(f.page.getByRole("button", { name: "Save new revision", exact: true })).toBeEnabled();
+      assert.ok(await f.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    }
+    await f.page.setViewportSize({ width: 1440, height: 900 });
+    releaseRefreshes();
+    await f.page.unrouteAll({ behavior: "wait" });
     const retained = await f.client.request("hostConfigurations.get", {
       hostId,
     });

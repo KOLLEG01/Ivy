@@ -228,6 +228,12 @@
       "access": "client",
       "mutation": false
     },
+    "hosts.configurationRevisions": {
+      "input": "#/$defs/HostsConfigurationRevisionsParams",
+      "output": "#/$defs/HostsConfigurationRevisionsResult",
+      "access": "client",
+      "mutation": false
+    },
     "hostConfigurations.list": {
       "input": "#/$defs/HostConfigurationsListParams",
       "output": "#/$defs/HostConfigurationsListResult",

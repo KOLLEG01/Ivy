@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    journal::DeploymentHead,
     bootstrap_automatic::{AutomaticBootstrapRuntime, AutomaticBootstrapUpdater},
     bootstrap_restart::BootstrapConfigurationRestarts,
     configuration_updater::{self, ConfigurationUpdater},
@@ -343,7 +344,7 @@ impl HostExecutor {
     }
 }
 struct Active {
-    entry: IvyJson,
+    head: DeploymentHead,
     task: JoinHandle<IvyResult<()>>,
 }
 
@@ -370,7 +371,7 @@ impl StatusWriter {
     async fn write(&self, state: &str) -> IvyResult<()> {
         let _write = self.write.lock().await;
         let snapshot = self.value.lock().map_err(|_| IvyError::internal())?.clone();
-        let host = self.base.config().await?;
+        let host = self.base.configuration().await?;
         let mut code = snapshot
             .configuration_code
             .or(snapshot.package_code)
@@ -433,7 +434,12 @@ impl StatusWriter {
 }
 impl Coordinator {
     async fn reconcile_retained(&self, active: &[Active]) -> IvyResult<()> {
-        let current = self.base.config().await?;
+        let current = self.base.configuration().await?;
+        let manager_owns_processes = ["win32", "darwin"].contains(&crate::native_plan::host_os())
+            && current.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().any(|instance| {
+                instance.get("engine") == Some(&"process".into())
+                    && instance.get("componentId") == Some(&"service-manager".into())
+            });
         for instance in current
             .required("instances")?
             .as_array()
@@ -442,8 +448,10 @@ impl Coordinator {
             let id = text(instance, "instanceId")?;
             if self.options.own_instance_id.as_deref() == Some(id.as_str())
                 || instance.get("componentId") == Some(&"host-executor".into())
+                || manager_owns_processes && instance.get("engine") == Some(&"process".into())
+                    && instance.get("componentId") != Some(&"service-manager".into())
                 || active.iter().any(|lane| {
-                    field(field(&lane.entry, "record"), "instanceId") == &IvyJson::from(id.clone())
+                    lane.head.instance_id == id
                 })
             {
                 continue;
@@ -453,10 +461,10 @@ impl Coordinator {
             };
             let config = self
                 .base
-                .accepted_target_policy(target.clone())
+                .accepted_target_policy_shared(target.clone())
                 .await?
                 .unwrap_or_else(|| current.clone());
-            let journal = HostJournal::open_with_clock(config.clone(), self.clock.clone()).await?;
+            let journal = self.base.bind(config.clone()).await?;
             let context = OperationContext {
                 journal,
                 config,
@@ -465,71 +473,28 @@ impl Coordinator {
                 cancel: self.cancel.clone(),
                 clock: self.clock.clone(),
             };
-            let result = self.runtime.reconcile(&context, Some(target), true).await;
-            let closed = context.journal.close().await;
-            result.and(closed)?;
+            self.runtime.reconcile(&context, Some(target), true).await?;
         }
         Ok(())
     }
-    async fn exclusive(&self, entry: &IvyJson) -> IvyResult<bool> {
-        let record = entry.required("record")?;
-        // Keep short-circuit/error order: source/HostExecutor need no manifest.
-        if field(record, "phase") == &"preparing".into()
-            || field(record, "componentId") == &"host-executor".into()
-        {
-            return Ok(true);
-        }
-        match selected(entry, "candidateId") {
-            Some(candidate) => Ok(
-                field(&self.base.manifest(&candidate.as_str()?).await?, "kind") == &"hive".into(),
-            ),
-            None => Ok(field(record, "componentId") == &"hive".into()),
-        }
-    }
-    async fn selection(&self, queue: &[IvyJson], active: &[Active]) -> IvyResult<Vec<usize>> {
+    fn selection(&self, queue: &[DeploymentHead], active: &[Active]) -> Vec<usize> {
         let mut running = Vec::new();
         for lane in active {
-            let entry = &lane.entry;
-            if self.exclusive(entry).await? {
-                return Ok(Vec::new());
+            if lane.head.exclusive {
+                return Vec::new();
             }
-            running.push((
-                text(entry.required("record")?, "deploymentId")?,
-                text(entry.required("record")?, "instanceId")?,
-                false,
-            ));
+            running.push(scheduler::Deployment { deployment_id: &lane.head.deployment_id, instance_id: &lane.head.instance_id, exclusive: false });
         }
-        fn view(values: &[(String, String, bool)]) -> Vec<scheduler::Deployment<'_>> {
-            values
-                .iter()
-                .map(|(id, instance, exclusive)| scheduler::Deployment {
-                    deployment_id: id,
-                    instance_id: instance,
-                    exclusive: *exclusive,
-                })
-                .collect::<Vec<_>>()
-        }
-        let active_view = view(&running);
-        let mut admission = scheduler::Admission::new(&active_view, 2);
-        let headers = queue
-            .iter()
-            .map(|entry| {
-                Ok((
-                    text(entry.required("record")?, "deploymentId")?,
-                    text(entry.required("record")?, "instanceId")?,
-                ))
-            })
-            .collect::<IvyResult<Vec<_>>>()?;
+        let mut admission = scheduler::Admission::new(&running, 2);
         let mut selected = Vec::new();
-        for (index, (id, instance)) in headers.iter().enumerate() {
-            if admission.ignores(id) {
+        for (index, head) in queue.iter().enumerate() {
+            if admission.ignores(&head.deployment_id) {
                 continue;
             }
-            let exclusive = self.exclusive(&queue[index]).await?;
             if admission.consider(scheduler::Deployment {
-                deployment_id: id,
-                instance_id: instance,
-                exclusive,
+                deployment_id: &head.deployment_id,
+                instance_id: &head.instance_id,
+                exclusive: head.exclusive,
             }) {
                 selected.push(index);
             }
@@ -537,10 +502,10 @@ impl Coordinator {
                 break;
             }
         }
-        Ok(selected)
+        selected
     }
     async fn run(self) -> IvyResult<()> {
-        let host = self.base.config().await?;
+        let host = self.base.configuration().await?;
         let mut events = crate::file_events::FileEvents::new([
             crate::journal::change_path(&host)?,
             config::path_value(host.required("runtimeRoot")?)?.join("desired-state-hint.json"),
@@ -572,7 +537,7 @@ impl Coordinator {
                     self.reconcile_retained(&active).await?;
                 }
                 if self.configuration.is_some() || self.packages.is_some() {
-                    let config=self.base.config().await?;
+                    let config=self.base.configuration().await?;
                     let hint=config::json_file(config::path_value(config.required("runtimeRoot")?)?.join("desired-state-hint.json"),config::CONFIGURATION_BYTES).await.ok();
                     if let Some(hint) = hint.filter(|value| {
                         value.get("schemaVersion") == Some(&IvyJson::Number(1.0))
@@ -602,7 +567,7 @@ impl Coordinator {
                                 Err(error)=>status.configuration_code=Some(error.code_js()),
                             }
                         }
-                        let config=self.base.config().await?;
+                        let config=self.base.configuration().await?;
                         let interval=config.get("configurationUpdates").and_then(|v|v.get("intervalSeconds")).filter(|v|!v.is_null()).and_then(IvyJson::as_f64).unwrap_or(60.0);
                         next_configuration=self.clock.utc_millis() as f64+interval*1000.0;
                     }
@@ -617,7 +582,7 @@ impl Coordinator {
                     }
                 }
                 if let Some((updater,automatic))=&self.packages && self.clock.utc_millis() as f64>=next_package {
-                    let config=self.base.config().await?;
+                    let config=self.base.configuration().await?;
                     next_package=self.clock.utc_millis() as f64+config.required("packageUpdates")?.required("intervalSeconds")?.as_f64().ok_or_else(IvyError::internal)?*1000.0;
                     let result=async {
                         let result=updater.sync().await?;
@@ -633,14 +598,15 @@ impl Coordinator {
                         lane.task.await.map_err(|_|IvyError::internal())??;
                     }else{index+=1;}
                 }
-                let queued=self.base.unfinished().await?;
-                for index in self.selection(&queued,&active).await? {
-                    let entry=queued[index].clone();let base=self.base.clone();let runtime=self.runtime.clone();let options=self.options.clone();let cancel=self.cancel.clone();let clock=self.clock.clone();let input=entry.clone();
-                    let id=text(field(&entry,"record"),"deploymentId")?;
+                let queued=self.base.deployment_queue().await?;
+                for index in self.selection(&queued,&active) {
+                    let head=queued[index].clone();let base=self.base.clone();let runtime=self.runtime.clone();let options=self.options.clone();let cancel=self.cancel.clone();let clock=self.clock.clone();
+                    let input=self.base.get(&head.deployment_id).await?;
+                    let id=head.deployment_id.clone();
                     self.status.value.lock().map_err(|_|IvyError::internal())?.active.push(id.clone());
                     let status=ActiveStatus{value:self.status.value.clone(),id};
                     let task=tokio::spawn(async move{let _status=status;execute_with_clock(base,input,runtime,options,cancel,clock).await});
-                    active.push(Active{entry,task});
+                    active.push(Active{head,task});
                 }
                 let mut delay = if active.is_empty() { events.fallback() } else { std::time::Duration::from_millis(250) };
                 let now = self.clock.utc_millis() as f64;

@@ -105,6 +105,12 @@ service and health commands run their native executables directly.
   not feed the deployment wake hint. Idle reconciliation falls back after 30 seconds
   (500 ms if watching is unavailable). Owned process exits wake supervision directly;
   health-expiry deadlines and five-second heartbeats retain the 15-second freshness boundary.
+- Manager readiness reads the executor independently of advisory subscriptions and reporting.
+  Host changes, deployment revisions and minute storage samples publish on their own triggers.
+  Report signals are sampled together every five seconds so individual health pulses do not
+  repeatedly scan all instances. Timestamp-only pulses do not rebuild public report bodies.
+  Pending host reports retain their original durable sequence and payload until acknowledged
+  or reconciled with a later authoritative report.
 - Validate the complete new config against the fixed installation before atomically replacing
   the local last-known-good file. Invalid/unreachable config leaves the previous file active.
 - Verify Hive's content hash against the supplied configuration, then resolve account defaults
@@ -113,6 +119,9 @@ service and health commands run their native executables directly.
 - Ordinary instance changes use journaled activation; bootstrap-owned processes use their
   separate handoff. Services receive their own generated config and do not reconcile Hive
   HostConfigs independently.
+- Running activations and process owners share immutable accepted configuration revisions
+  through the open host journal. Adoption cannot rebind existing work. A resource-plan read
+  or validation failure remains retryable; only a successful result may cache an absent budget.
 - Process owners reload and validate the selected instance configuration before every launch.
   Windows breakaway is an explicit process-instance setting, never inferred from a component
   name. Component reset manifests may declare one marker inside instance data; the host writes

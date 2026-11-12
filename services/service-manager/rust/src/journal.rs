@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 /// Refresh from the currently accepted local configuration for every observation.
 pub async fn executor(journal: &HostJournal, host_id: &IvyJson) -> IvyResult<Option<IvyJson>> {
-    let configuration = journal.config().await?;
+    let configuration = journal.configuration().await?;
     let root = configuration
         .required("runtimeRoot")?
         .as_js_string()

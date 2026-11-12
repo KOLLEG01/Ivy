@@ -167,14 +167,13 @@ pub fn options(
                 reload().await?;
                 {
                     let mut reports = reports.lock().await;
+                    reports.restore_pending(&journal).await?;
                     reports.reconcile_from(&connection, host_id.clone()).await?;
                     reports
                         .publish_journal(&connection, &journal, &host_id)
                         .await?;
                 }
-                let (subscription, configuration_id, catalog_id) =
-                    crate::hints::desired_subscription(&connection, host_id).await?;
-                let configuration = journal.config().await?;
+                let configuration = journal.configuration().await?;
                 let runtime_root = to_native(
                     configuration
                         .required("runtimeRoot")?
@@ -189,12 +188,12 @@ pub fn options(
                     ));
                 }
                 drop(crate::hints::consume_desired(
-                    connection,
+                    connection.clone(),
                     runtime_root,
-                    subscription,
-                    configuration_id,
-                    catalog_id,
+                    host_id.clone(),
+                    admission.clone(),
                 ));
+                drop(crate::reports::consume_reports(connection, journal, host_id, reports, admission));
                 Ok(())
             }) as ivy_sdk::service::ServiceFuture<()>
         }) as ivy_sdk::service::ConnectionDependency<()>
@@ -225,19 +224,12 @@ pub fn options(
     options.readiness = Some(Arc::new(move |connection| {
         let journal = journal.clone();
         let host_id = host_id.clone();
-        let reports = reports.clone();
         let health = readiness_health.clone();
         let admission = admission.clone();
         let service_node_id = service_node_id.clone();
-        let reload = reload.clone();
         Box::pin(async move {
             admission.check()?;
-            reload().await?;
-            let executor = reports
-                .lock()
-                .await
-                .publish_journal(&connection, &journal, &host_id)
-                .await?;
+            let executor = crate::journal::executor(&journal, &host_id).await?;
             admission.check()?;
             health
                 .readiness(

@@ -32,6 +32,29 @@ fn page_key(source: &str) -> IvyResult<JsString> {
 }
 
 impl Registry {
+    pub(crate) fn configuration_revisions(&self, store: &Store, input: &IvyJson) -> IvyResult<IvyJson> {
+        let requested = input.required("hostIds")?.as_array().ok_or_else(IvyError::internal)?;
+        let keys = IvyJson::Array(requested.iter().map(|id| {
+            id.as_js_string().map(|id| IvyJson::from(text(id))).ok_or_else(IvyError::internal)
+        }).collect::<IvyResult<_>>()?);
+        let mut query = sql(store, store.connection().prepare_cached(
+            "SELECT snapshot_json -> '$.status.hostId',json_extract(snapshot_json,'$.status.executor.configurationRevision')
+             FROM host_reports WHERE host_id IN (SELECT value FROM json_each(?1)) ORDER BY host_id",
+        ))?;
+        let rows = sql(store, query.query_map([encoded(&keys)?], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Option<i64>>(1)?))))?;
+        let mut items = Vec::new();
+        for row in rows {
+            let (host, revision) = sql(store, row)?;
+            let host = parse(&host, 4096).map_err(|_| IvyError::internal())?;
+            if requested.contains(&host) {
+                items.push(IvyJson::object([
+                    ("hostId", host),
+                    ("configurationRevision", revision.map(|v| IvyJson::Number(v as f64)).unwrap_or(IvyJson::Null)),
+                ]));
+            }
+        }
+        Ok(IvyJson::object([("items", IvyJson::Array(items))]))
+    }
     pub(crate) fn observation_page(
         &self, store: &Store, params: &IvyJson, runtime: &dyn Runtime, now: f64,
     ) -> IvyResult<IvyJson> {

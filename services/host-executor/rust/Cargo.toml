@@ -29,11 +29,6 @@ name = "host-cli"
 path = "../../../tests/rust/host-cli.rs"
 
 [[test]]
-name = "host-executor-entry"
-path = "../../../tests/rust/host-executor-entry.rs"
-harness = false
-
-[[test]]
 name = "host-native-coordinator"
 path = "../../../tests/rust/host-native-coordinator.rs"
 harness = false

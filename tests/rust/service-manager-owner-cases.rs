@@ -65,7 +65,7 @@ fn host(root: &Fixture) -> IvyJson {
     ])
 }
 fn resolver(host: &IvyJson) -> TargetPolicyResolver {
-    let host = host.clone();
+    let host = Arc::new(host.clone());
     Arc::new(move |_, _| {
         let host = host.clone();
         Box::pin(async move { Ok(host) })
@@ -162,8 +162,8 @@ async fn owner_topology_preserves_existing_owners_and_adds_disabled_instances() 
     let root = Fixture::new();
     let initial = host(&root);
     let journal = HostJournal::open(initial.clone()).await.unwrap();
-    let mut owners = Owners::new(root.0.clone(), node());
-    owners.reconcile("win32", &initial).await.unwrap();
+    let mut owners = Owners::new(root.0.clone(), node(), journal.clone());
+    owners.reconcile("win32", Arc::new(initial.clone())).await.unwrap();
     let original = observation(&journal, "idle").await;
     let mut updated = initial.clone();
     let mut instances = initial
@@ -175,7 +175,7 @@ async fn owner_topology_preserves_existing_owners_and_adds_disabled_instances() 
     instances.push(json(r#"{"instanceId":"disabled","serviceNodeId":"owner.disabled","componentId":"fixture","engine":"process","enabled":false,"settings":{}}"#));
     updated.insert("instances", IvyJson::Array(instances.clone()));
     journal.use_configuration(updated.clone()).await.unwrap();
-    owners.reconcile("win32", &updated).await.unwrap();
+    owners.reconcile("win32", Arc::new(updated.clone())).await.unwrap();
     assert_eq!(owners.ids(), vec!["fixture".into(), "disabled".into()]);
     assert_eq!(
         journal
@@ -191,7 +191,7 @@ async fn owner_topology_preserves_existing_owners_and_adds_disabled_instances() 
     instances.remove(0);
     updated.insert("instances", IvyJson::Array(instances));
     journal.use_configuration(updated.clone()).await.unwrap();
-    owners.reconcile("win32", &updated).await.unwrap();
+    owners.reconcile("win32", Arc::new(updated.clone())).await.unwrap();
     assert_eq!(owners.ids(), vec!["disabled".into()]);
     let retired = ivy_host_runtime::executor_lock::ExecutorLock::acquire(
         root.0.join("state/owners/fixture"),
@@ -202,7 +202,7 @@ async fn owner_topology_preserves_existing_owners_and_adds_disabled_instances() 
     retired.close().await.unwrap();
     owners.close().await.unwrap();
     assert_eq!(
-        owners.reconcile("win32", &updated).await.unwrap_err().code,
+        owners.reconcile("win32", Arc::new(updated.clone())).await.unwrap_err().code,
         "service_unavailable"
     );
     journal.close().await.unwrap();
@@ -215,8 +215,8 @@ async fn partial_topology_startup_releases_new_locks_and_preserves_existing_owne
     let root = Fixture::new();
     let initial = host(&root);
     let journal = HostJournal::open(initial.clone()).await.unwrap();
-    let mut owners = Owners::new(root.0.clone(), node());
-    owners.reconcile("win32", &initial).await.unwrap();
+    let mut owners = Owners::new(root.0.clone(), node(), journal.clone());
+    owners.reconcile("win32", Arc::new(initial.clone())).await.unwrap();
     let mut updated = initial.clone();
     let mut instances = initial
         .required("instances")
@@ -236,7 +236,7 @@ async fn partial_topology_startup_releases_new_locks_and_preserves_existing_owne
         .await
         .unwrap();
     assert_eq!(
-        owners.reconcile("win32", &updated).await.unwrap_err().code,
+        owners.reconcile("win32", Arc::new(updated.clone())).await.unwrap_err().code,
         "executor_already_running"
     );
     assert_eq!(owners.ids(), vec!["fixture".into()]);

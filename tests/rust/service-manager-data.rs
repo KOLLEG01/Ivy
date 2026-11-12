@@ -44,6 +44,7 @@ async fn mutation_reload_errors_preserve_raw_outcomes_and_admission_order() {
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
     let root = Temp::new();
+    let journal = ivy_host_runtime::journal::HostJournal::open(manager_host(&root)).await.unwrap();
     for value in [
         r#"["unknown"]"#, r#"["completed"]"#, r#"[["not_executed"]]"#,
         r#""not_executed""#, r#""unknown""#, r#""completed""#,
@@ -66,7 +67,7 @@ async fn mutation_reload_errors_preserve_raw_outcomes_and_admission_order() {
                     Box::pin(async move { Err(expected) })
                 }
             });
-            let handlers = mutations(reload, root.0.clone());
+            let handlers = mutations(reload, root.0.clone(), journal.clone());
             let context = || InvocationContext::detached(
                 "caller".into(), Some("operation".into()), 1, Default::default(),
                 IvyError::new("cancelled", "Fixture cancelled."),
@@ -88,7 +89,8 @@ async fn mutation_reload_errors_preserve_raw_outcomes_and_admission_order() {
             }
         }
     }
-    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0, "Failed reload must not open a journal");
+    assert!(journal.list(200.0).await.unwrap().is_empty(), "Failed reload must not accept work");
+    journal.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -128,7 +130,7 @@ async fn publication_retries_failed_acks_without_reallocating_unchanged_reports(
     reports.reconcile_from(&rpc, "host".into()).await.unwrap();
     assert_eq!(reports.minimum_sequence(), 11);
     reports
-        .publish_host(&rpc, &status, |_| async {
+        .publish_host(&rpc, &status, false, |_| async {
             panic!("Unchanged status allocated a sequence")
         })
         .await
@@ -137,7 +139,7 @@ async fn publication_retries_failed_acks_without_reallocating_unchanged_reports(
     changed.insert("retention", IvyJson::Null);
     assert!(
         reports
-            .publish_host(&rpc, &changed, |minimum| {
+            .publish_host(&rpc, &changed, false, |minimum| {
                 assert_eq!(minimum, 11);
                 let snapshot = snapshot.clone();
                 async { Ok(snapshot) }
@@ -147,23 +149,88 @@ async fn publication_retries_failed_acks_without_reallocating_unchanged_reports(
     );
     assert_eq!(reports.minimum_sequence(), 11);
     reports
-        .publish_host(&rpc, &changed, |_| async { Ok(snapshot.clone()) })
+        .publish_host(&rpc, &changed, false, |_| async { panic!("Lost acknowledgement allocated another snapshot") })
         .await
         .unwrap();
     assert_eq!(reports.minimum_sequence(), 12);
     reports
-        .publish_host(&rpc, &changed, |_| async {
+        .publish_host(&rpc, &changed, false, |_| async {
             panic!("Acknowledged status allocated again")
         })
         .await
         .unwrap();
-    assert!(reports.publish_deployments(&rpc, json("[]")).await.is_err());
-    reports.publish_deployments(&rpc, json("[]")).await.unwrap();
-    reports.publish_deployments(&rpc, json("[]")).await.unwrap();
+    assert!(reports.publish_deployments(&rpc, 1, json("[]")).await.is_err());
+    reports.publish_deployments(&rpc, 1, json("[]")).await.unwrap();
+    reports.publish_deployments(&rpc, 1, json("[]")).await.unwrap();
     assert!(rpc.0.lock().unwrap().is_empty());
 }
 
 struct Temp(std::path::PathBuf);
+
+#[tokio::test]
+async fn reconnect_reconciles_the_original_unacknowledged_report_sequence() {
+    let status = json(r#"{"hostId":"host","executor":null,"instances":[]}"#);
+    let snapshot = IvyJson::object([("sequence", 7.0.into()), ("status", status.clone())]);
+    let rpc = ReplyQueue(Mutex::new(VecDeque::from([
+        ("hosts.report", snapshot.clone(), Err(ivy_contracts::IvyError::new("outcome_unknown", "Lost reply"))),
+        ("hosts.observations", json(r#"{"hostId":"host"}"#), Ok(IvyJson::object([("items", IvyJson::Array(vec![IvyJson::object([("snapshot", snapshot.clone())])]))]))),
+    ])));
+    let mut reports = Reports::default();
+    assert!(reports.publish_host(&rpc, &status, false, |_| async { Ok(snapshot) }).await.is_err());
+    reports.reconcile_from(&rpc, "host".into()).await.unwrap();
+    reports.publish_host(&rpc, &status, false, |_| async { panic!("Confirmed original was reallocated") }).await.unwrap();
+    assert_eq!(reports.minimum_sequence(), 7);
+    assert!(rpc.0.lock().unwrap().is_empty());
+}
+
+struct Published(Mutex<Vec<(String, IvyJson)>>);
+impl RpcClient for Published {
+    fn request<'a>(&'a self, method: &'a str, value: IvyJson, _: RequestOptions) -> RequestFuture<'a> {
+        Box::pin(async move {
+            assert!(["hosts.report", "deployments.report"].contains(&method));
+            self.0.lock().unwrap().push((method.into(), value));
+            Ok(IvyJson::Null)
+        })
+    }
+}
+
+#[tokio::test]
+async fn idle_pulses_skip_reports_but_process_changes_and_expiry_publish() {
+    use ivy_host_runtime::{config::atomic_json, journal::HostJournal, layout::service_paths, node_path::to_native};
+    let root = Temp::new();
+    let configuration = manager_host(&root);
+    let journal = HostJournal::open(configuration.clone()).await.unwrap();
+    let instance = &configuration.required("instances").unwrap().as_array().unwrap()[0];
+    let health_path = to_native(service_paths(&configuration, instance).unwrap().required("data").unwrap().as_js_string().unwrap()).join("health.json");
+    let now = chrono::Utc::now();
+    let stamp = |at: chrono::DateTime<chrono::Utc>| IvyJson::from(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let mut health = json(r#"{"schemaVersion":1,"componentId":"fixture","instanceId":"fixture","pid":101,"bootId":"first","ready":true,"generation":1,"details":"ready"}"#);
+    health.insert("buildId", format!("sha256:{}", "a".repeat(64)).into());
+    health.insert("startedAt", stamp(now));
+    health.insert("observedAt", stamp(now));
+    atomic_json(health_path.clone(), health.clone()).await.unwrap();
+    let rpc = Published(Mutex::new(Vec::new()));
+    let mut reports = Reports::default();
+    reports.publish_journal(&rpc, &journal, &"host".into()).await.unwrap();
+    assert_eq!(rpc.0.lock().unwrap().iter().map(|(name,_)| name.as_str()).collect::<Vec<_>>(), vec!["hosts.report", "deployments.report"]);
+    health.insert("observedAt", stamp(now + chrono::Duration::milliseconds(100)));
+    atomic_json(health_path.clone(), health.clone()).await.unwrap();
+    reports.publish_journal(&rpc, &journal, &"host".into()).await.unwrap();
+    assert_eq!(rpc.0.lock().unwrap().len(), 2, "Timestamp pulse published an unchanged report");
+    health.insert("pid", 102.0.into());
+    health.insert("bootId", "second".into());
+    atomic_json(health_path.clone(), health.clone()).await.unwrap();
+    reports.publish_journal(&rpc, &journal, &"host".into()).await.unwrap();
+    assert_eq!(rpc.0.lock().unwrap().len(), 3);
+    health.insert("observedAt", stamp(now - chrono::Duration::seconds(16)));
+    atomic_json(health_path, health).await.unwrap();
+    reports.publish_journal(&rpc, &journal, &"host".into()).await.unwrap();
+    let published = rpc.0.lock().unwrap();
+    assert_eq!(published.len(), 4);
+    assert_eq!(published.last().unwrap().1.required("status").unwrap().required("instances").unwrap().as_array().unwrap()[0].required("code").unwrap(), &IvyJson::from("health_stale"));
+    drop(published);
+    journal.close().await.unwrap();
+}
 impl Temp {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
@@ -328,7 +395,7 @@ async fn journal_publication_keeps_durable_sequences_across_failed_ack_and_reope
             .unwrap()
             .is_none()
     );
-    assert_eq!(reports.minimum_sequence(), 2);
+    assert_eq!(reports.minimum_sequence(), 1);
     reports
         .publish_journal(&rpc, &journal, &"host".into())
         .await
@@ -341,14 +408,14 @@ async fn journal_publication_keeps_durable_sequences_across_failed_ack_and_reope
     next.publish_journal(&rpc, &journal, &"host".into())
         .await
         .unwrap();
-    assert_eq!(next.minimum_sequence(), 3);
+    assert_eq!(next.minimum_sequence(), 2);
     let calls = rpc.0.lock().unwrap();
     let sequences: Vec<_> = calls
         .iter()
         .filter(|(name, _)| name == "hosts.report")
         .map(|(_, value)| value.required("sequence").unwrap().as_f64().unwrap())
         .collect();
-    assert_eq!(sequences, vec![1.0, 2.0, 3.0]);
+    assert_eq!(sequences, vec![1.0, 1.0, 2.0]);
     for (_, value) in calls
         .iter()
         .filter(|(name, _)| name == "deployments.report")
@@ -364,14 +431,14 @@ async fn desired_subscription_keeps_order_and_persistence_failures_propagate() {
     use ivy_service_manager::hints::{desired_subscription, persist_hint};
     let rpc = ReplyQueue(Mutex::new(VecDeque::from([
         (
-            "packages.catalog",
-            json(r#"{"after":0,"includeUis":true}"#),
-            Ok(json(r#"{"objectId":"catalog"}"#)),
+            "objects.query",
+            json(r#"{"contractKey":"ivy/package-catalog","select":["object.id"],"limit":2}"#),
+            Ok(json(r#"{"items":[{"objectId":"catalog"}],"nextCursor":null}"#)),
         ),
         (
-            "hostConfigurations.get",
-            json(r#"{"hostId":"host"}"#),
-            Ok(json(r#"{"objectId":"config"}"#)),
+            "objects.query",
+            json(r#"{"contractKey":"ivy/host-configuration","where":{"op":"eq","field":"data:/hostId","value":"host"},"select":["object.id"],"limit":2}"#),
+            Ok(json(r#"{"items":[{"objectId":"config"}],"nextCursor":null}"#)),
         ),
     ])));
     let (subscription, configuration, catalog) =
@@ -503,11 +570,7 @@ fn host_report_ignores_only_observation_timestamps() {
         host_identity(&before).unwrap(),
         host_identity(&changed).unwrap()
     );
-    assert!(
-        host_identity(&before)
-            .unwrap()
-            .contains(r#""retention":{"observedAt":"retained"}"#)
-    );
+    assert_eq!(host_identity(&before).unwrap().required("retention").unwrap(), &json(r#"{"observedAt":"retained"}"#));
 }
 
 #[test]
@@ -516,7 +579,7 @@ fn identity_preserves_utf16_values_optional_fields_and_js_property_order() {
         r#"{"observedAt":"now","instances":[{"name":"\ud800","observedAt":"now"}],"hostId":"host","executor":null,"optional":null,"10":"ten","2":"two"}"#,
     );
     assert_eq!(
-        host_identity(&status).unwrap(),
+        stringify(&host_identity(&status).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
         r#"{"2":"two","10":"ten","hostId":"host","optional":null,"executor":null,"instances":[{"name":"\ud800","observedAt":null}]}"#
     );
 }
@@ -531,15 +594,15 @@ fn report_cache_advances_only_after_ack_and_resets_deployments_on_reconnect() {
     assert!(reports.host_changed(&identity));
     assert_eq!(reports.minimum_sequence(), 0);
     reports.host_acknowledged(4, identity.clone());
-    reports.deployments_acknowledged("[]".into());
+    reports.deployments_acknowledged(1);
     assert!(!reports.host_changed(&identity));
-    assert!(!reports.deployments_changed("[]"));
+    assert!(!reports.deployments_changed(1));
     reports
         .reconcile(&[(3, status.clone()), (9, status.clone())])
         .unwrap();
     assert_eq!(reports.minimum_sequence(), 9);
     assert!(!reports.host_changed(&identity));
-    assert!(reports.deployments_changed("[]"));
+    assert!(reports.deployments_changed(1));
     reports.reconcile(&[]).unwrap();
     assert!(reports.host_changed(&identity));
     assert_eq!(reports.minimum_sequence(), 9);
@@ -649,7 +712,6 @@ fn registry_requests_the_normative_host_and_wire_schema_roots() {
 
 #[test]
 fn bundled_tool_definitions_match_original_manager_exactly() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = reference_data::read(include_bytes!("../fixtures/service-manager-registry-cases.json.gz"));
     let expected = json(std::str::from_utf8(&output).unwrap());
     let registry = registry::bundled_registry().unwrap();
@@ -663,14 +725,11 @@ fn bundled_tool_definitions_match_original_manager_exactly() {
 }
 
 #[test]
-fn topology_owns_hive_and_disabled_services_without_restarting_existing_owners() {
+fn topology_selects_hive_and_disabled_process_services() {
     let accepted = json(
         r#"{"instances":[{"instanceId":"first","componentId":"hive","engine":"process","enabled":true},{"instanceId":"new","componentId":"data-collector","engine":"process","enabled":false},{"instanceId":"host","componentId":"host-executor","engine":"process","enabled":true},{"instanceId":"manager","componentId":"service-manager","engine":"process","enabled":true},{"instanceId":"external","componentId":"sample","engine":"docker","enabled":true}]}"#,
     );
     let desired = topology::owner_ids("win32", &accepted).unwrap();
     assert_eq!(desired, vec!["first".into(), "new".into()]);
-    let changes = topology::changes(&["first".into(), "old-a".into(), "old-b".into()], &desired);
-    assert_eq!(changes.added, vec!["new".into()]);
-    assert_eq!(changes.removed, vec!["old-b".into(), "old-a".into()]);
     assert!(topology::owner_ids("linux", &accepted).unwrap().is_empty());
 }

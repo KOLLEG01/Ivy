@@ -24,12 +24,14 @@ impl HostJournal {
             let db=internal(sqlite::open(&database,sqlite::OpenOptions{busy_timeout:Duration::from_millis(5000),read_only}))?;
             let version:i64=internal(db.query_row("PRAGMA user_version",[],|row|row.get(0)))?;
             require(version==1,"unsupported_storage","Convert the journal format before importing target policies.")?;
-            let state=State{db,wake_path:super::change_path(&config)?,config,clock:Arc::new(SystemClock),storage_space:None,wake:Arc::new(std::sync::atomic::AtomicBool::new(false))};
+            let mut shared=JournalState{db,wake_path:super::change_path(&config)?,config:Arc::new(config),configurations:BTreeMap::new(),clock:Arc::new(SystemClock),storage_space:None,wake:Arc::new(std::sync::atomic::AtomicBool::new(false))};
+            let state=State{config:shared.config.clone(),shared:&mut shared};
             require(state.text("SELECT value FROM meta WHERE key=?","hostId")?.as_ref()==Some(&state.config.required("hostId")?.as_str()?)
                 &&state.text("SELECT value FROM meta WHERE key=?","installation")?.as_ref()==Some(&installation_record(&state.config)?),"target_conflict","Policy import must use the journal's existing installation identity.")?;
-            Ok::<_,IvyError>(state)
+            drop(state);
+            Ok::<_,IvyError>(shared)
         }).await)??;
-        Ok(Self{state:Arc::new(Mutex::new(Some(state)))})
+        Ok(Self{state:Arc::new(Mutex::new(Some(state))),binding:None})
     }
     pub(crate) async fn policy_import_plan(&self)->IvyResult<IvyJson>{
         self.with(|state|{
@@ -40,7 +42,7 @@ impl HostJournal {
     }
     pub(crate) async fn apply_policy_import(&self,request:PolicyImportRequest)->IvyResult<IvyJson>{self.with(move|state|state.import_policies(request)).await}
 }
-impl State {
+impl State<'_> {
     fn import_targets(&self)->IvyResult<Targets>{
         let mut targets=Targets::new();
         let mut statement=internal(self.db.prepare("SELECT instance_id,value FROM runtime_targets ORDER BY instance_id"))?;

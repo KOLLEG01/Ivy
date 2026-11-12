@@ -12,19 +12,7 @@ async fn main() {
     let stop = CancellationToken::new();
     let result = match install_signals(stop.clone()) {
         Ok(signal) => {
-            let result = async {
-                if args
-                    .iter()
-                    .any(|arg| arg == "--manager-executable" || arg == "--manager-config")
-                {
-                    let options =
-                        entry::Options::parse(&args, std::env::var_os("IVY_HOST_CONFIG"))?;
-                    entry::run(options, stop.clone()).await
-                } else {
-                    entry::run_native(&args, stop.clone()).await
-                }
-            }
-            .await;
+            let result = entry::run_native(&args, stop.clone()).await;
             stop.cancel();
             let _ = signal.await;
             result

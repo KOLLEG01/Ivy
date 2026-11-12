@@ -3530,6 +3530,62 @@
       ],
       "additionalProperties": false
     },
+    "HostsConfigurationRevisionsParams": {
+      "type": "object",
+      "properties": {
+        "hostIds": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "hostIds"
+      ],
+      "additionalProperties": false
+    },
+    "HostsConfigurationRevisionsResult": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hostId": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              },
+              "configurationRevision": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "hostId",
+              "configurationRevision"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "additionalProperties": false
+    },
     "HostConfigurationsListParams": {
       "type": "object",
       "properties": {

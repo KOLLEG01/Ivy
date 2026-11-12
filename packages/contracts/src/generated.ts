@@ -163,6 +163,8 @@ export namespace Operation {
   export type HostsReportResult = { "sequence": number; "reportedAt": string; };
   export type HostsObservationsParams = { "limit"?: number; "cursor"?: string; "hostId"?: Wire.Identifier; };
   export type HostsObservationsResult = { "items": Array<Host.ManagementObservation>; "nextCursor": (string) | (null); };
+  export type HostsConfigurationRevisionsParams = { "hostIds": Array<Wire.Identifier>; };
+  export type HostsConfigurationRevisionsResult = { "items": Array<{ "hostId": Wire.Identifier; "configurationRevision": (number) | (null); }>; };
   export type HostConfigurationsListParams = { "limit"?: number; "cursor"?: string; };
   export type HostConfigurationsListResult = { "items": Array<Operation.HostConfigurationSummary>; "nextCursor": (string) | (null); };
   export type HostConfigurationsGetParams = { "hostId": Wire.Identifier; "revision"?: number; };
@@ -758,6 +760,7 @@ export interface OperationMap {
   "hosts.list": { params: Operation.HostsListParams; result: Operation.HostsListResult };
   "hosts.report": { params: Operation.HostsReportParams; result: Operation.HostsReportResult };
   "hosts.observations": { params: Operation.HostsObservationsParams; result: Operation.HostsObservationsResult };
+  "hosts.configurationRevisions": { params: Operation.HostsConfigurationRevisionsParams; result: Operation.HostsConfigurationRevisionsResult };
   "hostConfigurations.list": { params: Operation.HostConfigurationsListParams; result: Operation.HostConfigurationsListResult };
   "hostConfigurations.get": { params: Operation.HostConfigurationsGetParams; result: Operation.HostConfigurationsGetResult };
   "hostConfigurations.put": { params: Operation.HostConfigurationsPutParams; result: Operation.HostConfigurationsPutResult };

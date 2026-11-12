@@ -8,7 +8,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::watch;
 
 pub fn current_executor(value: IvyJson, host_id: &IvyJson, now_ms: i64) -> Option<IvyJson> {
     validate_host("ExecutorStatus", &value).ok()?;
@@ -29,45 +29,51 @@ pub async fn refresh(runtime_root: &Path, host_id: &IvyJson, now_ms: i64) -> Opt
     current_executor(value, host_id, now_ms)
 }
 
-enum Write {
-    Health(
-        bool,
-        Option<u64>,
-        ivy_contracts::JsString,
-        oneshot::Sender<IvyResult<()>>,
-    ),
-    Barrier(oneshot::Sender<IvyResult<()>>),
-}
+#[derive(Clone)]
+struct Publication { sequence: u64, ready: bool, generation: Option<u64>, message: ivy_contracts::JsString, final_write: bool }
 struct Writes {
-    sender: mpsc::UnboundedSender<Write>,
+    sender: watch::Sender<Option<Publication>>,
+    completed: watch::Receiver<(u64, IvyResult<()>)>,
+    sequence: u64,
+    generation: Option<u64>,
+    final_sequence: Option<u64>,
     sealed: bool,
 }
 
-/// Queue at callback invocation, before any future is polled. A dropped waiter
-/// cannot cancel or reorder an accepted health write. Errors do not poison later writes.
+/// Invocation order is synchronous. One state may be writing while the newest
+/// pending state replaces ordinary pulses; waiters share its completion watermark.
 #[derive(Clone)]
 pub struct HealthReporter {
     writes: Arc<Mutex<Writes>>,
 }
 impl HealthReporter {
     pub fn new(health: Arc<HealthFile>) -> Self {
-        let (writes, mut receiver) = mpsc::unbounded_channel::<Write>();
+        Self::with_writer(move |ready, message, generation| {
+            let health = health.clone();
+            async move { health.write(ready, message, generation).await }
+        })
+    }
+    fn with_writer<F, Fut>(write: F) -> Self
+    where F: Fn(bool, ivy_contracts::JsString, Option<u64>) -> Fut + Send + 'static,
+          Fut: std::future::Future<Output = IvyResult<()>> + Send,
+    {
+        let (writes, mut receiver) = watch::channel::<Option<Publication>>(None);
+        let (finished, completed) = watch::channel((0, Ok(())));
         tokio::spawn(async move {
-            while let Some(write) = receiver.recv().await {
-                match write {
-                    Write::Health(ready, generation, message, done) => {
-                        let result = health.write(ready, message, generation).await;
-                        let _ = done.send(result);
-                    }
-                    Write::Barrier(done) => {
-                        let _ = done.send(Ok(()));
-                    }
-                }
+            while receiver.changed().await.is_ok() {
+                let Some(publication) = receiver.borrow_and_update().clone() else { continue; };
+                let result = write(publication.ready, publication.message, publication.generation).await;
+                finished.send_replace((publication.sequence, result));
+                if publication.final_write { break; }
             }
         });
         Self {
             writes: Arc::new(Mutex::new(Writes {
                 sender: writes,
+                completed,
+                sequence: 0,
+                generation: None,
+                final_sequence: None,
                 sealed: false,
             })),
         }
@@ -88,30 +94,23 @@ impl HealthReporter {
         message: ivy_contracts::JsString,
         final_write: bool,
     ) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
-        let (done, result) = oneshot::channel();
         let mut writes = self
             .writes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if final_write {
-            writes.sealed = true;
-        }
-        let sent = (final_write || !writes.sealed)
-            && writes
-                .sender
-                .send(Write::Health(ready, generation, message, done))
-                .is_ok();
-        async move {
-            if !sent {
-                return Err(ivy_contracts::IvyError::new(
-                    "service_unavailable",
-                    "ServiceManager health publication is stopped.",
-                ));
+        let through = (|| {
+            if final_write && let Some(sequence) = writes.final_sequence { return Ok(sequence); }
+            if !final_write && (writes.sealed || generation.zip(writes.generation).is_some_and(|(new, current)| new < current)) {
+                return Err(ivy_contracts::IvyError::new("service_unavailable", "ServiceManager health publication is stopped or superseded."));
             }
-            result
-                .await
-                .map_err(|_| ivy_contracts::IvyError::internal())?
-        }
+            writes.sequence = writes.sequence.checked_add(1).ok_or_else(ivy_contracts::IvyError::internal)?;
+            if final_write { writes.sealed = true; writes.final_sequence = Some(writes.sequence); }
+            if let Some(generation) = generation { writes.generation = Some(generation); }
+            let sequence = writes.sequence;
+            writes.sender.send(Some(Publication { sequence, ready, generation, message, final_write })).map_err(|_| ivy_contracts::IvyError::internal())?;
+            Ok(sequence)
+        })();
+        wait_for_write(writes.completed.clone(), through)
     }
     pub fn seal(&self) {
         self.writes
@@ -120,22 +119,11 @@ impl HealthReporter {
             .sealed = true;
     }
     pub fn flush(&self) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
-        let (done, result) = oneshot::channel();
-        let sent = self
+        let writes = self
             .writes
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .sender
-            .send(Write::Barrier(done))
-            .is_ok();
-        async move {
-            if !sent {
-                return Err(ivy_contracts::IvyError::internal());
-            }
-            result
-                .await
-                .map_err(|_| ivy_contracts::IvyError::internal())?
-        }
+            .unwrap_or_else(|error| error.into_inner());
+        wait_for_write(writes.completed.clone(), Ok(writes.sequence))
     }
     /// Seal and enqueue the final unready write under the same lock, so even a
     /// readiness callback accepted before shutdown cannot publish ready afterward.
@@ -170,7 +158,7 @@ impl HealthReporter {
                 && current_executor(value.clone(), &host_id, now_ms).is_some()
         });
         let message = if ready {
-            "Independent executor and current host reports verified."
+            "Independent executor is ready."
         } else {
             "Independent executor status is missing, stale or not ready."
         };
@@ -196,3 +184,18 @@ impl HealthReporter {
         ]))
     }
 }
+
+fn wait_for_write(mut result: watch::Receiver<(u64, IvyResult<()>)>, through: IvyResult<u64>) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
+    async move {
+        let through = through?;
+        loop {
+            let (sequence, outcome) = result.borrow_and_update().clone();
+            if sequence >= through { return outcome; }
+            result.changed().await.map_err(|_| ivy_contracts::IvyError::internal())?;
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/service-manager-health.rs"]
+mod tests;

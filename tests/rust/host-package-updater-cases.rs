@@ -461,6 +461,41 @@ async fn package_updater_does_not_advance_revision_on_admission_error_and_keeps_
         .unwrap();
 }
 
+#[tokio::test]
+async fn newest_supported_release_wins_and_executor_update_precedes_future_manifests() {
+    for component in ["domain", "host-executor"] {
+        let mut f = Fixture::new(vec![instance(component, component, true)]).await;
+        let old = f.release(component, "1.0.0", "platform-old").await;
+        let next = f.release(component, "2.0.0", "platform-next").await;
+        let foreign = f.release(component, "3.0.0", "platform-foreign").await;
+        f.install(component, &old).await;
+        let mut other = entry(&foreign, 3.0);
+        let mut manifest = other.required("manifest").unwrap().clone();
+        let mut requirements = manifest.required("requirements").unwrap().clone();
+        requirements.insert("os", J::Array(vec![if cfg!(windows) { "linux".into() } else { "win32".into() }]));
+        manifest.insert("requirements", requirements);
+        other.insert("manifest", manifest);
+        let mut entries = vec![entry(&next, 2.0), other];
+        if component == "host-executor" {
+            entries.push(J::object([("componentId", "future-component".into()), ("version", "9.0.0".into()), ("manifest", J::Null)]));
+        }
+        let client = Arc::new(Client::default());
+        client.responses.lock().unwrap().push_back(step(catalog(entries, 3.0)));
+        let updater = PackageUpdater::new(f.journal.clone(), "fixture-credential".into(), node(), client.clone());
+        let result = updater.sync().await.unwrap();
+        let wanted = next.required("candidate").unwrap().required("candidateId").unwrap();
+        if component == "host-executor" {
+            assert_eq!(result.bootstrap.len(), 1);
+            assert_eq!(result.bootstrap[0].candidate.required("candidateId").unwrap(), wanted);
+        } else {
+            let operations = f.journal.list(200.0).await.unwrap();
+            assert_eq!(operations.len(), 1);
+            assert_eq!(operations[0].required("candidateId").unwrap(), wanted);
+        }
+        assert_eq!(client.downloads.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[derive(Default)]
 struct Automatic {
     snapshot: Mutex<Option<J>>,

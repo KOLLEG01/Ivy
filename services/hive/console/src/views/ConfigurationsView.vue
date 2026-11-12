@@ -42,12 +42,17 @@ const page = usePage(
   undefined,
   ["objects/ivy/host-configuration"],
 );
-const observations = useRemote(
-  (signal) =>
-    consoleClient.request("hosts.observations", { limit: 200 }, { signal }),
+const observations = useRemote<Operation.HostsConfigurationRevisionsResult>(
+  async (signal) => {
+    const hostIds = page.value.value?.items.map(item => item.hostId) ?? [];
+    return hostIds.length
+      ? consoleClient.request("hosts.configurationRevisions", { hostIds }, { signal })
+      : { items: [] };
+  },
   10000,
   ["system"],
 );
+watch(() => page.value.value?.items, () => { void observations.refresh(); });
 const selected = ref<Operation.HostConfigurationEditor | null>(null),
   hostId = ref(""),
   draft = ref(""),
@@ -77,8 +82,8 @@ const history = usePage(
 );
 const appliedRevision = (item: Operation.HostConfigurationSummary) =>
   observations.value.value?.items.find(
-    (value) => value.snapshot.status.hostId === item.hostId,
-  )?.snapshot.status.executor?.configurationRevision ?? null;
+    (value) => value.hostId === item.hostId,
+  )?.configurationRevision ?? null;
 
 const confirmDiscard = () =>
   !dirty.value || window.confirm("Discard the unsaved configuration draft?");
@@ -147,7 +152,7 @@ const save = async () => {
     conflictDraft.value = null;
     restoredSecrets.value = false;
     feedback.value = `Saved revision ${value.revision}.`;
-    await Promise.all([page.refresh(), history.reset()]);
+    void Promise.allSettled([page.refresh(), history.reset()]);
   } catch (error) {
     if (error instanceof IvyError && error.code === "revision_conflict")
       conflictDraft.value = draft.value;
