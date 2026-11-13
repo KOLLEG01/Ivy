@@ -269,8 +269,7 @@ impl WhatsAppMedia {
                             None,
                         )?;
                     }
-                    self.files.save_original(&row.id, bytes.clone()).await?;
-                    bytes
+                    self.files.save_original(&row.id, bytes).await?
                 }
             };
             self.require(

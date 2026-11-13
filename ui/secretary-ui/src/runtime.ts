@@ -1,15 +1,18 @@
 import definition from "../ui.json";
 import type { Operation, Wire } from "../../../packages/sdk/src/client.js";
+import type { Agent } from "../../../packages/sdk/src/client.js";
+import { nativeRouteQuery } from "../../../packages/ui-client/src/native-route";
 import {
-  newOperationId,
   queryDocument,
   serviceTools,
 } from "../../../packages/sdk/src/client.js";
 import { route, uiRuntime } from "../../../packages/ui-client/src/runtime";
 import type {
   Assignment,
+  AssignmentSummary,
   Document,
   Execution,
+  ExecutionSummary,
   Pin,
   SecretaryConfiguration,
   Workspace,
@@ -108,6 +111,108 @@ const tools = (node: string) =>
     { namespace: "secretary", interfaceVersion: "1.0.0" },
   ]);
 
+const assignmentFields = {
+  assignmentId: "assignmentId",
+  name: "name",
+  enabled: "enabled",
+  triggerKind: "trigger/kind",
+  cadence: "trigger/cadence",
+  intervalMinutes: "trigger/intervalMinutes",
+  localTime: "trigger/localTime",
+  topic: "trigger/topic",
+};
+const executionFields = {
+  name: "assignmentSnapshot/name",
+  triggerKind: "trigger/kind",
+  occurredAt: "trigger/occurredAt",
+  createdAt: "createdAt",
+  completedAt: "completedAt",
+  phase: "phase",
+  errorCode: "errorCode",
+  cleanupState: "cleanup/state",
+  cleanupError: "cleanup/errorCode",
+  deliveryState: "delivery/state",
+  deliveryReason: "delivery/reason",
+  voiceState: "voice/state",
+  voiceReason: "voice/reason",
+};
+export const summaryPageKey = (
+  key: "secretary/assignment" | "secretary/execution",
+  root: string,
+) =>
+  "secretary:summary:" +
+  JSON.stringify([
+    key,
+    root,
+    key === "secretary/assignment" ? assignmentFields : executionFields,
+  ]);
+export async function listSummaries<
+  K extends "secretary/assignment" | "secretary/execution",
+>(
+  key: K,
+  root: string,
+  signal: AbortSignal,
+  limit: number,
+  cursor?: string,
+): Promise<{
+  items: Document<
+    K extends "secretary/assignment" ? AssignmentSummary : ExecutionSummary
+  >[];
+  nextCursor: string | null;
+}> {
+  const fields =
+    key === "secretary/assignment" ? assignmentFields : executionFields;
+  const page = await client.request(
+    "objects.query",
+    {
+      contractKey: key,
+      where: { op: "eq", field: "object.parentId", value: root },
+      orderBy: [{ field: "object.updatedAt", direction: "desc" }],
+      includeContent: false,
+      // Do not filter versions: unsupported records must remain visible as errors.
+      // Optional scalars absent in older revisions project to null.
+      select: [
+        "object.parentId",
+        "object.effectivelyArchived",
+        "object.name",
+        ...Object.values(fields).map((field) => "data:/" + field),
+      ],
+      limit,
+      ...(cursor ? { cursor } : {}),
+    },
+    { signal },
+  );
+  return {
+    items: page.items.map((item) => {
+      if (
+        item.values["object.parentId"] !== root ||
+        item.values["object.effectivelyArchived"] !== false ||
+        !readableVersions.get(key)?.includes(item.contractVersion)
+      )
+        throw new Error(
+          tr(
+            "Dieser Secretary-Eintrag braucht eine neuere Oberfläche.",
+            "This Secretary record needs a newer UI.",
+          ),
+        );
+      const value = Object.fromEntries(
+        Object.entries(fields).map(([name, field]) => [
+          name,
+          item.values["data:/" + field],
+        ]),
+      );
+      return {
+        pin: { objectId: item.objectId, revision: item.revision },
+        name: item.values["object.name"] as string,
+        value: value as unknown as K extends "secretary/assignment"
+          ? AssignmentSummary
+          : ExecutionSummary,
+      };
+    }),
+    nextCursor: page.nextCursor,
+  };
+}
+
 export interface TopicChoice {
   provider: Operation.Provider | null;
   namespace: string;
@@ -168,35 +273,22 @@ export const loadWorkspace = async (
     observedAt: binding.observedAt,
   };
 };
-export async function saveConfiguration(
+export const agentTaskUrl = (
   node: string,
-  configuration: Pin,
-  value: SecretaryConfiguration,
-): Promise<Pin> {
-  const operationId = await newOperationId(client);
-  return (await tools(node).call(
-    "secretary.saveConfiguration",
-    { operationId, configuration, value } as unknown as Wire.Json,
-    operationId,
-  )) as unknown as Pin;
-}
-export async function saveAssignment(
-  node: string,
-  assignment: Pin | null,
-  value: Assignment,
-): Promise<Pin> {
-  const operationId = await newOperationId(client);
-  return (await tools(node).call(
-    "secretary.saveAssignment",
-    { operationId, assignment, value } as unknown as Wire.Json,
-    operationId,
-  )) as unknown as Pin;
-}
-export const agentTaskUrl = (node: string, threadId: string) =>
+  threadId: string,
+  backend?: Agent.BackendIdentity,
+) =>
   new URL(
-    "agents/#/task?node=" +
-      encodeURIComponent(node) +
-      "&id=" +
-      encodeURIComponent(threadId),
+    "agents/#/task?" +
+      new URLSearchParams(
+        nativeRouteQuery(
+          {
+            serviceNodeId: node,
+            namespace: backend?.backendId ?? "codex",
+            backend,
+          },
+          { id: threadId },
+        ),
+      ).toString(),
     base,
   ).href;

@@ -169,6 +169,11 @@ fn retained_rows(before: &IvyJson, after: &IvyJson, gap_import: bool) {
         after.required("schema").unwrap()
     );
     for table in before.required("tables").unwrap().as_array().unwrap() {
+        // Derived accounting follows appended revisions; its exact new value
+        // is checked in the complete expected snapshot below.
+        if table.get("name") == Some(&"journal_usage".into()) {
+            continue;
+        }
         let next = after
             .required("tables")
             .unwrap()

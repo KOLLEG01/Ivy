@@ -140,18 +140,15 @@ impl RpcClient for AdmissionScripted {
 #[tokio::test]
 async fn original_assignment_main_delivery_and_decisions() {
     let output = reference_data::read(include_bytes!("assignment-delivery-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let decisions = corpus.required("decisions").unwrap().as_array().unwrap();
     assert_eq!(decisions.len(), 103);
     for (index, row) in decisions.iter().enumerate() {
         assert_eq!(
-            &outcome(assignment_decision(
-                row.required("answer").unwrap().as_js_string().unwrap()
-            )),
+            &outcome(
+                assignment_decision(row.required("answer").unwrap().as_js_string().unwrap())
+                    .map(|d| d.json())
+            ),
             row.required("result").unwrap(),
             "decision {index}"
         );

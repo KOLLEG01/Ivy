@@ -1,21 +1,19 @@
 //! Original-turn execution and retention transitions through the shared native owner.
 use crate::{
+    assignment_decision::RecordedDecision,
     assignment_native::AssignmentNative,
     assignment_prompt::assignment_prompt,
     assignment_result::{assignment_completion, assignment_turn},
-    assignment_runner::{AssignmentRunner, release_lease, thread_lease_name},
-    schema::{Schema, validate},
+    assignment_runner::{AssignmentRunner, ExecutionPhase, release_lease, thread_lease_name},
     store::Record,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
-    native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     clock::{Clock, date_to_iso},
-    native_turn_contents::{read_native_turn_contents, verify_native_turn_contents},
+    native_turn_contents::read_native_turn_contents,
     operation_ids::new_operation_id,
-    tools::{InterfaceRequirement, ToolCallOptions},
 };
 
 fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
@@ -36,48 +34,22 @@ pub struct AssignmentExecution<'a, 'engine, 'journal> {
     pub retained: &'a CheckedNativeContracts,
     pub notification_policy: &'a JsString,
 }
+pub struct AssignmentRun {
+    pub document: IvyJson,
+    pub decision: Option<RecordedDecision>,
+}
 impl AssignmentExecution<'_, '_, '_> {
     pub async fn target(&self, execution: &IvyJson) -> IvyResult<IvyJson> {
         if let Some(target) = execution.get("nativeTarget").filter(|v| !v.is_null()) {
             return Ok(target.clone());
         }
-        let selected = self.native.tools.service_tools(
-            text(execution, "serviceNodeId")?,
-            &[InterfaceRequirement {
-                namespace: "agent".into(),
-                interface_version: "1.0.0".into(),
-            }],
-        )?;
-        let backend = BackendIdentity::optional(execution.required("executionTarget")?.get("backend"))?;
-        let status = selected
-            .call(
-                &"agent.status".into(),
-                BackendIdentity::select_arguments(backend.as_ref(), IvyJson::object(Vec::<(String, IvyJson)>::new()))?,
-                None,
-                ToolCallOptions::default(),
-            )
-            .await?;
-        let mut target = IvyJson::object(
-            [
-                "serviceNodeId",
-                "hostId",
-                "nativeVersion",
-                "nativeExecutableHash",
-                "catalogHash",
-            ]
-            .map(|key| (key, status.get(key).cloned().unwrap_or(IvyJson::Null))),
-        );
-        if let Some(backend) = &backend { target.insert("backend", backend.json()); }
-        validate(Schema::NativeTarget, &target)?;
-        if !BackendIdentity::matches(&status, backend.as_ref()) || status.get("serviceNodeId") != execution.get("serviceNodeId")
-            || !nonempty(status.get("epoch"))
-        {
-            return Err(IvyError::new(
-                "secretary_execution_target_unavailable",
-                "The configured AgentManager is not ready for a Secretary task.",
-            ));
-        }
-        Ok(target)
+        let selection = crate::agent_target::AgentSelection {
+            service_node_id: text(execution, "serviceNodeId")?,
+            backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                execution.required("executionTarget")?.get("backend"),
+            )?,
+        };
+        Ok(selection.resolve(&self.native.tools).await?.to_json())
     }
     pub async fn start(&self, current: &IvyJson) -> IvyResult<IvyJson> {
         let execution = current.required("value")?;
@@ -86,7 +58,7 @@ impl AssignmentExecution<'_, '_, '_> {
             let now = self.now()?;
             let mut next = execution.clone();
             next.insert("nativeTarget", target);
-            next.insert("phase", "starting".into());
+            next.insert("phase", ExecutionPhase::Starting.json());
             next.insert(
                 "startedAt",
                 execution
@@ -257,7 +229,7 @@ impl AssignmentExecution<'_, '_, '_> {
         }
         let mut next = execution.clone();
         next.insert("threadId", thread_id.clone());
-        next.insert("phase", "running".into());
+        next.insert("phase", ExecutionPhase::Running.json());
         next.insert("updatedAt", IvyJson::String(self.now()?));
         let current = self.update(&current, &next).await?;
         if let Some(lease) = lease.filter(|l| !nonempty(l.value.get("threadId"))) {
@@ -291,7 +263,7 @@ impl AssignmentExecution<'_, '_, '_> {
         next.insert("updatedAt", IvyJson::String(now));
         self.update(current, &next).await
     }
-    pub async fn run(&self, current: &IvyJson) -> IvyResult<IvyJson> {
+    pub async fn run(&self, current: &IvyJson) -> IvyResult<AssignmentRun> {
         let execution = current.required("value")?;
         if !nonempty(execution.get("threadId")) {
             return Err(IvyError::new(
@@ -352,7 +324,10 @@ impl AssignmentExecution<'_, '_, '_> {
             let mut next = execution.clone();
             next.insert("turnId", IvyJson::String(turn_id));
             next.insert("updatedAt", IvyJson::String(self.now()?));
-            return self.update(&current, &next).await;
+            return Ok(AssignmentRun {
+                document: self.update(&current, &next).await?,
+                decision: None,
+            });
         }
         let owner = self.native.owner(execution)?;
         let status = owner.status().await?;
@@ -381,24 +356,31 @@ impl AssignmentExecution<'_, '_, '_> {
             .await?;
         let turn = assignment_turn(execution, &read)?;
         if turn.get("status") == Some(&"inProgress".into()) {
-            return Ok(current.clone());
+            return Ok(AssignmentRun {
+                document: current.clone(),
+                decision: None,
+            });
         }
         let now = self.now()?;
-        let items = if turn.get("status") == Some(&"completed".into()) {
+        let next = if turn.get("status") == Some(&"completed".into()) {
             let contents =
-                read_native_turn_contents(&owner, self.retained, &read, &thread_id, &turn_id, None)
+                read_native_turn_contents(&owner, self.retained, read, &thread_id, &turn_id, None)
                     .await?;
-            verify_native_turn_contents(&owner, self.retained, &contents, &thread_id, &turn_id)
-                .await?
-                .items
+            assignment_completion(execution, contents.turn(), contents.final_answer(), &now)
         } else {
-            vec![]
-        };
-        let next =
-            assignment_completion(execution, turn, &items, &now).ok_or_else(IvyError::internal)?;
-        let saved = self.update(current, &next).await?;
+            assignment_completion(execution, turn, None, &now)
+        }
+        .ok_or_else(IvyError::internal)?;
+        let saved = self.update(current, &next.execution).await?;
         release_lease(self.native.evidence.store.journal, &saved)?;
-        Ok(saved)
+        let decision = next
+            .decision
+            .map(|decision| RecordedDecision::record(&saved, decision))
+            .transpose()?;
+        Ok(AssignmentRun {
+            document: saved,
+            decision,
+        })
     }
     pub async fn archive(&self, current: &IvyJson) -> IvyResult<IvyJson> {
         if !nonempty(current.required("value")?.get("threadId")) {
@@ -422,7 +404,8 @@ impl AssignmentExecution<'_, '_, '_> {
         let archived_at = date_to_iso(at)?;
         let delete_after = date_to_iso(at + 7.0 * 24.0 * 60.0 * 60.0 * 1000.0)?;
         let mut next = execution.clone();
-        next.insert("phase", "archived".into());
+        next.insert("phase", ExecutionPhase::Archived.json());
+        crate::assignment_cleanup::CleanupAction::Archive.confirmed(&mut next, &archived_at);
         next.insert("archivedAt", IvyJson::String(archived_at.clone()));
         next.insert("deleteAfter", IvyJson::String(delete_after));
         next.insert("updatedAt", IvyJson::String(archived_at));
@@ -448,7 +431,8 @@ impl AssignmentExecution<'_, '_, '_> {
             .await?;
         let now = self.now()?;
         let mut next = execution.clone();
-        next.insert("phase", "deleted".into());
+        next.insert("phase", ExecutionPhase::Deleted.json());
+        crate::assignment_cleanup::CleanupAction::Delete.confirmed(&mut next, &now);
         next.insert("deletedAt", IvyJson::String(now.clone()));
         next.insert("updatedAt", IvyJson::String(now));
         self.update(&current, &next).await

@@ -1,0 +1,63 @@
+permissions:
+  contents: read
+name: WASM Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  # The target dir is restored fresh each run (Swatinem cache), so incremental
+  # state is always cold and only bloats artifacts; worse, sccache refuses to
+  # cache incremental compilations, so leaving it on excludes the workspace
+  # crates from caching entirely.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  wasm:
+    name: Build whatsapp-rust (wasm32, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+          targets: wasm32-unknown-unknown
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      # Mirrors how whatsapp-rust-bridge consumes the crate: lib only (the
+      # binary pulls tokio/sqlite), no default features. Guards against code
+      # reachable from wasm regressing on tokio/std-only APIs.
+      # getrandom needs both the wasm_js feature (declared for wasm32 in
+      # Cargo.toml) and this backend cfg.
+      - name: Build whatsapp-rust lib for wasm32 (release)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: >
+          cargo build -p whatsapp-rust --lib --release
+          --target wasm32-unknown-unknown
+          --no-default-features
+      # The sans-IO VoIP core (wacore::voip: the CallEngine, the portable run_call driver,
+      # the RelayTransport seam, the MLow codec, SRTP/SFrame crypto) must stay wasm-buildable
+      # so the WASM bridge can drive 1:1 calls. whatsapp-rust's `voip` feature compile-errors on
+      # wasm (it pulls webrtc-rs + libopus FFI), so the guard is on the pure core here.
+      - name: Build wacore VoIP core for wasm32 (release)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: >
+          cargo build -p wacore --lib --release
+          --target wasm32-unknown-unknown
+          --no-default-features --features "voip,js"

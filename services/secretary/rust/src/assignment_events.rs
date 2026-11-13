@@ -1,5 +1,6 @@
 //! Durable event effects, historical snapshots, gap rebasing and ACK ordering.
 use crate::{
+    assignment_event_stream::{EventStream, event_filter},
     assignment_message::message_channel,
     assignment_scheduler::AssignmentScheduler,
     assignment_windows::object_revision,
@@ -158,24 +159,31 @@ impl AssignmentScheduler<'_, '_, '_> {
         let key_text = String::from_utf16_lossy(&key.0);
         let gap_issue = format!("event-gap:{key_text}");
         let hash = hash_json(&IvyJson::String(key.clone()))?;
-        let name = JsString::from(format!("secretary-assignment-{}", &hash[7..48]));
         let progress_name = JsString::from(format!("event-{}", &hash[7..]));
         let mut ready_to_retire = false;
         for page in 0..budget {
+            let current = progress.as_ref().map(|p| p.required("value")).transpose()?;
+            if let Some(current) = current {
+                need(
+                    current.get("assignmentId") == Some(&IvyJson::String(key.clone()))
+                        && current.required("assignment")?.get("objectId")
+                            == assignment.required("pin")?.get("objectId"),
+                    "secretary_event_progress_mismatch",
+                    "The durable event cursor belongs to another assignment.",
+                )?;
+            }
+            let stream = EventStream::current(&key, current)?;
             let batch = store
                 .client
                 .request(
                     "events.subscribe",
-                    IvyJson::object([
-                        ("name", IvyJson::String(name.clone())),
-                        ("filter", IvyJson::Object(vec![])),
-                        ("initialSequence", IvyJson::Number(0.0)),
-                        ("durable", true.into()),
-                        ("limit", IvyJson::Number(100.0)),
-                    ]),
+                    stream.parameters(),
                     RequestOptions::default(),
                 )
                 .await?;
+            if let Some(saved) = progress.take() {
+                progress = Some(self.retire_event_stream(saved, &stream).await?);
+            }
             let items = batch
                 .required("items")?
                 .as_array()
@@ -225,7 +233,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             let processed = number(current, "processedThrough")?;
             let through = number(&batch, "throughSequence")?;
             let mut ack = IvyJson::object([
-                ("name", IvyJson::String(name.clone())),
+                ("name", IvyJson::String(stream.name.clone())),
                 (
                     "throughSequence",
                     batch.required("throughSequence")?.clone(),
@@ -286,8 +294,14 @@ impl AssignmentScheduler<'_, '_, '_> {
                     state_changed = true;
                 }
                 if next.get("needsRebase") == Some(&IvyJson::Bool(true)) && !items.is_empty() {
+                    let latest = store
+                        .read(
+                            Record::Assignment,
+                            assignment.required("pin")?.required("objectId")?,
+                        )
+                        .await?;
                     let rebased = self
-                        .revision_at(assignment, &text(&items[0], "occurredAt")?)
+                        .revision_at(&latest, &text(&items[0], "occurredAt")?)
                         .await?;
                     if let Some(gap) =
                         store
@@ -320,6 +334,25 @@ impl AssignmentScheduler<'_, '_, '_> {
                     next.insert("needsRebase", false.into());
                     state_changed = true;
                 }
+                // A gap changes to an unfiltered rebase stream. After rebasing,
+                // start the selected filter at the previous effect fence, before
+                // processing any event from this unfiltered page.
+                if event_filter(&next)? != stream.filter
+                    && (gap.is_some() || current.get("needsRebase") == Some(&true.into()))
+                {
+                    let boundary = if gap.is_some() {
+                        batch.required("throughSequence")?.clone()
+                    } else {
+                        current.required("processedThrough")?.clone()
+                    };
+                    progress = Some(
+                        self.switch_event_stream(saved, next, &stream, boundary)
+                            .await?,
+                    );
+                    ready_to_retire = true;
+                    continue;
+                }
+                let mut switch_at = None;
                 for event in items {
                     if number(event, "sequence")? <= processed {
                         continue;
@@ -409,9 +442,27 @@ impl AssignmentScheduler<'_, '_, '_> {
                                     next.insert("active", true.into());
                                     state_changed = true;
                                 }
+                                if event_filter(&next)? != stream.filter
+                                    && current.get("subscription").is_some()
+                                {
+                                    switch_at = Some(event.required("sequence")?.clone());
+                                    break;
+                                }
                             }
                         }
                     }
+                }
+                // The existing empty stream can be adopted after its whole page
+                // has been processed. Filtered streams stop at the first change
+                // instead: their remaining page may omit the new trigger's data.
+                if switch_at.is_some() || event_filter(&next)? != stream.filter {
+                    let boundary = switch_at.unwrap_or(batch.required("throughSequence")?.clone());
+                    progress = Some(
+                        self.switch_event_stream(saved, next, &stream, boundary)
+                            .await?,
+                    );
+                    ready_to_retire = true;
+                    continue;
                 }
                 if state_changed {
                     next.insert(

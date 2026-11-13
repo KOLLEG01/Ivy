@@ -43,7 +43,14 @@ pub fn validate_rules(value: &IvyJson) -> IvyResult<()> {
 pub fn validate_execution_target(value: &IvyJson) -> IvyResult<()> {
     validate(Schema::ExecutionTarget, value)?;
     let path = value.required("threadCwd")?.as_str()?;
-    let absolute = std::path::Path::new(&path).has_root();
+    // The working directory belongs to the selected AgentManager host, which
+    // can use a different path syntax from this Secretary process.
+    let bytes = path.as_bytes();
+    let absolute = path.starts_with(['/', '\\'])
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
     need(
         absolute,
         "Secretary task working directories must be absolute.",

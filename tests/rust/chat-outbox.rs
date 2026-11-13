@@ -420,8 +420,20 @@ async fn snapshot(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT value_json FROM markers WHERE key='journal.metadata.version'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "1",
+        "The derived metadata schema has its own version marker"
+    );
     let markers = db
-        .prepare("SELECT key,value_json FROM markers ORDER BY key")
+        .prepare(
+            "SELECT key,value_json FROM markers WHERE key<>'journal.metadata.version' ORDER BY key",
+        )
         .unwrap()
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

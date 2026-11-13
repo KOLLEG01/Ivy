@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 const secretary = JSON.parse(readFileSync('specs/schemas/secretary.schema.json', 'utf8')).$defs;
-const native = secretary.NativeTarget;
+// Retained triage records predate backend selection; preserve their original schema.
+const native = structuredClone(secretary.NativeTarget);
+delete native.properties.backend;
 const ref = name => ({ $ref: '#/$defs/' + name });
 const object = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 const text = (maxLength = 256) => ({ type: 'string', minLength: 1, maxLength });

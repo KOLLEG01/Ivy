@@ -1,6 +1,9 @@
 //! Assignment completion after original-owner reads and complete item verification.
 //! These domain checks do not authenticate a native observation or its item pages.
-use crate::assignment_decision::assignment_decision;
+use crate::{
+    assignment_decision::{AssignmentDecision, assignment_decision},
+    assignment_runner::ExecutionPhase,
+};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 
 fn failure(code: &str, message: &str) -> IvyError {
@@ -41,33 +44,40 @@ pub fn assignment_turn<'a>(execution: &IvyJson, read: &'a IvyJson) -> IvyResult<
     Ok(row)
 }
 
-/// None means the original turn is still running. `items` must be the complete
-/// output of the shared native contents verifier, not an unchecked read fragment.
+/// None means the original turn is still running. `answer` must come from the
+/// shared verifier's complete contents, never an unchecked item fragment.
+pub struct AssignmentCompletion {
+    pub execution: IvyJson,
+    pub decision: Option<AssignmentDecision>,
+}
 pub fn assignment_completion(
     execution: &IvyJson,
     turn: &IvyJson,
-    items: &[IvyJson],
+    answer: Option<&JsString>,
     now: &JsString,
-) -> Option<IvyJson> {
+) -> Option<AssignmentCompletion> {
     if turn.get("status") == Some(&"inProgress".into()) {
         return None;
     }
-    let answers: Vec<&JsString> = items
-        .iter()
-        .filter(|item| {
-            item.get("type") == Some(&"agentMessage".into())
-                && item.get("phase") == Some(&"final_answer".into())
-        })
-        .filter_map(|item| item.get("text").and_then(IvyJson::as_js_string))
-        .collect();
+    let mut decision = None;
     let error = if turn.get("status") != Some(&"completed".into()) {
         Some("secretary_execution_turn_failed".to_owned())
-    } else if answers.len() != 1 {
+    } else if answer.is_none() {
         Some("secretary_execution_answer_missing".to_owned())
-    } else if char::decode_utf16(answers[0].0.iter().copied()).count() > 131_072 {
+    } else if char::decode_utf16(answer.unwrap().0.iter().copied())
+        .take(131_073)
+        .count()
+        > 131_072
+    {
         Some("secretary_execution_answer_invalid".to_owned())
     } else {
-        assignment_decision(answers[0]).err().map(|e| e.code)
+        match assignment_decision(answer.unwrap()) {
+            Ok(parsed) => {
+                decision = Some(parsed);
+                None
+            }
+            Err(error) => Some(error.code),
+        }
     };
     let reuse = execution
         .get("assignmentSnapshot")
@@ -76,22 +86,29 @@ pub fn assignment_completion(
         .filter(|v| !v.is_null());
     let reused = reuse.is_some_and(|v| v != &"new".into());
     let phase = if error.is_some() {
-        if reused { "failed" } else { "archiving" }
+        if reused {
+            ExecutionPhase::Failed
+        } else {
+            ExecutionPhase::Archiving
+        }
     } else {
-        "completed"
+        ExecutionPhase::Completed
     };
     let mut next = execution.clone();
-    next.insert("phase", phase.into());
+    next.insert("phase", phase.json());
     next.insert(
         "result",
         if error.is_some() {
             IvyJson::Null
         } else {
-            IvyJson::String(answers[0].clone())
+            IvyJson::String(answer.unwrap().clone())
         },
     );
     next.insert("errorCode", error.map_or(IvyJson::Null, IvyJson::from));
     next.insert("completedAt", IvyJson::String(now.clone()));
     next.insert("updatedAt", IvyJson::String(now.clone()));
-    Some(next)
+    Some(AssignmentCompletion {
+        execution: next,
+        decision,
+    })
 }

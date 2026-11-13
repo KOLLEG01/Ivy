@@ -1,7 +1,7 @@
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
 use super::*;
-use ivy_contracts::{json::canonical, operation::parse_operation_id_js};
+use ivy_contracts::{hash::hash_json, json::canonical, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
     assignment_voice_engine::AssignmentVoice,
@@ -24,11 +24,7 @@ impl Clock for VoiceClock {
 #[tokio::test]
 async fn original_assignment_voice_durable_reconciliation() {
     let output = reference_data::read(include_bytes!("assignment-voice-engine-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 70);
     let clock = VoiceClock(corpus.required("now").unwrap().as_f64().unwrap() as i64);
@@ -141,7 +137,21 @@ async fn original_assignment_voice_durable_reconciliation() {
             engine
                 .step(
                     execution,
-                    input.required("decision").unwrap(),
+                    input
+                        .required("decision")
+                        .unwrap()
+                        .required("text")
+                        .unwrap()
+                        .as_js_string()
+                        .unwrap(),
+                    &hash_json(
+                        execution
+                            .required("value")
+                            .unwrap()
+                            .required("result")
+                            .unwrap(),
+                    )
+                    .unwrap(),
                     input.required("eligible").unwrap().as_bool().unwrap(),
                 )
                 .await

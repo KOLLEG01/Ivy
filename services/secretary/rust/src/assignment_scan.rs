@@ -2,7 +2,7 @@
 use crate::{
     assignment_advance::AssignmentAdvance,
     assignment_driver::{CollectedPreflight, PreflightWork},
-    assignment_runner::{execution_failure_disposition, release_lease},
+    assignment_runner::{ExecutionPhase, execution_failure_disposition, release_lease},
     inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
@@ -24,12 +24,33 @@ fn group(op: &str, args: Vec<IvyJson>) -> IvyJson {
 fn predicate(op: &str, field: &str, value: IvyJson) -> IvyJson {
     IvyJson::object([("op", op.into()), ("field", field.into()), ("value", value)])
 }
-fn phases(values: &[&str]) -> IvyJson {
+fn phases(values: &[ExecutionPhase]) -> IvyJson {
     predicate(
         "in",
         "data:/phase",
-        IvyJson::Array(values.iter().map(|v| (*v).into()).collect()),
+        IvyJson::Array(values.iter().map(|v| v.json()).collect()),
     )
+}
+fn cleanup_eligible() -> IvyJson {
+    group(
+        "or",
+        vec![
+            IvyJson::object([
+                ("op", "isNull".into()),
+                ("field", "data:/cleanup/state".into()),
+            ]),
+            predicate("ne", "data:/cleanup/state", "blocked".into()),
+        ],
+    )
+}
+fn present(field: &str) -> IvyJson {
+    IvyJson::object([
+        ("op", "not".into()),
+        (
+            "arg",
+            IvyJson::object([("op", "isNull".into()), ("field", field.into())]),
+        ),
+    ])
 }
 fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
     value
@@ -47,9 +68,7 @@ fn nonempty(value: Option<&JsString>) -> bool {
     value.is_some_and(|v| !v.0.is_empty())
 }
 fn terminal(value: &IvyJson) -> bool {
-    ["settled", "deleted", "failed"]
-        .iter()
-        .any(|p| value.get("phase") == Some(&(*p).into()))
+    ExecutionPhase::read(value.get("phase")).is_some_and(ExecutionPhase::terminal)
 }
 impl AssignmentScan {
     /// Returns newly fenced jobs for the owning runtime's preflight driver.
@@ -100,14 +119,38 @@ impl AssignmentScan {
             .request(
                 "objects.query",
                 request(
-                    phases(&[
-                        "queued",
-                        "preflight",
-                        "starting",
-                        "running",
-                        "archiving",
-                        "deleting",
-                    ]),
+                    group(
+                        "and",
+                        vec![
+                            cleanup_eligible(),
+                            group(
+                                "or",
+                                vec![
+                                    phases(&[
+                                        ExecutionPhase::Queued,
+                                        ExecutionPhase::Preflight,
+                                        ExecutionPhase::Starting,
+                                        ExecutionPhase::Running,
+                                        ExecutionPhase::Archiving,
+                                        ExecutionPhase::Deleting,
+                                    ]),
+                                    group(
+                                        "and",
+                                        vec![
+                                            predicate("eq", "data:/phase", "failed".into()),
+                                            predicate(
+                                                "eq",
+                                                "data:/errorCode",
+                                                "native_backend_required".into(),
+                                            ),
+                                            present("data:/archivedAt"),
+                                            present("data:/result"),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
                     self.cursor.as_ref(),
                     true,
                 ),
@@ -127,7 +170,7 @@ impl AssignmentScan {
                             group(
                                 "and",
                                 vec![
-                                    phases(&["archived", "settled"]),
+                                    phases(&[ExecutionPhase::Archived, ExecutionPhase::Settled]),
                                     predicate(
                                         "eq",
                                         "data:/delivery/state",
@@ -168,6 +211,7 @@ impl AssignmentScan {
                 vec![
                     parent.clone(),
                     predicate("eq", "data:/phase", "archived".into()),
+                    cleanup_eligible(),
                     predicate(
                         "lte",
                         "data:/deleteAfter",
@@ -185,7 +229,15 @@ impl AssignmentScan {
             .client
             .request(
                 "objects.query",
-                request(phases(&["starting", "preflight", "running"]), None, false),
+                request(
+                    phases(&[
+                        ExecutionPhase::Starting,
+                        ExecutionPhase::Preflight,
+                        ExecutionPhase::Running,
+                    ]),
+                    None,
+                    false,
+                ),
                 RequestOptions::default(),
             )
             .await?;
@@ -220,6 +272,10 @@ impl AssignmentScan {
                 );
                 let current = current.as_ref().unwrap();
                 let value = current.required("value")?;
+                if value.get("phase") == Some(&"failed".into()) {
+                    self.repair_cleanup_failure(advance, current).await?;
+                    return Ok(());
+                }
                 let id = text(value, "executionId")?.to_utf8()?;
                 key = format!("execution:{id}");
                 if value.get("phase") == Some(&"queued".into()) {
@@ -267,6 +323,48 @@ impl AssignmentScan {
         }
         Ok(())
     }
+    async fn repair_cleanup_failure(
+        &self,
+        advance: &AssignmentAdvance<'_, '_, '_, '_>,
+        current: &IvyJson,
+    ) -> IvyResult<()> {
+        let value = current.required("value")?;
+        let pin = current.required("pin")?;
+        let revision = pin
+            .required("revision")?
+            .as_f64()
+            .ok_or_else(IvyError::internal)?;
+        if revision <= 1.0 || value.get("errorCode") != Some(&"native_backend_required".into()) {
+            return Ok(());
+        }
+        let previous = advance
+            .execution
+            .native
+            .evidence
+            .store
+            .read(
+                Record::Execution,
+                &IvyJson::object([
+                    ("objectId", pin.required("objectId")?.clone()),
+                    ("revision", (revision - 1.0).into()),
+                ]),
+            )
+            .await?;
+        let prior = previous.required("value")?;
+        if !crate::assignment_cleanup::failed_delete_matches(prior, value) {
+            return Ok(());
+        }
+        let mut next = crate::assignment_cleanup::CleanupAction::Delete.issue(
+            value,
+            "native_backend_required",
+            &advance.execution.now()?,
+            true,
+        );
+        next.insert("phase", ExecutionPhase::Deleting.json());
+        next.insert("errorCode", IvyJson::Null);
+        advance.execution.update(current, &next).await?;
+        Ok(())
+    }
     async fn recover(
         &self,
         advance: &AssignmentAdvance<'_, '_, '_, '_>,
@@ -295,6 +393,23 @@ impl AssignmentScan {
             + 1.0;
         let age = execution.clock.utc_millis() as f64 - parse_date(&text(value, "updatedAt")?);
         let disposition = execution_failure_disposition(code, attempts, age);
+        let cleanup = crate::assignment_cleanup::CleanupAction::for_execution(value);
+        let cleanup_blocked = cleanup.is_some()
+            && (disposition == "terminal" || crate::assignment_cleanup::identity_missing(code));
+        if let Some(action) = cleanup {
+            let next = action.issue(value, code, &execution.now()?, cleanup_blocked);
+            current = execution.update(&current, &next).await?;
+        }
+        let value = current.required("value")?;
+        if cleanup_blocked {
+            if let Some(retry) = retry {
+                store
+                    .journal
+                    .delete_technical(RETRY_KEY, &retry.pin.object_id)?;
+            }
+            issues.issue(key, code);
+            return Ok(());
+        }
         if disposition != "terminal" {
             let backoff = if disposition == "pending" {
                 5000.0
@@ -332,7 +447,50 @@ impl AssignmentScan {
                 .journal
                 .delete_technical(RETRY_KEY, &retry.pin.object_id)?;
         }
+        if cleanup.is_some() {
+            issues.issue(key, code);
+            return Ok(());
+        }
         let now = execution.now()?;
+        // Delivery happens after the original turn. Its own terminal record
+        // retains any operation/evidence; it must not overwrite that turn.
+        if value.get("phase") == Some(&"completed".into())
+            && value.get("result").is_some_and(|v| !v.is_null())
+        {
+            let mut next = value.clone();
+            let mut delivery = if let Some(delivery) = value.get("delivery") {
+                delivery.clone()
+            } else {
+                IvyJson::object([
+                    ("executionId", value.required("executionId")?.clone()),
+                    (
+                        "resultHash",
+                        ivy_contracts::hash::hash_json(value.required("result")?)?.into(),
+                    ),
+                    ("operationId", IvyJson::Null),
+                    ("request", IvyJson::Null),
+                    ("evidence", IvyJson::Null),
+                    ("expiresAt", IvyJson::Null),
+                ])
+            };
+            let uncertain = delivery.get("operationId").is_some_and(|v| !v.is_null());
+            delivery.insert(
+                "state",
+                if uncertain {
+                    "outcome_unknown"
+                } else {
+                    "failed"
+                }
+                .into(),
+            );
+            delivery.insert("reason", code.into());
+            delivery.insert("terminal", true.into());
+            next.insert("delivery", delivery);
+            next.insert("updatedAt", IvyJson::String(now));
+            execution.update(&current, &next).await?;
+            issues.issue(key, code);
+            return Ok(());
+        }
         let reused = value
             .get("assignmentSnapshot")
             .and_then(|v| v.get("execution"))

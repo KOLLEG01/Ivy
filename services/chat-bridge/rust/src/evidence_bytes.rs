@@ -8,7 +8,7 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult,
     agent_schema::validate_agent,
     hash::digest,
-    json::{canonical, parse},
+    json::{canonical, canonical_matches, parse},
 };
 use std::collections::HashSet;
 
@@ -70,6 +70,26 @@ fn length_of(value: &Json) -> IvyResult<f64> {
     })
 }
 
+/// One canonical encoding, bound to the borrowed original until it is saved.
+pub(crate) struct EncodedEvidence<'a> {
+    original: &'a Json,
+    encoded: String,
+}
+impl<'a> EncodedEvidence<'a> {
+    pub(crate) fn new(original: &'a Json) -> IvyResult<Self> {
+        Ok(Self {
+            original,
+            encoded: canonical(original, MAXIMUM_EVIDENCE_BYTES)?,
+        })
+    }
+    pub(crate) fn original(&self) -> &'a Json {
+        self.original
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.encoded.len()
+    }
+}
+
 pub async fn save_chat_evidence(
     store: &ChatStore,
     parent_id: &str,
@@ -77,9 +97,27 @@ pub async fn save_chat_evidence(
     original: &Json,
     draft: &NativeDraftValidator<'_>,
 ) -> IvyResult<Pin> {
-    let encoded = canonical(original, MAXIMUM_EVIDENCE_BYTES)?;
+    save_encoded_chat_evidence(
+        store,
+        parent_id,
+        format,
+        EncodedEvidence::new(original)?,
+        draft,
+    )
+    .await
+}
+
+pub(crate) async fn save_encoded_chat_evidence(
+    store: &ChatStore,
+    parent_id: &str,
+    format: &str,
+    encoded: EncodedEvidence<'_>,
+    draft: &NativeDraftValidator<'_>,
+) -> IvyResult<Pin> {
+    let encoded = encoded.encoded;
     let value = parse(&encoded, MAXIMUM_EVIDENCE_BYTES)?;
     validate_body(format, &value, draft)?;
+    drop(value);
     let bytes = encoded.as_bytes();
     let content_hash = digest(bytes);
     let mut chunks = Vec::new();
@@ -201,7 +239,7 @@ pub async fn read_chat_evidence(
     let decoded = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
     let value = parse(decoded, usize::MAX).map_err(|_| invalid())?;
     require(
-        canonical(&value, MAXIMUM_EVIDENCE_BYTES)? == decoded,
+        canonical_matches(&value, decoded, MAXIMUM_EVIDENCE_BYTES)?,
         "Evidence must retain canonical JSON bytes.",
     )?;
     validate_body(format, &value, draft)?;

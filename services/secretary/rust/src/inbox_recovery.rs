@@ -212,11 +212,19 @@ impl InboxRecovery<'_, '_, '_> {
             if let Some(prepared) = prepared {
                 let key = prepared_key(prepared)?;
                 let destination = prepared.required("destination")?;
-                let id = mutation(&[
-                    value.required("callerPrincipalId")?.clone(),
-                    value.required("operationId")?.clone(),
-                    "effect".into(),
-                ])?;
+                let id = mutation(
+                    Some(
+                        value
+                            .required("operationId")?
+                            .as_js_string()
+                            .ok_or_else(IvyError::internal)?,
+                    ),
+                    vec![
+                        value.required("callerPrincipalId")?.clone(),
+                        value.required("operationId")?.clone(),
+                        "effect".into(),
+                    ],
+                )?;
                 effect = match self
                     .evidence
                     .store

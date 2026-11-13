@@ -314,8 +314,27 @@ fn opus_file(
     packets: usize,
     serial: u32,
 ) -> Vec<u8> {
+    opus_file_timed(
+        channels,
+        gain,
+        pre_skip,
+        trim,
+        packets,
+        serial,
+        (0, true, 1),
+    )
+}
+fn opus_file_timed(
+    channels: u8,
+    gain: i16,
+    pre_skip: u16,
+    trim: u64,
+    packets: usize,
+    serial: u32,
+    timing: (u64, bool, usize),
+) -> Vec<u8> {
     use ogg::writing::{
-        PacketWriteEndInfo::{EndPage, EndStream},
+        PacketWriteEndInfo::{EndPage, EndStream, NormalPacket},
         PacketWriter,
     };
     let mut writer = PacketWriter::new(Vec::new());
@@ -361,12 +380,82 @@ fn opus_file(
             .write_packet(
                 encoded,
                 serial,
-                if i + 1 == packets { EndStream } else { EndPage },
-                ((i + 1) * 960) as u64 - if i + 1 == packets { trim } else { 0 },
+                if i + 1 == packets && timing.1 {
+                    EndStream
+                } else if i + 1 == packets || (i + 1) % timing.2 == 0 {
+                    EndPage
+                } else {
+                    NormalPacket
+                },
+                timing.0 + ((i + 1) * 960) as u64 - if i + 1 == packets { trim } else { 0 },
             )
             .unwrap();
     }
     writer.into_inner()
+}
+#[test]
+fn native_opus_decoder_accepts_complete_unclosed_pages_and_initial_timestamps() {
+    let expected = decode_ogg_opus(&opus_file(1, 0, 312, 0, 42, 1)).unwrap();
+    for eos in [false, true] {
+        let bytes = opus_file_timed(1, 0, 312, 0, 42, 1, (312, eos, 14));
+        assert_eq!(decode_ogg_opus(&bytes).unwrap(), expected);
+        // Complete payload identity does not make a partial page, packet,
+        // missing page, corrupt CRC or trailing header a decodable recording.
+        for cut in 1..=28 {
+            assert!(decode_ogg_opus(&bytes[..bytes.len() - cut]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.extend(b"OggS");
+        assert!(decode_ogg_opus(&trailing).is_err());
+        let mut corrupt = bytes.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(decode_ogg_opus(&corrupt).is_err());
+        let second_page = 47;
+        let tags_end = second_page + 27 + bytes[second_page + 26] as usize + 16;
+        let audio_page_end = tags_end
+            + 27
+            + bytes[tags_end + 26] as usize
+            + bytes[tags_end + 27..tags_end + 27 + bytes[tags_end + 26] as usize]
+                .iter()
+                .map(|&b| b as usize)
+                .sum::<usize>();
+        let mut missing = bytes[..tags_end].to_vec();
+        missing.extend(&bytes[audio_page_end..]);
+        assert!(decode_ogg_opus(&missing).is_err());
+    }
+    let trimmed = decode_ogg_opus(&opus_file(2, 0, 312, 137, 42, 2)).unwrap();
+    assert_eq!(
+        decode_ogg_opus(&opus_file_timed(2, 0, 312, 137, 42, 2, (90_000, true, 14))).unwrap(),
+        trimmed
+    );
+    // A smaller first non-final granule or padding on an unclosed stream
+    // cannot be reinterpreted as end trimming.
+    assert!(decode_ogg_opus(&opus_file_timed(1, 0, 312, 137, 42, 1, (0, false, 14))).is_err());
+    // A CRC-valid page can still leave a packet unfinished. PacketReader
+    // yields preceding complete audio and otherwise tolerates this EOF.
+    let source = opus_file(1, 0, 312, 0, 3, 1);
+    let mut reader = ogg::reading::PacketReader::new(std::io::Cursor::new(source));
+    let mut writer = ogg::writing::PacketWriter::new(Vec::new());
+    while let Some(packet) = reader.read_packet().unwrap() {
+        let granule = packet.absgp_page();
+        writer
+            .write_packet(
+                packet.data,
+                1,
+                ogg::writing::PacketWriteEndInfo::EndPage,
+                granule,
+            )
+            .unwrap();
+    }
+    writer
+        .write_packet(
+            vec![0; 65_026],
+            1,
+            ogg::writing::PacketWriteEndInfo::NormalPacket,
+            0,
+        )
+        .unwrap();
+    assert!(decode_ogg_opus(&writer.into_inner()).is_err());
 }
 #[tokio::test]
 async fn native_opus_worker_matches_original_duration_gain_and_pcm_and_rejects_incomplete_data() {

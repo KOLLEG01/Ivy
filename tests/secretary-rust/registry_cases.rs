@@ -2,7 +2,7 @@
 mod reference_data;
 use super::*;
 use ivy_contracts::json::canonical;
-use ivy_secretary::registry::{secretary_registry, service_registry, triage_registry};
+use ivy_secretary::registry::{secretary_registry, service_registry};
 
 #[test]
 fn original_registry_contracts_tools_and_main_read_scopes() {
@@ -23,7 +23,6 @@ fn original_registry_contracts_tools_and_main_read_scopes() {
         &secretary_registry().unwrap(),
         corpus.required("baseline").unwrap(),
     );
-    compare(&triage_registry(), corpus.required("dormant").unwrap());
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 6);
     for row in rows {

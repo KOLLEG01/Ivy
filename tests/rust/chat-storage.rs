@@ -244,13 +244,16 @@ fn journal_fence_reopens_original_rows_and_preserves_sequence_watermark() {
             vec![text("out"), text("fixture@invalid"), text("message")],
         )
         .unwrap();
-    journal.flush().unwrap();
+    // Success itself is durable, even before a legacy flush boundary. A second
+    // connection observes the original database rather than a replayed copy.
     let disk = Connection::open(&path).unwrap();
     assert_eq!(
         disk.query_row("SELECT COUNT(*) FROM inbox", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         1
     );
+    assert_eq!(journal.connection().path(), disk.path());
+    journal.flush().unwrap();
     disk.close().unwrap();
     journal.close().unwrap();
     node(
@@ -293,18 +296,19 @@ fn journal_fence_reopens_original_rows_and_preserves_sequence_watermark() {
 }
 
 #[test]
-fn writer_failure_is_sticky_and_fence_cannot_confirm_speculative_memory() {
+fn write_failure_is_immediate_sticky_and_never_confirmed() {
     let fixture = Fixture::new();
     let path = fixture.0.join("whatsapp.sqlite");
     let mut journal = JournalIo::open(&path).unwrap();
     let disk = Connection::open(&path).unwrap();
     disk.execute_batch("CREATE TRIGGER reject_fixture BEFORE INSERT ON kv BEGIN SELECT RAISE(ABORT,'secret fixture must not escape'); END").unwrap();
-    journal
-        .write(
+    assert_eq!(
+        journal.write(
             "INSERT INTO kv VALUES(?,?)",
             vec![text("receipt"), text("true")],
-        )
-        .unwrap();
+        ),
+        Err(StorageUnavailable)
+    );
     assert_eq!(journal.flush(), Err(StorageUnavailable));
     assert_eq!(
         journal.write(
@@ -322,7 +326,7 @@ fn writer_failure_is_sticky_and_fence_cannot_confirm_speculative_memory() {
 }
 
 #[test]
-fn failed_memory_transaction_is_never_sent_to_disk() {
+fn failed_transaction_rolls_back_on_the_original_database() {
     let fixture = Fixture::new();
     let path = fixture.0.join("whatsapp.sqlite");
     let mut journal = JournalIo::open(&path).unwrap();
@@ -349,4 +353,32 @@ fn failed_memory_transaction_is_never_sent_to_disk() {
             .unwrap(),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contended_database_owner_keeps_the_async_scheduler_available() {
+    use ivy_chat_bridge::whatsapp::journal_owner::Journal;
+    let fixture = Fixture::new();
+    let path = fixture.0.join("whatsapp.sqlite");
+    let journal = Journal::new(JournalIo::open(&path).unwrap());
+    let disk = Connection::open(&path).unwrap();
+    disk.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        disk.execute_batch("COMMIT").unwrap();
+    });
+    let mut writes = tokio::task::JoinSet::new();
+    for index in 0..2 {
+        let journal = journal.clone();
+        writes.spawn(async move { journal.set(&format!("receipt-{index}"), &true.into()) });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        release.await.unwrap();
+        while let Some(result) = writes.join_next().await {
+            result.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    journal.close().await.unwrap();
 }

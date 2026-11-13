@@ -6,7 +6,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
-    hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    hash::hash_json, json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 
 pub fn contention(error: &IvyError) -> bool {
@@ -234,8 +234,11 @@ impl<'a> ChatOperations<'a> {
             )?;
             if current.value.get("phase") == Some(&Json::from("succeeded")) {
                 require(
-                    canonical(current.value.required("outcome")?, MANAGEMENT_FRAME_BYTES)?
-                        == canonical(outcome, MANAGEMENT_FRAME_BYTES)?,
+                    canonical_equal(
+                        current.value.required("outcome")?,
+                        outcome,
+                        MANAGEMENT_FRAME_BYTES,
+                    )?,
                     "mutation_conflict",
                     "The original action has another saved outcome.",
                 )?;

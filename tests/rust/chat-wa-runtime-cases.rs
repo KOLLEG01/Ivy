@@ -9,6 +9,7 @@ use ivy_chat_bridge::{
         journal_io::JournalIo,
         journal_owner::Journal,
         messages::Translator,
+        native_event::{EventProjection, NativeEvent, NativeEventKind},
         runtime::{
             BoolFuture, RuntimeAttached, RuntimeAttachmentFactory, RuntimeCallbacks, RuntimeMedia,
             RuntimeParts, RuntimeResources, RuntimeSocket, RuntimeTimer, RuntimeTimers,
@@ -294,15 +295,15 @@ impl RuntimeAttached for Attached {
     fn needs_recovery(&self) -> bool {
         *self.recovery.lock().unwrap()
     }
-    fn notification<'a>(&'a self, event: &'a Json, commentary: bool) -> RequestFuture<'a> {
-        let busy = match f(event, "method").as_str().unwrap_or_default().as_str() {
-            "turn/started" => true.into(),
-            "turn/completed" => false.into(),
+    fn notification<'a>(&'a self, event: &'a NativeEvent, commentary: bool) -> RequestFuture<'a> {
+        let busy = match event.kind {
+            NativeEventKind::Started => true.into(),
+            NativeEventKind::Completed => false.into(),
             _ => Json::Null,
         };
         self.call(
             "notification",
-            vec![event.clone(), commentary.into()],
+            vec![event_view(event), commentary.into()],
             Json::object([("busy", busy)]),
         )
     }
@@ -401,6 +402,11 @@ impl RuntimeSocket for Socket {
             }
         }
         value
+    }
+    fn needs_output(&self) -> bool {
+        f(&self.probe.state.lock().unwrap().current, "pendingOutput")
+            .as_bool()
+            .unwrap_or(false)
     }
     fn flush(&self) -> ServiceFuture<()> {
         self.effect("flush")
@@ -511,6 +517,60 @@ async fn finish<T: Send + 'static>(
     .await
     .unwrap_or_else(|_| panic!("Runtime probe completion timed out: {label}"))
 }
+fn event_view(event: &NativeEvent) -> Json {
+    let mut value = Json::object([
+        (
+            "thread",
+            event
+                .thread_id
+                .clone()
+                .map(Json::String)
+                .unwrap_or(Json::Null),
+        ),
+        (
+            "turn",
+            event
+                .turn_id
+                .clone()
+                .map(Json::String)
+                .unwrap_or(Json::Null),
+        ),
+    ]);
+    match &event.kind {
+        NativeEventKind::Started => {
+            value.insert("method", "turn/started".into());
+        }
+        NativeEventKind::Completed => {
+            value.insert("method", "turn/completed".into());
+        }
+        NativeEventKind::Agent {
+            id,
+            text,
+            commentary,
+        } => {
+            value.insert("method", "agent".into());
+            value.insert("id", id.clone().map(Json::String).unwrap_or(Json::Null));
+            value.insert("text", text.clone().map(Json::String).unwrap_or(Json::Null));
+            value.insert("commentary", (*commentary).into());
+        }
+        NativeEventKind::User { client_id, source } => {
+            value.insert("method", "user".into());
+            value.insert(
+                "client",
+                client_id.clone().map(Json::String).unwrap_or(Json::Null),
+            );
+            value.insert(
+                "source",
+                result(
+                    source
+                        .clone()
+                        .map(|v| v.map(Json::String).unwrap_or(Json::Null)),
+                ),
+            );
+        }
+    }
+    value
+}
 fn frame(index: usize) -> Json {
     Json::object([(
         "params",
@@ -528,7 +588,15 @@ fn frame(index: usize) -> Json {
                         "params",
                         Json::object([
                             ("threadId", "thread".into()),
-                            ("index", Json::Number(index as f64)),
+                            ("turnId", "turn".into()),
+                            (
+                                "item",
+                                Json::object([
+                                    ("type", "agentMessage".into()),
+                                    ("id", format!("item-{index}").into()),
+                                    ("text", format!("message-{index}").into()),
+                                ]),
+                            ),
                         ]),
                     ),
                 ]),
@@ -583,12 +651,18 @@ async fn apply(
         "time" => probe.state.lock().unwrap().now = f(a, "now").as_f64().unwrap() as i64,
         "start" => runtime.start(),
         "timer" => {
+            // The corpus's individual poll lanes now share one reconciliation timer.
+            let timer_name = s(a, "name");
+            let timer_name = match timer_name.as_str() {
+                "control" | "listener" => "reconcile",
+                name => name,
+            };
             let tick = timers
                 .entries
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|t| t.name == s(a, "name") && !*t.cleared.lock().unwrap())
+                .find(|t| t.name == timer_name && !*t.cleared.lock().unwrap())
                 .unwrap()
                 .tick
                 .clone();
@@ -603,47 +677,313 @@ async fn apply(
     }
     Ok(Json::Null)
 }
+// The original domain results and SQLite snapshots remain exact. Only these
+// specified scheduler changes replace their old poll/overflow traces.
+fn expected_runtime(row: &Json) -> Json {
+    let mut row = row.clone();
+    let label = s(&row, "label");
+    let mut steps = f(&row, "steps").as_array().unwrap().to_vec();
+    let events = |raw: &str| json(raw);
+    let set = |step: &mut Json, value: Json| {
+        step.insert("events", value);
+    };
+    if label == "new-event-revision-rejects-old-busy-read"
+        || label == "retention-skips-media-while-busy"
+    {
+        let at = if label.starts_with("new-event") { 1 } else { 3 };
+        let mut skip_flush = true;
+        let updated = f(&steps[at], "events")
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                let name = event.as_array().unwrap()[0].as_str().unwrap();
+                if name == "readReceipts" {
+                    return false;
+                }
+                if name == "flush" && skip_flush {
+                    skip_flush = false;
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        set(&mut steps[at], Json::Array(updated));
+    } else if label == "native-event-buffer-bounded" {
+        // Overflow discards the live queue and waits for its original in-flight
+        // event before one ordered history recovery, instead of 256 callbacks.
+        set(
+            &mut steps[1],
+            events(r#"[["A.invalidate",false],["A.prepare"]]"#),
+        );
+        set(
+            &mut steps[2],
+            events(
+                r#"[["A.preferences"],["A.tick",false],["A.setBusy",false],["A.notices"],["A.outbox"],["flush"],["flush"],["flush"]]"#,
+            ),
+        );
+    } else if label == "start-timers-and-close-order" {
+        set(
+            &mut steps[0],
+            events(
+                r#"[["socketStart"],["timer","activity",5000],["timer","status",10000],["timer","reconcile",30000],["timer","retention",3600000]]"#,
+            ),
+        );
+        for at in [1, 2] {
+            set(
+                &mut steps[at],
+                events(
+                    r#"[["readReceipts"],["A.invalidate",false],["A.preferences"],["A.tick",false],["A.setBusy",false],["A.notices"],["A.outbox"],["flush"],["flush"],["flush"]]"#,
+                ),
+            );
+        }
+        set(
+            &mut steps[3],
+            events(
+                r#"[["clearTimer","activity"],["clearTimer","status"],["clearTimer","reconcile"],["clearTimer","retention"],["socketClose"],["authClose",true],["lockClose"]]"#,
+            ),
+        );
+    }
+    row.insert("steps", Json::Array(steps));
+    row
+}
+fn harness(
+    spec: &Json,
+) -> (
+    WhatsAppRuntime,
+    Journal,
+    Arc<Probe>,
+    Arc<Timers>,
+    Arc<Socket>,
+) {
+    let journal = Journal::new(JournalIo::open(":memory:").unwrap());
+    let probe = Arc::new(Probe {
+        state: Mutex::new(State {
+            current: Json::Object(vec![]),
+            now: 1000,
+            events: vec![],
+            counts: HashMap::new(),
+            gates: HashMap::new(),
+            ready: VecDeque::new(),
+            closing: false,
+            recovery: 0,
+        }),
+        start: Instant::now(),
+        ready_changed: Notify::new(),
+    });
+    let timers = Arc::new(Timers {
+        probe: probe.clone(),
+        entries: Mutex::new(vec![]),
+    });
+    let socket = Arc::new(Socket {
+        probe: probe.clone(),
+        callbacks: Mutex::new(None),
+    });
+    let status = probe.clone();
+    let auth = probe.clone();
+    let lock = probe.clone();
+    let auth_journal = journal.clone();
+    let runtime=WhatsAppRuntime::with_dependencies(RuntimeParts{
+        config:spec.get("config").cloned().unwrap_or_else(||json(r#"{"accountId":"account","botPhoneNumber":"+15555550200","senders":[{"phoneNumber":"+15555550201","principalId":"sender","channelId":"channel"}],"since":"2024-01-01T00:00:00Z"}"#)),
+        host_id:"host".into(),journal:journal.clone(),socket:socket.clone(),media:Arc::new(Media(probe.clone())),factory:Arc::new(Factory),
+        resources:RuntimeResources{
+            status:Arc::new(move |value|{let probe=status.clone();Box::pin(async move {probe.call("status".into(),vec![value],Json::Null).await?;Ok(())})}),
+            retire_account:Arc::new(move ||{let auth=auth.clone();let lock=lock.clone();let journal=auth_journal.clone();Box::pin(async move {auth.emit("authClose",vec![journal.access(|_|Ok(())).is_err().into()]);unwrap(auth.take("authClose",Json::Null))?;lock.sync("lockClose",vec![],Json::Null)?;Ok(())})})},
+        translator:Translator::new(spec.get("language").and_then(Json::as_js_string)),
+    },probe.clone(),timers.clone());
+    (runtime, journal, probe, timers, socket)
+}
+
+fn count_events(events: &[Json], name: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| event.as_array().and_then(|e| e.first()) == Some(&Json::from(name)))
+        .count()
+}
+async fn close_runtime(runtime: WhatsAppRuntime, probe: &Arc<Probe>) {
+    finish(
+        tokio::spawn(async move { runtime.close().await }),
+        probe,
+        "targeted runtime close",
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn socket_signals_coalesce_and_idle_timers_only_reconcile_slowly() {
+    use ivy_chat_bridge::whatsapp::runtime::RuntimeSignal;
+    let (runtime, _, probe, timers, socket) = harness(&Json::Null);
+    runtime.attach(Some(make(&probe, "A")));
+    drain(&probe).await;
+    probe.collect();
+    let callback = socket
+        .callbacks
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .wake
+        .clone();
+    for _ in 0..100 {
+        callback(RuntimeSignal::Input);
+    }
+    drain(&probe).await;
+    let events = probe.collect();
+    assert_eq!(count_events(&events, "readReceipts"), 2);
+    assert_eq!(count_events(&events, "flush"), 0);
+    assert_eq!(count_events(&events, "A.tick"), 0);
+    assert_eq!(count_events(&events, "status"), 0);
+    for _ in 0..100 {
+        callback(RuntimeSignal::Receipt);
+    }
+    drain(&probe).await;
+    let events = probe.collect();
+    assert_eq!(count_events(&events, "flush"), 2);
+    assert_eq!(count_events(&events, "status"), 2);
+    assert_eq!(count_events(&events, "readReceipts"), 0);
+    runtime.start();
+    probe.collect();
+    let registrations: Vec<_> = timers
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|timer| timer.name)
+        .collect();
+    assert_eq!(
+        registrations,
+        ["activity", "status", "reconcile", "retention"]
+    );
+    let tick = |name| {
+        timers
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|timer| timer.name == name)
+            .unwrap()
+            .tick
+            .clone()
+    };
+    tick("activity")();
+    drain(&probe).await;
+    let events = probe.collect();
+    assert_eq!(count_events(&events, "presence"), 1);
+    assert_eq!(count_events(&events, "flush"), 0);
+    assert_eq!(count_events(&events, "readReceipts"), 0);
+    tick("reconcile")();
+    drain(&probe).await;
+    let events = probe.collect();
+    assert_eq!(count_events(&events, "readReceipts"), 1);
+    assert_eq!(count_events(&events, "A.invalidate"), 1);
+    assert_eq!(count_events(&events, "A.tick"), 1);
+    close_runtime(runtime, &probe).await;
+}
+
+#[tokio::test]
+async fn byte_overflow_waits_for_the_original_delivery_then_recovers_before_live_events() {
+    let (runtime, _, probe, _, _) = harness(&Json::Null);
+    runtime.attach(Some(make(&probe, "A")));
+    drain(&probe).await;
+    probe.collect();
+    probe.patch(&json(r#"{"calls":{"A.notification":[{"gate":"original","value":{"busy":null}},{"value":{"busy":null}}]}}"#));
+    runtime.notification(&frame(0)).unwrap();
+    drain(&probe).await;
+    assert_eq!(count_events(&probe.collect(), "A.notification"), 1);
+    for index in 1..9 {
+        let mut value = frame(index);
+        let mut params = f(&value, "params").clone();
+        let mut payload = f(&params, "payload").clone();
+        let mut native_params = f(&payload, "params").clone();
+        let mut item = f(&native_params, "item").clone();
+        item.insert("text", "é😀".repeat(256 * 1024).into());
+        native_params.insert("item", item);
+        payload.insert("params", native_params);
+        params.insert("payload", payload);
+        value.insert("params", params);
+        runtime.notification(&value).unwrap();
+    }
+    drain(&probe).await;
+    let waiting = probe.collect();
+    assert_eq!(count_events(&waiting, "A.invalidate"), 1);
+    assert_eq!(count_events(&waiting, "A.prepare"), 1);
+    assert_eq!(count_events(&waiting, "A.tick"), 0);
+    assert_eq!(count_events(&waiting, "A.notification"), 0);
+    probe.release("original");
+    drain(&probe).await;
+    let recovered = probe.collect();
+    assert_eq!(count_events(&recovered, "A.tick"), 1);
+    assert_eq!(count_events(&recovered, "A.notification"), 0);
+    runtime.notification(&frame(9)).unwrap();
+    drain(&probe).await;
+    let live = probe.collect();
+    assert_eq!(count_events(&live, "A.notification"), 1);
+    assert_eq!(count_events(&live, "A.invalidate"), 0);
+    close_runtime(runtime, &probe).await;
+}
+
+#[tokio::test]
+async fn queued_preparation_survives_plain_ticks_on_the_shared_listener_lane() {
+    let (runtime, _, probe, _, _) = harness(&Json::Null);
+    runtime.attach(Some(make(&probe, "A")));
+    drain(&probe).await;
+    probe.collect();
+    probe.patch(&json(
+        r#"{"calls":{"A.tick":[{"gate":"old-read","value":false},{"value":false}]}}"#,
+    ));
+    runtime.run(RuntimeWork::Listener);
+    drain(&probe).await;
+    probe.collect();
+    for sequence in [1.0, 3.0] {
+        let notification = Json::object([(
+            "params",
+            Json::object([
+                ("serviceNodeId", "native-agent".into()),
+                (
+                    "payload",
+                    Json::object([
+                        ("serviceNodeId", "native-agent".into()),
+                        ("nativeVersion", "0.159.2".into()),
+                        ("epoch", "epoch".into()),
+                        ("sequence", Json::Number(sequence)),
+                        ("method", "delta".into()),
+                        ("params", Json::Null),
+                    ]),
+                ),
+            ]),
+        )]);
+        runtime.notification(&notification).unwrap();
+    }
+    for _ in 0..100 {
+        runtime.run(RuntimeWork::Listener);
+    }
+    probe.release("old-read");
+    drain(&probe).await;
+    let events = probe.collect();
+    assert_eq!(count_events(&events, "A.prepare"), 1);
+    assert_eq!(count_events(&events, "A.tick"), 1);
+    let prepare = events
+        .iter()
+        .position(|event| event.as_array().unwrap()[0] == Json::from("A.prepare"))
+        .unwrap();
+    let tick = events
+        .iter()
+        .position(|event| event.as_array().unwrap()[0] == Json::from("A.tick"))
+        .unwrap();
+    assert!(prepare < tick);
+    close_runtime(runtime, &probe).await;
+}
+
 #[tokio::test]
 async fn original_runtime_lanes_input_events_and_shutdown_match() {
-    let output = reference_data::read(include_bytes!("fixtures/chat-whatsapp-runtime-cases.json.gz"));
+    let output = reference_data::read(include_bytes!(
+        "fixtures/chat-whatsapp-runtime-cases.json.gz"
+    ));
     let oracle = json(&String::from_utf8(output).unwrap());
     let mut rows = Vec::new();
     for spec in f(&oracle, "specs").as_array().unwrap() {
-        let journal = Journal::new(JournalIo::open(":memory:").unwrap());
-        let probe = Arc::new(Probe {
-            state: Mutex::new(State {
-                current: Json::Object(vec![]),
-                now: 1000,
-                events: vec![],
-                counts: HashMap::new(),
-                gates: HashMap::new(),
-                ready: VecDeque::new(),
-                closing: false,
-                recovery: 0,
-            }),
-            start: Instant::now(),
-            ready_changed: Notify::new(),
-        });
-        let timers = Arc::new(Timers {
-            probe: probe.clone(),
-            entries: Mutex::new(vec![]),
-        });
-        let socket = Arc::new(Socket {
-            probe: probe.clone(),
-            callbacks: Mutex::new(None),
-        });
-        let status = probe.clone();
-        let auth = probe.clone();
-        let lock = probe.clone();
-        let auth_journal = journal.clone();
-        let runtime=WhatsAppRuntime::with_dependencies(RuntimeParts{
-            config:spec.get("config").cloned().unwrap_or_else(||json(r#"{"accountId":"account","botPhoneNumber":"+15555550200","senders":[{"phoneNumber":"+15555550201","principalId":"sender","channelId":"channel"}],"since":"2024-01-01T00:00:00Z"}"#)),
-            host_id:"host".into(),journal:journal.clone(),socket:socket.clone(),media:Arc::new(Media(probe.clone())),factory:Arc::new(Factory),
-            resources:RuntimeResources{
-                status:Arc::new(move |value|{let probe=status.clone();Box::pin(async move {probe.call("status".into(),vec![value],Json::Null).await?;Ok(())})}),
-                retire_account:Arc::new(move ||{let auth=auth.clone();let lock=lock.clone();let journal=auth_journal.clone();Box::pin(async move {auth.emit("authClose",vec![journal.access(|_|Ok(())).is_err().into()]);unwrap(auth.take("authClose",Json::Null))?;lock.sync("lockClose",vec![],Json::Null)?;Ok(())})})},
-            translator:Translator::new(spec.get("language").and_then(Json::as_js_string)),
-        },probe.clone(),timers.clone());
+        let (runtime, journal, probe, timers, socket) = harness(spec);
         runtime.attach(Some(make(&probe, "A")));
         drain(&probe).await;
         probe.collect();
@@ -784,7 +1124,35 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
                             flushes += 1;
                             None
                         } else {
-                            Some(event.clone())
+                            let mut event = event.clone();
+                            if event
+                                .as_array()
+                                .and_then(|v| v.first())
+                                .and_then(|v| v.as_str().ok())
+                                .is_some_and(|name| name.ends_with(".notification"))
+                            {
+                                if let Json::Array(values) = &mut event {
+                                    if values[1].get("method").is_some()
+                                        && values[1].get("thread").is_none()
+                                    {
+                                        let mut original = values[1].clone();
+                                        if let Some(index) = f(&original, "params")
+                                            .get("index")
+                                            .and_then(Json::as_f64)
+                                        {
+                                            original =
+                                                f(f(&frame(index as usize), "params"), "payload")
+                                                    .clone();
+                                        }
+                                        if let EventProjection::Event(projected) =
+                                            NativeEvent::project(&original, usize::MAX).unwrap()
+                                        {
+                                            values[1] = event_view(&projected);
+                                        }
+                                    }
+                                }
+                            }
+                            Some(event)
                         }
                     })
                     .collect();
@@ -804,7 +1172,7 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
     {
         assert_eq!(
             canonical(&scheduled_trace(a), usize::MAX).unwrap(),
-            canonical(&scheduled_trace(e), usize::MAX).unwrap(),
+            canonical(&scheduled_trace(&expected_runtime(e)), usize::MAX).unwrap(),
             "{}",
             s(e, "label")
         );

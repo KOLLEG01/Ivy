@@ -1,0 +1,73 @@
+name: "Copilot Setup Steps"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    # Fork PRs get no secrets, so they can't pull the private mock-server image.
+    # Without this the job template fails to prepare (empty
+    # `credentials.password`) the first time an external contributor edits this
+    # file — the same failure codspeed.yml hit. Same condition as e2e.yml.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      mock-server:
+        # Generated from .github/bartender-image.txt by
+        # scripts/ci/sync-bartender-image.sh.
+        image: ghcr.io/whiskeysockets-devtools/bartender@sha256:9f3a49dd9f944414fbda50571bba5f66f2ab6fdc48001e6803d4c09a1042c78e
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.BARTENDER_GHCR_TOKEN }}
+        ports:
+          - 8080:8080
+        env:
+          CHATSTATE_TTL_SECS: "3"
+        options: --log-driver none
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+
+      - name: Cache install-action tools
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.install-action
+          key: ${{ runner.os }}-install-action-${{ hashFiles('.github/workflows/copilot-setup-steps.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-install-action-
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch Rust dependencies
+        run: cargo fetch
+
+      - name: Wait for mock server
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sk https://localhost:8080/ > /dev/null 2>&1; then
+              echo "Mock server is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Mock server failed to become ready"
+          exit 1
+
+      - name: Export mock server URL
+        run: |
+          echo "MOCK_SERVER_URL=wss://127.0.0.1:8080/ws/chat" >> "$GITHUB_ENV"

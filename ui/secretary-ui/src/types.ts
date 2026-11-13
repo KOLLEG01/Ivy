@@ -14,6 +14,31 @@ export type ObjectTrigger = Secretary.ObjectTrigger;
 export type AssignmentTrigger = Secretary.AssignmentTrigger;
 export type Assignment = Secretary.Assignment;
 export type Execution = Secretary.Execution;
+export interface AssignmentSummary {
+  assignmentId: string;
+  name: string;
+  enabled: boolean;
+  triggerKind: string;
+  cadence: string | null;
+  intervalMinutes: number | null;
+  localTime: string | null;
+  topic: string | null;
+}
+export interface ExecutionSummary {
+  name: string;
+  triggerKind: string;
+  occurredAt: string;
+  createdAt: string;
+  completedAt: string | null;
+  phase: string;
+  errorCode: string | null;
+  cleanupState: string | null;
+  cleanupError: string | null;
+  deliveryState: string | null;
+  deliveryReason: string | null;
+  voiceState: string | null;
+  voiceReason: string | null;
+}
 export interface Workspace {
   scope: Secretary.Scope;
   configuration: Pin | null;

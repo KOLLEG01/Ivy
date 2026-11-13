@@ -18,8 +18,8 @@ use crate::{
     worker::ChatWorker,
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat,
+    json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_host_runtime::portable_native_files::NativeHelperLayout;
 use ivy_sdk::{
@@ -700,10 +700,12 @@ impl ChatService {
         transport: bool,
     ) -> IvyResult<()> {
         let settings = service_settings(config)?;
-        if canonical(settings.required("definition")?, MANAGEMENT_FRAME_BYTES)?
-            != canonical(generation.admission.definition(), MANAGEMENT_FRAME_BYTES)?
-            || config.get("serviceNodeId")
-                != Some(&Json::String(generation.service_node_id.clone()))
+        if !canonical_equal(
+            settings.required("definition")?,
+            generation.admission.definition(),
+            MANAGEMENT_FRAME_BYTES,
+        )? || config.get("serviceNodeId")
+            != Some(&Json::String(generation.service_node_id.clone()))
             || settings
                 .get("whatsappConfigPath")
                 .is_some_and(|value| !value.is_null())

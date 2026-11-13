@@ -2,7 +2,7 @@
 mod reference_data;
 use super::*;
 use ivy_contracts::{
-    checked_native_contract::CheckedNativeContracts, json::canonical,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
     operation::parse_operation_id_js,
 };
 use ivy_sdk::clock::Clock;
@@ -53,37 +53,93 @@ impl Clock for FixedClock {
 async fn assignment_target_pins_the_selected_backend_and_account() {
     let bytes = reference_data::read(include_bytes!("assignment-execution-cases.json.gz"));
     let corpus = parse(std::str::from_utf8(&bytes).unwrap(), 32 * 1024 * 1024).unwrap();
-    let input = corpus.required("rows").unwrap().as_array().unwrap()[71].required("input").unwrap();
+    let input = corpus.required("rows").unwrap().as_array().unwrap()[71]
+        .required("input")
+        .unwrap();
     for wrong_account in [false, true] {
-        let backend = IvyJson::object([("backendId", "codex".into()), ("provider", "codex".into()), ("accountId", "work".into())]);
+        let backend = IvyJson::object([
+            ("backendId", "reviewer".into()),
+            ("provider", "codex".into()),
+            ("accountId", "work".into()),
+        ]);
         let mut steps = input.required("steps").unwrap().as_array().unwrap()[..2].to_vec();
         let mut status = steps[1].required("value").unwrap().clone();
         let mut returned_backend = backend.clone();
-        if wrong_account { returned_backend.insert("accountId", "personal".into()); }
+        if wrong_account {
+            returned_backend.insert("accountId", "personal".into());
+        }
         status.insert("backend", returned_backend);
         steps[1].insert("value", status);
-        let client = Arc::new(Scripted { steps: Mutex::new(steps.into()), trace: Mutex::new(Vec::new()) });
+        let client = Arc::new(Scripted {
+            steps: Mutex::new(steps.into()),
+            trace: Mutex::new(Vec::new()),
+        });
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();
-        let store = Store { client: client.clone(), root: "root".into(), journal: &journal };
+        let store = Store {
+            client: client.clone(),
+            root: "root".into(),
+            journal: &journal,
+        };
         let service_node_id = "fixture.secretary".into();
-        let evidence = InboxEvidence { store: &store, settings: corpus.required("settings").unwrap(),
-            service_node_id: &service_node_id, cancellation: RequestOptions::default() };
+        let evidence = InboxEvidence {
+            store: &store,
+            settings: corpus.required("settings").unwrap(),
+            service_node_id: &service_node_id,
+            cancellation: RequestOptions::default(),
+        };
         let clock = FixedClock(0);
         let retained = CheckedNativeContracts::new(std::path::PathBuf::from("."));
         let policy = "policy".into();
-        let runner = AssignmentExecution { native: AssignmentNative { evidence: &evidence, tools: Arc::new(ToolClients::new(client.clone())) },
-            clock: &clock, retained: &retained, notification_policy: &policy };
-        let mut execution = input.required("current").unwrap().required("value").unwrap().clone();
+        let runner = AssignmentExecution {
+            native: AssignmentNative {
+                evidence: &evidence,
+                tools: Arc::new(ToolClients::new(client.clone())),
+            },
+            clock: &clock,
+            retained: &retained,
+            notification_policy: &policy,
+        };
+        let mut execution = input
+            .required("current")
+            .unwrap()
+            .required("value")
+            .unwrap()
+            .clone();
         let mut target = execution.required("executionTarget").unwrap().clone();
-        target.insert("backend", backend.clone()); execution.insert("executionTarget", target);
+        target.insert("backend", backend.clone());
+        execution.insert("executionTarget", target);
         let result = runner.target(&execution).await;
         let trace = client.trace.lock().unwrap();
-        assert_eq!(trace[1].required("params").unwrap().required("arguments").unwrap().get("backend"), Some(&backend));
-        if wrong_account { assert_eq!(result.unwrap_err().code, "secretary_execution_target_unavailable"); }
-        else {
-            let target = result.unwrap(); assert_eq!(target.get("backend"), Some(&backend));
+        assert_eq!(
+            trace[1]
+                .required("params")
+                .unwrap()
+                .required("arguments")
+                .unwrap()
+                .get("backend"),
+            Some(&backend)
+        );
+        if wrong_account {
+            assert_eq!(
+                result.unwrap_err().code,
+                "secretary_execution_target_unavailable"
+            );
+        } else {
+            let target = result.unwrap();
+            assert_eq!(target.get("backend"), Some(&backend));
             execution.insert("nativeTarget", target);
-            assert_eq!(runner.native.owner(&execution).unwrap().target().backend.as_ref().unwrap().account_id(), "work");
+            assert_eq!(
+                runner
+                    .native
+                    .owner(&execution)
+                    .unwrap()
+                    .target()
+                    .backend
+                    .as_ref()
+                    .unwrap()
+                    .account_id(),
+                "work"
+            );
         }
     }
 }
@@ -91,23 +147,46 @@ async fn assignment_target_pins_the_selected_backend_and_account() {
 #[test]
 fn assignment_thread_reuse_is_scoped_to_backend_and_account() {
     use ivy_secretary::assignment_runner::thread_lease_name;
-    let assignment = IvyJson::object([("assignmentId", "messages".into()), ("execution", IvyJson::object([("reuse", "assignment".into())]))]);
-    let backend = |account: &str| IvyJson::object([("backend", IvyJson::object([("backendId", "codex".into()),
-        ("provider", "codex".into()), ("accountId", account.into())]))]);
+    let assignment = IvyJson::object([
+        ("assignmentId", "messages".into()),
+        (
+            "execution",
+            IvyJson::object([("reuse", "assignment".into())]),
+        ),
+    ]);
+    let backend = |account: &str| {
+        IvyJson::object([(
+            "backend",
+            IvyJson::object([
+                ("backendId", "codex".into()),
+                ("provider", "codex".into()),
+                ("accountId", account.into()),
+            ]),
+        )])
+    };
     let first = thread_lease_name(&assignment, &backend("work")).unwrap();
-    assert_ne!(first, thread_lease_name(&assignment, &backend("personal")).unwrap());
-    assert_ne!(first, thread_lease_name(&assignment, &IvyJson::object(Vec::<(String, IvyJson)>::new())).unwrap());
-    assert_eq!(first, thread_lease_name(&assignment, &backend("work")).unwrap());
+    assert_ne!(
+        first,
+        thread_lease_name(&assignment, &backend("personal")).unwrap()
+    );
+    assert_ne!(
+        first,
+        thread_lease_name(
+            &assignment,
+            &IvyJson::object(Vec::<(String, IvyJson)>::new())
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        first,
+        thread_lease_name(&assignment, &backend("work")).unwrap()
+    );
 }
 #[tokio::test]
 async fn original_assignment_execution_transitions_and_traces() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = reference_data::read(include_bytes!("assignment-execution-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 201);
     for (index, row) in rows.iter().enumerate() {
@@ -260,7 +339,24 @@ async fn original_assignment_execution_transitions_and_traces() {
             .await
             .map(|v| v.unwrap_or(IvyJson::Null)),
             "start" => runner.start(current).await,
-            "run" => runner.run(current).await,
+            "run" => runner.run(current).await.map(|progress| {
+                if let Some(decision) = progress.decision {
+                    decision.for_execution(&progress.document).unwrap();
+                    assert_eq!(
+                        decision.result_hash(),
+                        hash_json(
+                            progress
+                                .document
+                                .required("value")
+                                .unwrap()
+                                .required("result")
+                                .unwrap()
+                        )
+                        .unwrap()
+                    );
+                }
+                progress.document
+            }),
             "archive" => runner.archive(current).await,
             "remove" => runner.remove(current).await,
             _ => panic!("Unknown transition"),
@@ -303,7 +399,7 @@ async fn original_assignment_execution_transitions_and_traces() {
                 call.insert("params", params);
             }
         }
-        let mut statement = journal.db.prepare("SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name").unwrap();
+        let mut statement = journal.db.prepare("SELECT d.key,d.name,d.current_revision,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.key,d.name").unwrap();
         let remaining = statement
             .query_map([], |r| {
                 Ok((

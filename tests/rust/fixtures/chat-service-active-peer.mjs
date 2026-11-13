@@ -166,7 +166,9 @@ function open(spec){
  return{url:base,root:env.root};
 }
 function summary(){return{calls:scope.calls,handshakes:scope.handshakes,heartbeats:scope.heartbeats,notifications:scope.notifications,bad:scope.bad,reads:scope.reads,held:scope.held,readsAfterArm:scope.reads-scope.armReads,pending:scope.pending,elapsedMs:Math.round(performance.now()-scope.started)};}
-async function quiet(){let previous='',stable=0;for(let n=0;n<1000;n++){const count=scope.calls.length+':'+scope.observer.prepare('PRAGMA data_version').get().data_version;if(!scope.pending&&count===previous){if(++stable>=20)return;}else stable=0;previous=count;await delay(10);}throw Error('Autonomous service did not settle');}
+// Local verification can run between RPCs without changing the database. Wait
+// through that work before arming a read; a 200 ms SQL-only gap is not quiescence.
+async function quiet(){let previous='',stable=0;for(let n=0;n<1000;n++){const count=scope.calls.length+':'+scope.observer.prepare('PRAGMA data_version').get().data_version;if(!scope.pending&&count===previous){if(++stable>=100)return;}else stable=0;previous=count;await delay(10);}throw Error('Autonomous service did not settle');}
 async function invoke(name,args){
  const[s,session]=[...sockets].find(([,v])=>v.generation===7)??[];if(!s||!session.registry)throw Error('No registered provider');
  const definition=session.registry.namespaces[0].tools.find(t=>t.name===name),id='active-'+(++serial),response=new Promise(done=>pending.set(id,done));

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "secretary-ui",
   "kind": "app",
-  "version": "0.4.0",
+  "version": "0.4.4",
   "description": "Static Secretary configuration and execution journal UI",
   "connectsToHive": false,
   "requirements": {
@@ -18,10 +18,7 @@
   "prepare": [
     {
       "executable": "node",
-      "args": [
-        "tools/build/run-npm.mjs",
-        "ci"
-      ],
+      "args": ["tools/build/run-npm.mjs", "ci"],
       "timeoutMs": 600000
     },
     {

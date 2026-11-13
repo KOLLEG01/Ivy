@@ -41,7 +41,9 @@ fn equal(actual: &Json, expected: &Json, label: &str) {
 fn oracle() -> &'static Json {
     static ORACLE: OnceLock<Json> = OnceLock::new();
     ORACLE.get_or_init(|| {
-        let output = reference_data::read(include_bytes!("fixtures/chat-collection-reads-cases.json.gz"));
+        let output = reference_data::read(include_bytes!(
+            "fixtures/chat-collection-reads-cases.json.gz"
+        ));
         if let Some(path) = std::env::var_os("IVY_CHAT_COLLECTION_READS_ORACLE_CAPTURE") {
             std::fs::write(path, &output).unwrap();
         }
@@ -106,7 +108,12 @@ fn snapshot(states: &BTreeMap<String, ChatCollectionReads>) -> Json {
                     ("textBytes", Json::Number(state.text_bytes as f64)),
                     (
                         "texts",
-                        Json::Array(state.texts.iter().map(text_summary).collect()),
+                        Json::Array(
+                            state
+                                .texts()
+                                .map(|text| text_summary(&JsString::from(text)))
+                                .collect(),
+                        ),
                     ),
                     ("next", result(state.next())),
                 ]);
@@ -261,4 +268,50 @@ fn ordered_reads_fallback_forks_and_terminal_proof_match_original() {
 #[test]
 fn actual_read_count_and_evidence_byte_bounds_match_original() {
     compare("limits");
+}
+
+#[test]
+fn utf8_accumulation_preserves_empty_parts_and_unicode_boundaries() {
+    use ivy_chat_bridge::collection_reads::Phase;
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let mut state = ChatCollectionReads::new("thread".into(), "turn".into());
+    state.phase = Phase::Full;
+    state.native_state = "completed".into();
+    let request = state.next().unwrap();
+    let items = ["", "Grüße 🌍", ""]
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            Json::object([
+                ("id", format!("item-{index}").into()),
+                ("type", "agentMessage".into()),
+                ("text", text.into()),
+            ])
+        })
+        .collect();
+    let observed = Json::object([
+        ("observationId", "original-read".into()),
+        ("method", request.get("method").unwrap().clone()),
+        ("params", request.get("params").unwrap().clone()),
+        (
+            "reply",
+            Json::object([(
+                "result",
+                Json::object([(
+                    "data",
+                    Json::Array(vec![Json::object([
+                        ("id", "turn".into()),
+                        ("status", "completed".into()),
+                        ("itemsView", "full".into()),
+                        ("items", Json::Array(items)),
+                    ])]),
+                )]),
+            )]),
+        ),
+    ]);
+    assert!(state.append(&observed, &catalogs).unwrap());
+    assert_eq!(state.text, "\n\nGrüße 🌍\n\n");
+    assert_eq!(state.text_bytes, state.text.len());
+    assert_eq!(state.texts().collect::<Vec<_>>(), vec!["", "Grüße 🌍", ""]);
 }

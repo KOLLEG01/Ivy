@@ -129,6 +129,8 @@ struct Stream {
     channels: usize,
     pre_skip: usize,
     decoded: usize,
+    granule_offset: Option<u64>,
+    last_page_decoded: usize,
     start: usize,
     tags: bool,
     scratch: Vec<f32>,
@@ -167,11 +169,55 @@ impl Stream {
             channels,
             pre_skip: u16::from_le_bytes([head[10], head[11]]) as usize,
             decoded: 0,
+            granule_offset: None,
+            last_page_decoded: 0,
             start,
             tags: false,
             scratch: vec![0f32; 5760 * channels],
         })
     }
+}
+
+// PacketReader deliberately tolerates trailing junk and unfinished packets at
+// physical EOF. Voice attachments must end on an intact page and packet; the
+// library still verifies each page's checksum while decoding below.
+fn complete_pages(mut bytes: &[u8]) -> Result<(), ()> {
+    let mut previous: Option<(u32, u32, bool)> = None;
+    let mut continued = false;
+    while !bytes.is_empty() {
+        let head = bytes.get(..27).ok_or(())?;
+        if &head[..4] != b"OggS" || head[4] != 0 || head[5] & !7 != 0 {
+            return Err(());
+        }
+        let serial = u32::from_le_bytes(head[14..18].try_into().unwrap());
+        let sequence = u32::from_le_bytes(head[18..22].try_into().unwrap());
+        let flags = head[5];
+        match previous {
+            Some((old, seq, false)) if old == serial => {
+                if sequence != seq.wrapping_add(1)
+                    || flags & 2 != 0
+                    || (flags & 1 != 0) != continued
+                {
+                    return Err(());
+                }
+            }
+            None | Some((_, _, true)) => {
+                if continued || flags & 3 != 2 || sequence != 0 {
+                    return Err(());
+                }
+            }
+            _ => return Err(()),
+        }
+        let segments = bytes.get(27..27 + head[26] as usize).ok_or(())?;
+        let size = 27 + segments.len() + segments.iter().map(|&s| s as usize).sum::<usize>();
+        bytes = bytes.get(size..).ok_or(())?;
+        continued = segments.last() == Some(&255);
+        if flags & 4 != 0 && (continued || segments.is_empty()) {
+            return Err(());
+        }
+        previous = Some((serial, sequence, flags & 4 != 0));
+    }
+    if continued { Err(()) } else { Ok(()) }
 }
 
 /// Decode only the Ogg/Opus container, trim pre-skip/final granules and apply
@@ -181,14 +227,13 @@ pub fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<u8>, ()> {
     if bytes.len() > MAX_INPUT {
         return Err(());
     }
+    complete_pages(bytes)?;
     let mut reader = PacketReader::new(Cursor::new(bytes));
     let mut stream: Option<Stream> = None;
     let mut samples = Vec::new();
-    let mut saw_end = false;
     while let Some(packet) = reader.read_packet().map_err(|_| ())? {
         if stream.is_none() {
             stream = Some(Stream::open(&packet, samples.len())?);
-            saw_end = false;
             continue;
         }
         let state = stream.as_mut().unwrap();
@@ -228,9 +273,28 @@ pub fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<u8>, ()> {
         if samples.len() > MAX_FRAMES + 24_000 {
             return Err(());
         }
-        if packet.last_in_stream() {
-            let end = usize::try_from(packet.absgp_page()).map_err(|_| ())?;
-            if end > state.decoded || end < state.pre_skip {
+        if packet.last_in_page() {
+            let granule = packet.absgp_page();
+            if granule == u64::MAX {
+                return Err(());
+            }
+            // RFC 7845 section 4.5 permits a nonzero initial timestamp. It
+            // never changes how many decoded samples pre-skip discards.
+            let offset = *state
+                .granule_offset
+                .get_or_insert_with(|| granule.saturating_sub(state.decoded as u64));
+            let end = usize::try_from(granule.checked_sub(offset).ok_or(())?).map_err(|_| ())?;
+            if end > state.decoded
+                || end < state.last_page_decoded
+                || (!packet.last_in_stream() && end != state.decoded)
+            {
+                return Err(());
+            }
+            state.last_page_decoded = state.decoded;
+            if !packet.last_in_stream() {
+                continue;
+            }
+            if end < state.pre_skip {
                 return Err(());
             }
             samples.truncate(state.start + (end - state.pre_skip).div_ceil(3));
@@ -238,10 +302,17 @@ pub fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<u8>, ()> {
                 return Err(());
             }
             stream = None;
-            saw_end = true;
         }
     }
-    if stream.is_some() || !saw_end || samples.is_empty() {
+    // WhatsApp also emits complete Ogg pages without an EOS marker. Decode
+    // their complete packets, without inventing an end-trim granule. Framing,
+    // sequence, CRC and page timing checks still apply to all supplied bytes.
+    if stream
+        .as_ref()
+        .is_some_and(|s| !s.tags || s.granule_offset.is_none())
+        || samples.is_empty()
+        || samples.len() > MAX_FRAMES
+    {
         return Err(());
     }
     audio_processing::encode_pcm16_wav(&samples, 16000).map_err(|_| ())

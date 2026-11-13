@@ -90,7 +90,9 @@ export async function readNativeTurnContents(owner: NativeOwner, snapshot: Agent
       const params = { ...record(snapshot.params), itemsView: 'full' };
       const full = await owner.read('thread/turns/list', params, snapshot.epoch);
       requireThat(turnOf(full, threadId, turnId, 'full')['status'] === turn['status'], 'native_turn_changed', 'The native turn changed while reading its contents.');
-      canonical(full, maximumBytes); return full;
+      canonical(full, maximumBytes);
+      await verifyNativeTurnContents(owner, full, threadId, turnId);
+      return full;
     }
     bytes += Buffer.byteLength(canonical(observed, maximumBytes));
     requireThat(bytes <= maximumBytes, 'native_turn_contents_limit', 'Complete native contents exceed their original byte budget.');

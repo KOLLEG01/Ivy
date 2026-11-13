@@ -16,7 +16,7 @@ use ivy_contracts::{
     agent_schema::validate_agent,
     chat_schema::validate_chat,
     hash::hash_json,
-    json::canonical,
+    json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
     native_backend::BackendIdentity,
     operation::{derive_operation_id_js, parse_operation_id_js},
@@ -31,7 +31,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn string<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
     value

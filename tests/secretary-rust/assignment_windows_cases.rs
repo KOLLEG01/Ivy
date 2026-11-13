@@ -21,7 +21,7 @@ impl Clock for WindowClock {
     }
 }
 fn snapshot(journal: &Journal) -> IvyJson {
-    let mut statement = journal.db.prepare("SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name").unwrap();
+    let mut statement = journal.db.prepare("SELECT d.key,d.name,d.current_revision,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.key,d.name").unwrap();
     let rows = statement
         .query_map([], |r| {
             Ok((

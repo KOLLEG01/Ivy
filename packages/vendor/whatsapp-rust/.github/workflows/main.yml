@@ -1,0 +1,300 @@
+permissions:
+  contents: read
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  PROTOC_VERSION: '3.25.3'
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  # The target dir is restored fresh each run (Swatinem cache), so incremental
+  # state is always cold and only bloats artifacts; worse, sccache refuses to
+  # cache incremental compilations, so leaving it on excludes the workspace
+  # crates from caching entirely.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check Bartender image pins
+        run: scripts/ci/sync-bartender-image.sh --check
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy Linter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+          components: clippy
+      # The voip example (built under --all-targets) links cpal, which needs ALSA headers.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reclaim unused Android SDK space
+        run: |
+          df -h /
+          sudo rm -rf --one-file-system /usr/local/lib/android
+          df -h /
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      # The voip example (built under --all-targets) links cpal, which needs ALSA headers.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # cargo-nextest ships pre-built binaries (nexte.st/docs/installation/pre-built-binaries),
+      # which is what install-action fetches — no compile step on the runner.
+      - name: Install protoc and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }},cargo-nextest
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      - name: Build project
+        run: cargo build --workspace --exclude e2e-tests --all-targets --verbose
+      - name: Run tests
+        run: cargo nextest run --profile ci --workspace --exclude e2e-tests
+      # nextest cannot run doctests (nextest-rs/nextest#16) and silently reports
+      # none, so they need their own libtest step — the workspace has ~200 doc
+      # examples whose compilation is asserted nowhere else.
+      - name: Run doctests
+        run: cargo test --workspace --exclude e2e-tests --doc --verbose
+      # waproto serde tests are feature-gated and produce zero tests under the
+      # default feature set, so exercise each representation explicitly. No
+      # doctest counterpart: the features only swap derives on generated code,
+      # whose doc comments the step above already builds.
+      - name: Test waproto serde (enum repr)
+        run: cargo nextest run --profile ci -p waproto --features serde-enum-repr
+      - name: Test waproto serde (snake_case)
+        run: cargo nextest run --profile ci -p waproto --features serde-snake-case
+
+  test-all-features:
+    name: Build & Lint (all features)
+    runs-on: ubuntu-latest
+    # Runs on every PR (no voip path filter): the voip-gated code is scattered across the client,
+    # handler, send and stanza layers, so enumerating its files in a path filter kept leaking. The
+    # webrtc/opus tree compiles once and is cached (sccache), so the steady-state cost is the
+    # workspace recompile with voip on, not the deps. The heavy relay e2e tests stay out of `--lib`.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reclaim unused Android SDK space
+        run: |
+          df -h /
+          sudo rm -rf --one-file-system /usr/local/lib/android
+          df -h /
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      # The voip example (built under --all-features --all-targets) links cpal,
+      # which needs ALSA on Linux.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install protoc and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }},cargo-nextest
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      - name: Build (all features)
+        run: cargo build --workspace --exclude e2e-tests --all-features --all-targets --verbose
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --exclude e2e-tests --all-features --all-targets -- -D warnings
+      # No `cargo test --all-features`: it enables the `danger-skip-*-verify` flags, which disable
+      # security verification (the cert-chain negative test is even cfg'd out), so the suite would
+      # change behavior rather than catch rot; build + clippy cover that. The voip suite runs under
+      # the explicit `voip` feature set instead, never `--all-features`.
+      - name: Test (voip)
+        run: |
+          cargo nextest run --profile ci -p wacore --features voip --lib
+          cargo nextest run --profile ci -p whatsapp-rust --features "voip tokio-native tokio-transport" --lib
+      # legacy-session-interop is off by default, so every other test job
+      # compiles its module away and never runs a single one of its tests.
+      - name: Test (legacy-session-interop)
+        run: cargo nextest run --profile ci -p wacore-libsignal --features legacy-session-interop
+
+  rustdoc:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    env:
+      # Broken intra-doc links and malformed doc attributes are only surfaced by
+      # rustdoc, never by clippy or rustc, so they need their own gate.
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reclaim unused Android SDK space
+        run: |
+          df -h /
+          sudo rm -rf --one-file-system /usr/local/lib/android
+          df -h /
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      # The voip-cli member links cpal, which needs ALSA headers.
+      - name: Install ALSA dev headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      # --all-features so the voip-gated docs are covered too. Default features
+      # alone would leave their links unchecked, and docs.rs builds with features
+      # on (hence the `cfg(docsrs)` in the workspace check-cfg).
+      - name: Build docs
+        run: cargo doc --workspace --no-deps --all-features
+
+  feature-matrix:
+    name: Feature Matrix (each feature)
+    runs-on: ubuntu-latest
+    # Individual features are only ever exercised in the combinations the other
+    # jobs happen to build (default / --all-features), so a feature whose gates
+    # are wrong compiles fine there and breaks for a downstream consumer that
+    # picks it alone. Restricted to the published library crates; bin/test
+    # members carry no feature surface worth enumerating.
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reclaim unused Android SDK space
+        run: |
+          df -h /
+          sudo rm -rf --one-file-system /usr/local/lib/android
+          df -h /
+      # `simd` needs nightly, so the matrix runs on the pinned toolchain.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      - name: Install protoc
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }}
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      # --no-dev-deps: dev-dependencies enable features on the crate under test
+      # (wacore/test-util, for one), which would mask exactly the gaps this
+      # job looks for.
+      - name: Check each feature
+        run: >
+          cargo hack check --each-feature --no-dev-deps
+          -p whatsapp-rust -p wacore -p wacore-binary -p wacore-appstate
+          -p wacore-libsignal -p wacore-noise -p waproto
+
+  test-stable:
+    name: Test Stable (no-simd)
+    runs-on: ubuntu-latest
+    # .cargo/config.toml sets nightly-only rustflags (-Zshare-generics) for the
+    # x86_64-linux target; a set-but-empty RUSTFLAGS takes precedence over
+    # config rustflags, keeping this stable-toolchain job buildable.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      # Pinned rather than `@stable`: this version is the workspace MSRV
+      # (`rust-version` in the root Cargo.toml). To raise the floor, bump both
+      # together — a floating `stable` would silently let the declared MSRV rot.
+      - uses: dtolnay/rust-toolchain@1.94.1
+      # The pre-built nextest binary is toolchain-independent — it drives this
+      # MSRV cargo the same way it drives the nightly one.
+      - name: Install protoc and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }},cargo-nextest
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      - name: Build wacore-binary (stable, no SIMD)
+        run: cargo build -p wacore-binary --no-default-features --verbose
+      - name: Test wacore-binary (stable, no SIMD)
+        run: cargo nextest run --profile ci -p wacore-binary --no-default-features --lib
+      - name: Build wacore-appstate (stable, no SIMD)
+        run: cargo build -p wacore-appstate --no-default-features --verbose
+      - name: Test wacore-appstate (stable, no SIMD)
+        run: cargo nextest run --profile ci -p wacore-appstate --no-default-features --lib
+      - name: Build wacore (stable, no SIMD)
+        run: cargo build -p wacore --no-default-features --verbose
+      - name: Test wacore (stable, no SIMD)
+        run: cargo nextest run --profile ci -p wacore --no-default-features --lib
+      # `rust-version` is published metadata for every member, but only the
+      # three crates above are exercised at that toolchain. This compiles the
+      # rest of the publishable set so the declared floor is a checked promise
+      # rather than an assertion. Check-only: the tests that matter here
+      # already ran above, and this is about the toolchain accepting the code.
+      - name: Check the remaining published crates at MSRV
+        run: >
+          cargo check --no-default-features --verbose
+          -p whatsapp-rust -p wacore-derive -p wacore-libsignal -p wacore-noise -p waproto
+          -p whatsapp-rust-ureq-http-client -p whatsapp-rust-chat-store
+          -p whatsapp-rust-sqlite-storage -p whatsapp-rust-tokio-transport

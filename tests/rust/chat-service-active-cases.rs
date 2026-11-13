@@ -128,6 +128,51 @@ fn domain(snapshot: &Json) -> Json {
     v.remove("transport");
     v
 }
+fn expected_domain(row: &Json) -> Json {
+    let mut snapshot = domain(field(field(row, "final"), "snapshot"));
+    if text(row, "label") == "cancel-queued" {
+        let Json::Array(revisions) = snapshot.get_mut("revisions").unwrap() else {
+            panic!()
+        };
+        // The original cancellation receipt pins the prepared call at revision 1.
+        // Keep that exact original alongside its later prevention receipt.
+        let retained = revisions
+            .iter()
+            .find_map(|r| {
+                r.get("value")?
+                    .get("outcome")?
+                    .get("input")?
+                    .get("data")?
+                    .get("nativeCalls")?
+                    .get("turn")
+                    .filter(|p| p.get("revision") == Some(&1.0.into()))
+            })
+            .unwrap()
+            .clone();
+        let mut prepared = revisions
+            .iter()
+            .find(|r| {
+                r.get("id") == retained.get("objectId") && r.get("revision") == Some(&2.0.into())
+            })
+            .unwrap()
+            .clone();
+        prepared.insert("revision", 1.0.into());
+        let value = prepared.get_mut("value").unwrap();
+        assert_eq!(
+            value.get("code"),
+            Some(&"native_operation_prevented".into())
+        );
+        value.insert("state", "prepared".into());
+        value.insert("code", Json::Null);
+        value.insert("epoch", Json::Null);
+        value.insert("evidence", Json::Null);
+        let created = field(value, "createdAt").clone();
+        value.insert("updatedAt", created);
+        revisions.push(prepared);
+        revisions.sort_by_cached_key(|r| canonical(r, usize::MAX).unwrap().into_bytes());
+    }
+    snapshot
+}
 fn mutations(snapshot: &Json) -> Json {
     array(
         field(snapshot, "transport")
@@ -271,7 +316,9 @@ async fn real_service_resumes_original_queue_lanes_and_wakes_only_the_current_tu
             equal(
                 field(&report, "readsAfterArm"),
                 field(row, "wakeReads"),
-                "wakePending must observe the selected turn during an active drain",
+                &format!(
+                    "{label}: wakePending must observe the selected turn during an active drain"
+                ),
             );
         } else if kind == "create" {
             let request = field(row, "request");
@@ -343,7 +390,7 @@ async fn real_service_resumes_original_queue_lanes_and_wakes_only_the_current_tu
         );
         equal(
             &domain(field(&actual, "snapshot")),
-            &domain(field(expected, "snapshot")),
+            &expected_domain(row),
             &format!("{label}: named local UUIDs only; exact domain snapshot"),
         );
         equal(

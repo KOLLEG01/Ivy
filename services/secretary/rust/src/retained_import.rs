@@ -73,17 +73,19 @@ pub(crate) fn map_prefix(state: &IvyJson) -> IvyResult<String> {
     ))
 }
 pub(crate) fn source_local(source: &Connection, id: &str) -> IvyResult<IvyJson> {
-    let row: Option<(String, String, i64, String)> = source
+    let row: Option<(String, String, i64, String, String)> = source
         .query_row(
-            "SELECT key,name,current_revision,value_json FROM technical_documents WHERE id=?",
+            "SELECT d.key,d.name,d.current_revision,d.value_json,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.id=?",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()
         .map_err(sqlite::error)?;
-    let (key, name, revision, json) = row.ok_or_else(|| {
+    let (key, name, revision, head, json) = row.ok_or_else(|| {
         failure("The original local import source is not present in the sealed backup.")
     })?;
+    crate::journal::check_technical_head(&head, &json)
+        .map_err(|_| failure("The sealed source head differs from its original revision."))?;
     Ok(IvyJson::object([
         ("key", key.into()),
         ("name", name.into()),

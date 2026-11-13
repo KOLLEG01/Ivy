@@ -67,34 +67,56 @@ fn delete_binary(db: &Connection, category: &str, id: &str) -> Result<()> {
 }
 fn get_session(db: &Connection, address: &str) -> Result<Option<Bytes>> {
     let id = signal_id(address)?;
-    binary_record(db, "session", &id, |value| {
-        auth_signal::decode(value)
-            .map_err(|_| invalid("session"))?
-            .into_session_record(local(db)?)
-            .map_err(protocol)?
-            .serialize()
-            .map_err(protocol)
-    })
-    .map(|v| v.map(Bytes::from))
-}
-fn put_session(db: &Connection, address: &str, bytes: &[u8]) -> Result<()> {
-    let id = signal_id(address)?;
-    // Deserializing without a process incarnation advances all reserved ranges
-    // before exporting the ordinary v1 record for the original client.
-    let record = SessionRecord::deserialize(bytes).map_err(protocol)?;
-    let previous = get(db, "session", &id)?;
-    if let Some(previous) = &previous {
-        let stored = auth_signal::decode(previous)
-            .map_err(|_| invalid("session"))?
-            .into_session_record(local(db)?)
-            .map_err(protocol)?;
-        if stored.serialize().map_err(protocol)? == record.serialize().map_err(protocol)? {
-            return Ok(());
-        }
+    let original = get_raw(db, "session", &id)?;
+    if let Some(saved) = get(db, "native-session", &id)? {
+        check_session_origin(&saved, original.as_deref())?;
+        return bytes(field(&saved, "record")?).map(|v| Some(Bytes::from(v)));
     }
-    let value = auth_signal::encode(record, previous.as_ref(), now_ms()?)
-        .map_err(|_| invalid("session projection"))?;
-    save_binary(db, "session", &id, bytes, value)
+    original
+        .map(|raw| {
+            let value =
+                ivy_contracts::json::parse(&raw, usize::MAX).map_err(|_| invalid("key JSON"))?;
+            auth_signal::decode(&value)
+                .map_err(|_| invalid("session"))?
+                .into_session_record(local(db)?)
+                .map_err(protocol)?
+                .serialize()
+                .map_err(protocol)
+                .map(Bytes::from)
+        })
+        .transpose()
+}
+fn session_origin(original: Option<&str>) -> Json {
+    original.map_or(Json::Null, |raw| ivy_contracts::hash::digest(raw).into())
+}
+fn check_session_origin(saved: &Json, original: Option<&str>) -> Result<()> {
+    if field(saved, "legacyHash")? != &session_origin(original) {
+        return Err(invalid("session origin changed"));
+    }
+    Ok(())
+}
+fn put_session(db: &Connection, address: &str, record: &[u8]) -> Result<()> {
+    let id = signal_id(address)?;
+    // Validate a recovery reload, then persist the exact native snapshot,
+    // including its counter lease. A valid archived state need not be
+    // expressible in v1 JSON, so exporting that format cannot gate durability.
+    SessionRecord::deserialize(record).map_err(protocol)?;
+    let original = get_raw(db, "session", &id)?;
+    if let Some(saved) = get(db, "native-session", &id)? {
+        check_session_origin(&saved, original.as_deref())?;
+    }
+    // Keep the original row and its unknown fields byte-for-byte. Detect a
+    // changed origin instead of falling back to an older ratchet after native
+    // state has advanced. New native sessions have no original JSON row.
+    put(
+        db,
+        "native-session",
+        &id,
+        Some(&Json::object([
+            ("legacyHash", session_origin(original.as_deref())),
+            ("record", buffer(record)),
+        ])),
+    )
 }
 
 fn sender_value(value: &Json) -> Result<Json> {

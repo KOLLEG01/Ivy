@@ -5096,8 +5096,6 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "whatsapp-rust"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cb354c32641cfe832bf5c5767a016762234c5efd1b4ce979e2b3e32175d96bc"
 dependencies = [
  "anyhow",
  "async-channel",

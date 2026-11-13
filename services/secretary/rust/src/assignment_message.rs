@@ -1,4 +1,4 @@
-//! Producer-independent message-channel admission using shared Date.parse semantics.
+//! Producer-independent message-channel admission using shared timestamp semantics.
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::clock::parse_date;
 

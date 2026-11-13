@@ -1,6 +1,7 @@
 //! Materialized inbox notice dispatch and recovery of the original Main receipt.
 use crate::{
     browser_notice::secretary_browser_notice,
+    delivery_outcome::DeliveryOutcome,
     engine::SecretaryEngine,
     inbox_evidence::ignored_reason,
     notice_evidence::{NoticeMethod, NoticeProvider, notice_evidence},
@@ -123,7 +124,10 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
                 Record::Item,
                 &changed(item.required("value")?, [("notice", notice.clone())]),
                 &IvyJson::object([("object", pin.clone())]),
-                &mutation(&[operation_id.clone(), pin.clone(), notice.clone()])?,
+                &mutation(
+                    Some(operation_id.as_js_string().ok_or_else(IvyError::internal)?),
+                    vec![operation_id.clone(), pin.clone(), notice.clone()],
+                )?,
             )
             .await?;
         Ok(())
@@ -227,12 +231,20 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
             )
             .await?;
         }
-        let idempotency = mutation(&[
-            IvyJson::String(id.clone()),
-            decision.required("actor")?.clone(),
-            decision.required("operationId")?.clone(),
-            "notice".into(),
-        ])?;
+        let idempotency = mutation(
+            Some(
+                decision
+                    .required("operationId")?
+                    .as_js_string()
+                    .ok_or_else(IvyError::internal)?,
+            ),
+            vec![
+                IvyJson::String(id.clone()),
+                decision.required("actor")?.clone(),
+                decision.required("operationId")?.clone(),
+                "notice".into(),
+            ],
+        )?;
         let retry = store
             .journal
             .named(RETRY_KEY, &String::from_utf16_lossy(&id.0), true)?;
@@ -715,12 +727,11 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
             notice,
         )
         .await?;
-        let state = if is(reply.required("data")?, "state", "confirmed") {
-            "confirmed"
-        } else if is(reply.required("data")?, "state", "outcome_unknown") {
-            "outcome_unknown"
-        } else {
-            "dispatching"
+        let outcome = DeliveryOutcome::main_reply(reply.required("data")?);
+        let state = match outcome {
+            DeliveryOutcome::Confirmed => "confirmed",
+            DeliveryOutcome::Unknown => "outcome_unknown",
+            _ => "dispatching",
         };
         let reason = match state {
             "confirmed" => IvyJson::Null,

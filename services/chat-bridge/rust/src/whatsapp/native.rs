@@ -6,6 +6,7 @@ use super::{
         RandomRetryIdentity, RetryIdentity,
     },
     commands::CommandMain,
+    history::{HistoryPage, MAX_CACHED_TURNS, MAX_HISTORY_BYTES, project_turn, turn_bytes},
     identity::identity,
     journal_owner::Journal,
     messages::Translator,
@@ -27,9 +28,7 @@ use ivy_sdk::{
     native_observations::NativeObservations,
     native_operation::NativeOperationCall,
     native_owner::{GuardFuture, NativeDispatchGuard, NativeOwner},
-    native_turn_contents::{
-        NativeTurnOwner, read_native_turn_contents, verify_native_turn_contents,
-    },
+    native_turn_contents::{NativeTurnOwner, read_native_turn_contents},
     operation_ids::scoped_operation_id,
     rpc::RequestFuture,
 };
@@ -172,7 +171,7 @@ struct CompletedTurn {
     key: String,
     epoch: Json,
     stamp: String,
-    turn: Json,
+    turn: Arc<Json>,
     bytes: usize,
 }
 #[derive(Default)]
@@ -707,6 +706,13 @@ impl WhatsAppNative {
         Ok(f(reply, "result").clone())
     }
     pub async fn turn_page(&self, thread_id: &JsString, cursor: Json) -> IvyResult<Json> {
+        Ok(self.shared_turn_page(thread_id, cursor).await?.into_json())
+    }
+    pub async fn shared_turn_page(
+        &self,
+        thread_id: &JsString,
+        cursor: Json,
+    ) -> IvyResult<HistoryPage> {
         let params = Json::object([
             ("threadId", Json::String(thread_id.clone())),
             ("cursor", cursor),
@@ -719,7 +725,7 @@ impl WhatsAppNative {
             .owner
             .observation("thread/turns/list", params.clone())
             .await?;
-        let mut page = self
+        let page = self
             .read_result(&snapshot, "thread/turns/list", &params)
             .await?;
         let data = f(&page, "data").as_array();
@@ -729,7 +735,10 @@ impl WhatsAppNative {
             "History recovery requires its one-turn metadata page.",
         )?;
         if data.unwrap().is_empty() {
-            return Ok(page);
+            return Ok(HistoryPage {
+                turns: vec![],
+                next_cursor: page.get("nextCursor").cloned(),
+            });
         }
         let turn = data.unwrap()[0].clone();
         let turn_id = f(&turn, "id").as_js_string().ok_or_else(|| {
@@ -756,90 +765,59 @@ impl WhatsAppNative {
                 .iter()
                 .find(|t| t.key == key && t.epoch == *f(&snapshot, "epoch") && t.stamp == stamp)
             {
-                page.insert("data", Json::Array(vec![saved.turn.clone()]));
-                return Ok(page);
+                return Ok(HistoryPage {
+                    turns: vec![saved.turn.clone()],
+                    next_cursor: page.get("nextCursor").cloned(),
+                });
             }
             state.completed_turns.retain(|t| t.key != key);
         }
         let owner: &dyn NativeTurnOwner = self.0.owner.as_ref();
-        let contents = read_native_turn_contents(
+        let verified = read_native_turn_contents(
             owner,
             self.0.main.catalogs(),
-            &snapshot,
+            snapshot,
             thread_id,
             turn_id,
             None,
         )
         .await?;
-        let verified = verify_native_turn_contents(
-            owner,
-            self.0.main.catalogs(),
-            &contents,
-            thread_id,
-            turn_id,
-        )
-        .await?;
-        let mut complete = object_options(&verified.turn);
-        complete.insert("itemsView", "full".into());
-        complete.insert(
-            "items",
-            Json::Array(
-                verified
-                    .items
-                    .into_iter()
-                    .map(|item| -> IvyResult<Json> {
-                        let kind =
-                            item.get("type")
-                                .and_then(Json::as_js_string)
-                                .ok_or_else(|| {
-                                    IvyError::new(
-                                        "native_read_failed",
-                                        "Native history items require string types.",
-                                    )
-                                })?;
-                        if ["userMessage", "steeringUserMessage", "agentMessage"]
-                            .iter()
-                            .any(|expected| kind == &JsString::from(*expected))
-                        {
-                            Ok(item)
-                        } else {
-                            let mut projected =
-                                Json::object([("id", item.required("id")?.clone())]);
-                            if let Some(kind) = item.get("type") {
-                                projected.insert("type", kind.clone());
-                            }
-                            Ok(projected)
-                        }
-                    })
-                    .collect::<IvyResult<Vec<_>>>()?,
-            ),
-        );
+        let mut projected = project_turn(verified.turn(), verified.items())?;
+        projected.insert("itemsView", "full".into());
+        let complete = Arc::new(projected);
         if ["completed", "failed", "interrupted"]
             .iter()
             .any(|status| f(&turn, "status").as_js_string() == Some(&JsString::from(*status)))
             && f(&turn, "completedAt").as_f64().is_some_and(f64::is_finite)
         {
-            let bytes = canonical(&complete, usize::MAX)?.len();
-            if bytes <= 32 * 1024 * 1024 {
+            let epoch = f(verified.snapshot(), "epoch").clone();
+            let bytes = turn_bytes(&complete)
+                .saturating_add(key.capacity())
+                .saturating_add(stamp.capacity())
+                .saturating_add(epoch.retained_bytes())
+                .saturating_add(std::mem::size_of::<CompletedTurn>());
+            if bytes <= MAX_HISTORY_BYTES {
                 let mut state = self.0.state.lock().unwrap();
                 state.completed_turns.retain(|t| t.key != key);
-                while state.completed_turns.len() >= 16
+                while state.completed_turns.len() >= MAX_CACHED_TURNS
                     || state.completed_turns.iter().map(|t| t.bytes).sum::<usize>() + bytes
-                        > 32 * 1024 * 1024
+                        > MAX_HISTORY_BYTES
                 {
                     state.completed_turns.pop_front();
                 }
                 state.completed_turns.push_back(CompletedTurn {
                     key,
-                    epoch: f(&snapshot, "epoch").clone(),
+                    epoch,
                     stamp,
                     turn: complete.clone(),
                     bytes,
                 });
             }
         }
-        page.insert("data", Json::Array(vec![complete]));
-        Ok(page)
+        Ok(HistoryPage {
+            turns: vec![complete],
+            next_cursor: page.get("nextCursor").cloned(),
+        })
     }
 }
 struct InputParameters<'a> {

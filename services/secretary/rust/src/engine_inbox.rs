@@ -53,7 +53,11 @@ fn validate_message(message: &IvyJson, source: &IvyJson) -> IvyResult<()> {
         )?;
     }
     if let Some(value) = message.get("url").filter(|value| !(value).is_null()) {
-        let url = url::Url::parse(&value.as_str()?).map_err(|_| {
+        // URL parsing consumes a Unicode scalar string. Retain the lossless
+        // source value for capture identity and evidence; only validation uses
+        // the same replacement of lone surrogates as the URL interface.
+        let text = value.as_js_string().ok_or_else(IvyError::internal)?;
+        let url = url::Url::parse(&String::from_utf16_lossy(&text.0)).map_err(|_| {
             IvyError::new(
                 "invalid_arguments",
                 "Source links must be absolute HTTP(S) URLs.",
@@ -502,7 +506,10 @@ impl SecretaryEngine<'_, '_, '_> {
                 Record::Operation,
                 &operation_name(caller, id)?,
                 &accepted,
-                &mutation(&[caller.clone(), id.clone(), "accept".into()])?,
+                &mutation(
+                    Some(id.as_js_string().ok_or_else(IvyError::internal)?),
+                    vec![caller.clone(), id.clone(), "accept".into()],
+                )?,
             )
             .await?;
         need(

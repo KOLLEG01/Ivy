@@ -4,11 +4,68 @@ use ivy_contracts::{IvyJson, IvyResult};
 
 const NATIVE_CALL: &str = "secretary/assignment-native-call";
 const THREAD_LEASE: &str = "secretary/thread-lease";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionPhase {
+    Queued,
+    Preflight,
+    Starting,
+    Running,
+    Completed,
+    Settled,
+    Archiving,
+    Archived,
+    Deleting,
+    Deleted,
+    Failed,
+}
+impl ExecutionPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Preflight => "preflight",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Settled => "settled",
+            Self::Archiving => "archiving",
+            Self::Archived => "archived",
+            Self::Deleting => "deleting",
+            Self::Deleted => "deleted",
+            Self::Failed => "failed",
+        }
+    }
+    pub fn read(value: Option<&IvyJson>) -> Option<Self> {
+        [
+            Self::Queued,
+            Self::Preflight,
+            Self::Starting,
+            Self::Running,
+            Self::Completed,
+            Self::Settled,
+            Self::Archiving,
+            Self::Archived,
+            Self::Deleting,
+            Self::Deleted,
+            Self::Failed,
+        ]
+        .into_iter()
+        .find(|phase| value.is_some_and(|v| v.is_str(phase.as_str())))
+    }
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Settled | Self::Deleted | Self::Failed)
+    }
+    pub fn json(self) -> IvyJson {
+        self.as_str().into()
+    }
+}
 pub fn thread_lease_name(assignment: &IvyJson, target: &IvyJson) -> IvyResult<String> {
     let mut name = if assignment.required("execution")?.get("reuse") == Some(&"main".into()) {
         "main".to_owned()
     } else {
-        format!("assignment-{}", assignment.required("assignmentId")?.as_str()?)
+        format!(
+            "assignment-{}",
+            assignment.required("assignmentId")?.as_str()?
+        )
     };
     if let Some(backend) = target.get("backend") {
         ivy_contracts::native_backend::BackendIdentity::from_json(backend)?;
@@ -57,17 +114,25 @@ pub fn execution_failure_disposition(code: &str, attempts: f64, age_ms: f64) -> 
 /// Call only after the execution revision has been durably saved. Recovery keeps
 /// native call bytes for precisely the phase that can still need that operation.
 pub fn release_calls(journal: &Journal, execution: &IvyJson) -> IvyResult<()> {
-    let phase = execution.required("phase")?.as_str()?;
+    let phase_value = execution.required("phase")?;
+    let phase = ExecutionPhase::read(Some(phase_value));
+    if phase.is_none() {
+        // This cleanup helper also accepts retained string phases outside the schema.
+        phase_value.as_str()?;
+    }
     let turn_started = execution
         .get("turnId")
         .and_then(IvyJson::as_js_string)
         .is_some_and(|s| !s.0.is_empty());
     let operations = execution.required("nativeOperations")?;
     for (key, needed) in [
-        ("threadStart", phase == "starting"),
-        ("turnStart", phase == "running" && !turn_started),
-        ("archive", phase == "archiving"),
-        ("delete", phase == "deleting"),
+        ("threadStart", phase == Some(ExecutionPhase::Starting)),
+        (
+            "turnStart",
+            phase == Some(ExecutionPhase::Running) && !turn_started,
+        ),
+        ("archive", phase == Some(ExecutionPhase::Archiving)),
+        ("delete", phase == Some(ExecutionPhase::Deleting)),
     ] {
         if needed {
             continue;

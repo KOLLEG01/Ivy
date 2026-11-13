@@ -64,6 +64,11 @@ Object.assign(defs, {
     definition: ref("Definition"),
     pollMs: integer(1000, 60000),
   }),
+  ConfiguredMainResume: object({
+    operationId: id,
+    main: ref("ObjectPin"),
+    binding: ref("ObjectPin"),
+  }),
   ExpectedBridge: object({
     principalId: id,
     callerPrincipalId: id,
@@ -107,6 +112,7 @@ defs.SavedDefinition.properties.channels = { ...array(ref("ChannelConfiguration"
 defs.Settings.properties.whatsappConfigPath = string(4096, 1);
 defs.Settings.properties.language = { enum: ["en", "de"] };
 defs.Settings.properties.diagnosticNotifications = { type: "boolean", default: false };
+defs.Settings.properties.resumeMain = nullable(ref("ConfiguredMainResume"));
 defs.Payload.properties.turnOptions = {
   type: "object",
   additionalProperties: false,

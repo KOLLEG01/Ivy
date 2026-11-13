@@ -8,7 +8,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
-    hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    hash::hash_json, json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::main_chat::main_notification;
 use std::{future::Future, pin::Pin as FuturePin};
@@ -33,7 +33,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn string<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
     value

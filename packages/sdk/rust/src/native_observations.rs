@@ -54,10 +54,18 @@ pub struct NativeThreadState {
     pub can_start_turn: bool,
     pub state: JsString,
 }
-#[derive(Clone, Copy)]
-enum ItemLayout {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ItemLayout {
     Direct,
     TurnWrapper,
+}
+impl ItemLayout {
+    pub(crate) fn original(self, entry: &IvyJson) -> &IvyJson {
+        match self {
+            Self::Direct => entry,
+            Self::TurnWrapper => entry.get("item").expect("verified native item envelope"),
+        }
+    }
 }
 
 /// Keep one interpreter per retained contract; successful layout discovery is cached.
@@ -103,7 +111,7 @@ impl<'a> NativeObservations<'a> {
             state: state.clone(),
         })
     }
-    fn item_layout(&self) -> IvyResult<ItemLayout> {
+    pub(crate) fn item_layout(&self) -> IvyResult<ItemLayout> {
         if let Some(value) = self.items.get() {
             return Ok(*value);
         }
@@ -153,6 +161,18 @@ impl<'a> NativeObservations<'a> {
         result: &IvyJson,
         turn_id: &JsString,
     ) -> IvyResult<Vec<IvyJson>> {
+        Ok(self
+            .native_turn_item_refs(result, turn_id)?
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+    /// Borrow the original checked item envelopes without copying their payloads.
+    pub fn native_turn_item_refs<'b>(
+        &self,
+        result: &'b IvyJson,
+        turn_id: &JsString,
+    ) -> IvyResult<Vec<&'b IvyJson>> {
         if turn_id.0.is_empty() {
             return Err(IvyError::new(
                 "native_turn_mismatch",
@@ -168,7 +188,7 @@ impl<'a> NativeObservations<'a> {
             .map(|value| {
                 let entry = record(Some(value))?;
                 match layout {
-                    ItemLayout::Direct => Ok(entry.clone()),
+                    ItemLayout::Direct => Ok(entry),
                     ItemLayout::TurnWrapper => {
                         if entry.get("turnId").and_then(IvyJson::as_js_string) != Some(turn_id) {
                             return Err(IvyError::new(
@@ -176,7 +196,7 @@ impl<'a> NativeObservations<'a> {
                                 "Native item belongs to another turn.",
                             ));
                         }
-                        Ok(record(entry.get("item"))?.clone())
+                        record(entry.get("item"))
                     }
                 }
             })

@@ -3,7 +3,8 @@
 use crate::limits::{COLLECTION_BYTES, COLLECTION_READS, MAXIMUM_EVIDENCE_BYTES};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, json::canonical,
+    checked_native_contract::CheckedNativeContracts,
+    json::{canonical_equal, canonical_size},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::native_observations::NativeObservations;
@@ -69,7 +70,8 @@ pub struct ChatCollectionReads {
     pub count: usize,
     pub text_bytes: usize,
     pub last_observed_at: Option<Json>,
-    pub texts: Vec<JsString>,
+    pub text: String,
+    text_ends: Vec<usize>,
     observations: HashSet<JsString>,
     cursors: HashSet<JsString>,
     turns: HashSet<JsString>,
@@ -88,7 +90,8 @@ impl ChatCollectionReads {
             count: 0,
             text_bytes: 0,
             last_observed_at: Some(Json::Null),
-            texts: Vec::new(),
+            text: String::new(),
+            text_ends: Vec::new(),
             observations: HashSet::new(),
             cursors: HashSet::new(),
             turns: HashSet::new(),
@@ -97,6 +100,14 @@ impl ChatCollectionReads {
     }
     pub fn fork(&self) -> Self {
         self.clone()
+    }
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        let mut start = 0;
+        self.text_ends.iter().map(move |&end| {
+            let text = &self.text[start..end];
+            start = end + 2;
+            text
+        })
     }
     pub fn next(&self) -> IvyResult<Json> {
         require(
@@ -168,7 +179,7 @@ impl ChatCollectionReads {
         self.cursors.clear();
         self.turns.clear();
     }
-    fn append_items(&mut self, items: &[Json]) -> IvyResult<()> {
+    fn append_items<'b>(&mut self, items: impl IntoIterator<Item = &'b Json>) -> IvyResult<()> {
         for item in items {
             let item = receiver(Some(item))?;
             let id = item.get("id").and_then(Json::as_js_string);
@@ -182,38 +193,67 @@ impl ChatCollectionReads {
                 && item.get("phase") != Some(&"commentary".into())
             {
                 let text = item.get("text").and_then(Json::as_js_string);
-                let encoded = text.and_then(|text| text.to_utf8().ok());
+                let encoded_bytes = text.and_then(|text| {
+                    char::decode_utf16(text.0.iter().copied()).try_fold(0, |bytes, character| {
+                        character.ok().map(|c| bytes + c.len_utf8())
+                    })
+                });
                 require(
-                    encoded.is_some(),
+                    encoded_bytes.is_some(),
                     "chat_result_text_invalid",
                     "Original reply text must encode losslessly as UTF-8.",
                 )?;
                 self.text_bytes +=
-                    encoded.unwrap().len() + if self.texts.is_empty() { 0 } else { 2 };
+                    encoded_bytes.unwrap() + if self.text_ends.is_empty() { 0 } else { 2 };
                 require(
                     self.text_bytes <= COLLECTION_BYTES,
                     "chat_collection_limit",
                     "Complete native reply text exceeds 64 MiB.",
                 )?;
-                self.texts.push(text.unwrap().clone());
+                if !self.text_ends.is_empty() {
+                    self.text.push_str("\n\n");
+                }
+                for character in char::decode_utf16(text.unwrap().0.iter().copied()) {
+                    self.text.push(character.unwrap());
+                }
+                self.text_ends.push(self.text.len());
             }
         }
         Ok(())
     }
     /// False is an in-progress observation, without extending the saved ledger.
     /// A failed append may have changed transient state, as in the original;
-    /// the collector uses fork before deciding which observation to retain.
+    /// the collector owns this transient state and caches it only after commit.
     pub fn append(
         &mut self,
         observed: &Json,
+        catalogs: &CheckedNativeContracts,
+    ) -> IvyResult<bool> {
+        self.append_inner(observed, None, catalogs)
+    }
+    pub(crate) fn append_sized(
+        &mut self,
+        observed: &Json,
+        bytes: usize,
+        catalogs: &CheckedNativeContracts,
+    ) -> IvyResult<bool> {
+        self.append_inner(observed, Some(bytes), catalogs)
+    }
+    fn append_inner(
+        &mut self,
+        observed: &Json,
+        bytes: Option<usize>,
         catalogs: &CheckedNativeContracts,
     ) -> IvyResult<bool> {
         let next = self.next()?;
         let method_matches = observed.get("method") == next.get("method");
         require(
             method_matches
-                && canonical(field(observed, "params")?, MANAGEMENT_FRAME_BYTES)?
-                    == canonical(field(&next, "params")?, MANAGEMENT_FRAME_BYTES)?,
+                && canonical_equal(
+                    field(observed, "params")?,
+                    field(&next, "params")?,
+                    MANAGEMENT_FRAME_BYTES,
+                )?,
             "chat_collection_gap",
             "Retained observations must answer the exact next original query.",
         )?;
@@ -225,7 +265,10 @@ impl ChatCollectionReads {
             "chat_collection_gap",
             "Native completion requires distinct original read observations.",
         )?;
-        let bytes = canonical(observed, MAXIMUM_EVIDENCE_BYTES)?.len();
+        let bytes = match bytes {
+            Some(bytes) => bytes,
+            None => canonical_size(observed, MAXIMUM_EVIDENCE_BYTES)?,
+        };
         require(
             self.count < COLLECTION_READS && self.native_bytes + bytes <= COLLECTION_BYTES,
             "chat_collection_limit",
@@ -266,8 +309,8 @@ impl ChatCollectionReads {
                     Json::object([("catalogHash", field(observed, "catalogHash")?.clone())]);
                 let catalog = catalogs.checked_native_contract(version, Some(&identity))?;
                 let items =
-                    NativeObservations::new(&catalog).native_turn_items(body, &self.turn_id)?;
-                self.append_items(&items)?;
+                    NativeObservations::new(&catalog).native_turn_item_refs(body, &self.turn_id)?;
+                self.append_items(items)?;
                 self.advance(next_cursor.clone())?;
                 if next_cursor.is_none() {
                     self.verify_next();

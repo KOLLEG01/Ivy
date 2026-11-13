@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref, toRaw, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -15,7 +15,6 @@ import {
   Switch,
   useRemote,
 } from "@ivy/ui";
-import type { Operation } from "../../../packages/sdk/src/client.js";
 import type {
   ContactRule,
   ContactWindow,
@@ -23,7 +22,15 @@ import type {
   SecretaryConfiguration,
   VoiceRule,
 } from "./types";
-import { base, client, readDocument, saveConfiguration, tr } from "./runtime";
+import { base, client, readDocument, tr } from "./runtime";
+import { useWrites } from "./writes";
+import {
+  nativeBackendKey,
+  nativeBackendLabel,
+  nativeBackendScopes,
+  sameBackend,
+} from "../../../packages/ui-client/src/native-backends";
+import { nativeServiceNodes } from "../../../packages/ui-client/src/native-hosts";
 const props = defineProps<{
   node: string;
   hostId: string;
@@ -42,18 +49,56 @@ const draft = ref<SecretaryConfiguration | null>(null),
   busy = ref(false),
   error = ref(""),
   message = ref("");
+const writes = useWrites(props.node, props.root);
+const writeKey = "configuration";
+const pendingSave = computed(() => writes.pending.value[writeKey]);
 const managers = useRemote(
-  async (signal) => {
-    const result: Operation.ServiceNodesListResult = await client.request(
-      "serviceNodes.list",
-      { serviceName: "agent-manager", limit: 200 },
-      { signal },
-    );
-    return result.items;
-  },
+  (signal) => nativeServiceNodes(client, signal),
   30000,
   ["services/agent-manager"],
 );
+const backends = useRemote(
+  async (signal) => {
+    const manager = managers.value.value?.find(
+      (value) => value.serviceNodeId === draft.value?.execution?.serviceNodeId,
+    );
+    return manager ? nativeBackendScopes(client, manager, signal) : [];
+  },
+  0,
+  ["services/agent-manager"],
+);
+watch(
+  () => [draft.value?.execution?.serviceNodeId, managers.value.value],
+  () => {
+    void backends.refresh();
+  },
+);
+const selectedBackend = computed(() =>
+  nativeBackendKey(draft.value?.execution?.backend),
+);
+const backendAvailable = computed(() =>
+  backends.value.value?.some(
+    (scope) =>
+      sameBackend(scope.backend, draft.value?.execution?.backend) &&
+      !!scope.backend,
+  ),
+);
+const selectManager = (value: string) => {
+  if (!draft.value?.execution) return;
+  draft.value.execution.serviceNodeId = value;
+  delete draft.value.execution.backend;
+  draft.value.execution.threadCwd = "";
+  draft.value.execution.model = null;
+};
+const selectBackend = (key: string) => {
+  const backend = backends.value.value?.find(
+    (scope) => nativeBackendKey(scope.backend) === key,
+  )?.backend;
+  if (!draft.value?.execution || !backend) return;
+  draft.value.execution.backend = structuredClone(toRaw(backend));
+  draft.value.execution.threadCwd = "";
+  draft.value.execution.model = null;
+};
 const current = useRemote(
   async (signal) => {
     if (!pin.value)
@@ -74,7 +119,7 @@ const current = useRemote(
       value.pin.revision >= pin.value.revision &&
       (!draft.value || JSON.stringify(draft.value) === baseline.value)
     ) {
-      draft.value = structuredClone(value.value);
+      draft.value = structuredClone(toRaw(value.value));
       baseline.value = JSON.stringify(value.value);
       pin.value = value.pin;
     }
@@ -136,31 +181,36 @@ const contactRules: {
 ];
 async function save() {
   if (!draft.value || !pin.value || busy.value) return;
-  const submitted = JSON.stringify(draft.value);
+  if (!pendingSave.value && draft.value.execution && !backendAvailable.value) {
+    error.value = tr(
+      "Bitte ein verfügbares Backend mit Konto auswählen.",
+      "Choose an available backend and account.",
+    );
+    return;
+  }
   busy.value = true;
   error.value = "";
   message.value = "";
   try {
-    const next = await saveConfiguration(
-      props.node,
-      pin.value,
-      JSON.parse(submitted),
+    await writes.prepare(
+      writeKey,
+      "configuration",
+      { ...pin.value },
+      structuredClone(toRaw(draft.value)),
     );
-    pin.value = next;
-    const loaded = await readDocument(
-      "secretary/configuration",
-      next,
-      props.root,
-    );
-    if (JSON.stringify(draft.value) === submitted)
-      draft.value = structuredClone(loaded.value);
-    baseline.value = JSON.stringify(loaded.value);
+    const result = await writes.execute(writeKey);
+    if (!result) return;
+    const { pin: next, write } = result;
+    if (next.revision >= pin.value.revision) pin.value = next;
+    baseline.value = JSON.stringify(write.value);
     message.value = tr(
       `Revision ${next.revision} gespeichert.`,
       `Saved revision ${next.revision}.`,
     );
-  } catch (failure) {
-    error.value = failure instanceof Error ? failure.message : String(failure);
+    // Acceptance is authoritative; a later refresh has its own error state.
+    void current.refresh();
+  } catch (cause) {
+    error.value = String(cause);
   } finally {
     busy.value = false;
   }
@@ -201,11 +251,11 @@ async function save() {
       >
     </SettingsSection>
     <Alert
-      v-if="current.error.value || error"
+      v-if="current.error.value || error || writes.error.value"
       variant="destructive"
       class="mb-6"
       ><AlertDescription>{{
-        current.error.value || error
+        current.error.value || error || writes.error.value
       }}</AlertDescription></Alert
     >
     <template v-if="draft">
@@ -313,8 +363,8 @@ async function save() {
         :title="tr('Ausführungsziel', 'Execution target')"
         :description="
           tr(
-            'Jede Ausführung startet auf diesem AgentManager eine neue persistente Codex-Task.',
-            'Every run starts a new persistent Codex task on this AgentManager.',
+            'Aufträge und neue Rückfragen verwenden dieses Backend und Konto auf dem gewählten Host.',
+            'Assignments and new follow-ups use this backend and account on the selected host.',
           )
         "
       >
@@ -326,10 +376,11 @@ async function save() {
         >
         <div v-else class="grid gap-4 sm:grid-cols-2">
           <Field
-            ><Label for="execution-manager">AgentManager</Label
+            ><Label for="execution-manager">Host</Label
             ><OptionSelect
               id="execution-manager"
-              v-model="draft.execution.serviceNodeId"
+              :model-value="draft.execution.serviceNodeId"
+              @update:model-value="selectManager(String($event))"
               class="w-full"
               ><option value="">—</option>
               <option
@@ -337,11 +388,49 @@ async function save() {
                 :key="manager.serviceNodeId"
                 :value="manager.serviceNodeId"
               >
-                {{ manager.serviceNodeId
+                {{ manager.hostId
                 }}{{ manager.ready && manager.connected ? "" : " · offline" }}
               </option></OptionSelect
             ></Field
           >
+          <Field>
+            <Label for="execution-backend">{{
+              tr("Backend und Konto", "Backend and account")
+            }}</Label>
+            <OptionSelect
+              id="execution-backend"
+              :model-value="selectedBackend"
+              class="w-full"
+              @update:model-value="selectBackend(String($event))"
+            >
+              <option value="" disabled>
+                {{ tr("Konto auswählen", "Choose account") }}
+              </option>
+              <option
+                v-if="draft.execution.backend && !backendAvailable"
+                :value="selectedBackend"
+                disabled
+              >
+                {{ nativeBackendLabel(draft.execution.backend) }} ·
+                {{ tr("Nicht verfügbar", "Unavailable") }}
+              </option>
+              <option
+                v-for="scope in backends.value.value ?? []"
+                :key="nativeBackendKey(scope.backend)"
+                :value="nativeBackendKey(scope.backend)"
+                :disabled="!scope.backend || scope.status.state !== 'ready'"
+              >
+                {{
+                  scope.backend
+                    ? nativeBackendLabel(scope.backend)
+                    : tr("Kein explizites Konto", "No explicit account")
+                }}
+              </option>
+            </OptionSelect>
+            <FieldError v-if="backends.error.value">{{
+              backends.error.value
+            }}</FieldError>
+          </Field>
           <Field
             ><Label for="execution-cwd">{{
               tr("Arbeitsverzeichnis", "Working directory")
@@ -417,7 +506,11 @@ async function save() {
           {{ message }}
         </p>
         <Button :disabled="busy || !pin" @click="save">{{
-          busy ? tr("Speichert…", "Saving…") : tr("Speichern", "Save")
+          busy
+            ? tr("Speichert…", "Saving…")
+            : pendingSave
+              ? tr("Erneut prüfen", "Check again")
+              : tr("Speichern", "Save")
         }}</Button>
       </div>
     </template>

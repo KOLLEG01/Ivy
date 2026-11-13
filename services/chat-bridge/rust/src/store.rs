@@ -52,7 +52,7 @@ impl StoreError {
 }
 pub type StoreResult<T> = Result<T, StoreError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Pin {
     pub object_id: String,
     pub revision: i64,

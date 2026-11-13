@@ -73,15 +73,45 @@ fn outcome(result: ivy_contracts::IvyResult<IvyJson>) -> IvyJson {
         ]),
     }
 }
+#[test]
+fn parsed_decision_keeps_lossless_fields_and_is_bound_to_one_saved_revision() {
+    use ivy_secretary::assignment_decision::RecordedDecision;
+    let answer: ivy_contracts::JsString = r#"{"schemaVersion":1,"urgency":"normal","notification":"main","text":"\ud800\u0000\udc00","reason":"\udc00","unknown":{"text":"keep only in original"}}"#.into();
+    let execution = IvyJson::object([
+        (
+            "pin",
+            IvyJson::object([("objectId", "execution-A".into()), ("revision", 7.0.into())]),
+        ),
+        (
+            "value",
+            IvyJson::object([("result", IvyJson::String(answer.clone()))]),
+        ),
+    ]);
+    let parsed = RecordedDecision::read(&execution).unwrap();
+    let decision = parsed.for_execution(&execution).unwrap();
+    assert_eq!(decision.text().0, vec![0xd800, 0, 0xdc00]);
+    assert_eq!(decision.reason().0, vec![0xdc00]);
+    assert_eq!(
+        execution.required("value").unwrap().get("result"),
+        Some(&IvyJson::String(answer))
+    );
+    for pin in [
+        IvyJson::object([("objectId", "execution-B".into()), ("revision", 7.0.into())]),
+        IvyJson::object([("objectId", "execution-A".into()), ("revision", 8.0.into())]),
+    ] {
+        let mut other = execution.clone();
+        other.insert("pin", pin);
+        assert_eq!(
+            parsed.for_execution(&other).unwrap_err().code,
+            "secretary_assignment_result_changed"
+        );
+    }
+}
 
 #[test]
 fn original_assignment_prompt_and_completion_policy() {
     let output = reference_data::read(include_bytes!("assignment-result-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let original_policy = corpus
         .required("notificationPolicy")
         .unwrap()
@@ -137,9 +167,18 @@ fn original_assignment_prompt_and_completion_policy() {
         let mut saves = 0;
         let result = assignment_turn(execution, row.required("read").unwrap()).map(|turn| {
             let mut next = current.clone();
-            if let Some(value) = assignment_completion(execution, turn, items, now) {
+            if let Some(value) = assignment_completion(
+                execution,
+                turn,
+                ivy_sdk::native_turn_contents::single_final_answer(items),
+                now,
+            ) {
                 saves = 1;
-                next.insert("value", value);
+                if let Some(decision) = &value.decision {
+                    assert_eq!(value.execution.get("phase"), Some(&"completed".into()));
+                    assert!(decision.text().0.len() <= 8192);
+                }
+                next.insert("value", value.execution);
             }
             next
         });

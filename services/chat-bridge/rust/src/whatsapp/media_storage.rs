@@ -73,9 +73,13 @@ impl MediaStorage {
         })
         .await
     }
-    pub async fn save_original(&self, id: &str, bytes: Vec<u8>) -> IvyResult<()> {
+    pub async fn save_original(&self, id: &str, bytes: Vec<u8>) -> IvyResult<Vec<u8>> {
         let path = self.directory(id).join("original");
-        blocking(move || write_new(&path, &bytes)).await
+        blocking(move || {
+            write_new(&path, &bytes)?;
+            Ok(bytes)
+        })
+        .await
     }
     pub async fn document(
         &self,

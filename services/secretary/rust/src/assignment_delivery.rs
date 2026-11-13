@@ -1,11 +1,13 @@
 //! Retain original Main admission and reconcile assignment delivery receipts.
 use crate::{
-    assignment_decision::assignment_decision,
+    assignment_decision::{AssignmentDecision, RecordedDecision},
     assignment_schema::{assignment_name, effective_rules},
     assignment_voice_engine::{AssignmentVoice, VoiceResult},
     browser_notice::secretary_browser_notice,
+    delivery_outcome::DeliveryOutcome,
     inbox_evidence::InboxEvidence,
     inbox_recovery::{RecoveryIssues, RecoveryScan},
+    policy::{Notification, Urgency},
     store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
@@ -63,13 +65,6 @@ fn open(rule: &IvyJson, now: i64) -> IvyResult<bool> {
         now,
     )
 }
-fn rank(v: &IvyJson) -> usize {
-    ["low", "normal", "high", "critical"]
-        .iter()
-        .position(|s| v == &IvyJson::from(*s))
-        .unwrap_or(0)
-}
-
 pub struct AssignmentDelivery<'a, 'engine, 'journal> {
     pub evidence: &'a InboxEvidence<'engine, 'journal>,
     pub tools: &'a ToolClients,
@@ -84,8 +79,8 @@ impl AssignmentDelivery<'_, '_, '_> {
             clock: self.clock,
         }
     }
-    async fn settled(&self, execution: &IvyJson, decision: &IvyJson) -> IvyResult<bool> {
-        if is(decision, "notification", "voice") {
+    async fn settled(&self, execution: &IvyJson, decision: &AssignmentDecision) -> IvyResult<bool> {
+        if decision.notification() == Notification::Voice {
             self.voice().complete_fallback(execution).await?;
         }
         Ok(true)
@@ -169,6 +164,14 @@ impl AssignmentDelivery<'_, '_, '_> {
         execution: &IvyJson,
         issues: &dyn RecoveryIssues,
     ) -> IvyResult<bool> {
+        self.step_with_decision(execution, None, issues).await
+    }
+    pub(crate) async fn step_with_decision(
+        &self,
+        execution: &IvyJson,
+        prepared: Option<&RecordedDecision>,
+        issues: &dyn RecoveryIssues,
+    ) -> IvyResult<bool> {
         self.evidence.verify_owner().await?;
         let value = execution.required("value")?;
         need(
@@ -176,12 +179,16 @@ impl AssignmentDelivery<'_, '_, '_> {
             "secretary_assignment_result_invalid",
             "An assignment needs its retained result.",
         )?;
-        let decision = assignment_decision(
-            value
-                .required("result")?
-                .as_js_string()
-                .ok_or_else(IvyError::internal)?,
-        )?;
+        let parsed;
+        let prepared = match prepared {
+            Some(prepared) => prepared,
+            None => {
+                parsed = RecordedDecision::read(execution)?;
+                &parsed
+            }
+        };
+        let decision = prepared.for_execution(execution)?;
+        let result_hash = prepared.result_hash();
         let store = self.evidence.store;
         let client = store.client.as_ref();
         let assignment = store
@@ -219,17 +226,21 @@ impl AssignmentDelivery<'_, '_, '_> {
         )
         .await?;
         let mut urgent_voice_fallback = false;
-        if is(&decision, "notification", "voice") {
+        if decision.notification() == Notification::Voice {
             let eligible = yes(assignment, "enabled")
                 && yes(
                     value.required("effectiveRules")?.required("voice")?,
                     "enabled",
                 )
                 && yes(rules.required("voice")?, "enabled")
-                && is(&decision, "urgency", "critical")
+                && decision.urgency() == Urgency::Critical
                 && contact_allowed
                 && open(rules.required("voice")?, self.clock.utc_millis())?;
-            match self.voice().step(execution, &decision, eligible).await? {
+            match self
+                .voice()
+                .step(execution, decision.text(), result_hash, eligible)
+                .await?
+            {
                 VoiceResult::Confirmed => return Ok(true),
                 VoiceResult::Pending => return Ok(false),
                 VoiceResult::Fallback => {}
@@ -255,7 +266,7 @@ impl AssignmentDelivery<'_, '_, '_> {
                 &mut latest,
                 IvyJson::object([
                     ("executionId", value.required("executionId")?.clone()),
-                    ("resultHash", hash_json(value.required("result")?)?.into()),
+                    ("resultHash", result_hash.into()),
                     ("operationId", IvyJson::Null),
                     ("request", IvyJson::Null),
                     ("state", "queued".into()),
@@ -268,14 +279,14 @@ impl AssignmentDelivery<'_, '_, '_> {
         };
         need(
             saved.get("executionId") == value.get("executionId")
-                && saved.get("resultHash") == Some(&hash_json(value.required("result")?)?.into()),
+                && saved.get("resultHash") == Some(&result_hash.into()),
             "secretary_assignment_result_changed",
             "The retained decision changed after delivery began.",
         )?;
         let issue_id = format!("delivery:{}", value.required("executionId")?.as_str()?);
         if is(&saved, "state", "confirmed") || is(&saved, "state", "suppressed") {
             issues.clear(&issue_id);
-            return self.settled(execution, &decision).await;
+            return self.settled(execution, decision).await;
         }
         let reconcile_only = is(&saved, "state", "outcome_unknown")
             && (yes(&saved, "terminal")
@@ -289,20 +300,22 @@ impl AssignmentDelivery<'_, '_, '_> {
                     .as_str()
                     .unwrap_or_else(|_| "secretary_assignment_notice_outcome_unknown".into()),
             );
-            return self.settled(execution, &decision).await;
+            return self.settled(execution, decision).await;
         }
         let now = self.clock.utc_millis();
         if number(&saved, "retryAt", 0.0) > now as f64 {
             return Ok(false);
         }
         let rule = rules.required("main")?;
-        let suppressed = if is(&decision, "notification", "none") {
+        let suppressed = if decision.notification() == Notification::None {
             Some("notification_none")
         } else if !yes(assignment, "enabled") {
             Some("assignment_disabled")
         } else if !yes(rule, "enabled") {
             Some("main_disabled")
-        } else if rank(decision.required("urgency")?) < rank(rule.required("minimumUrgency")?) {
+        } else if decision.urgency()
+            < Urgency::read(rule.required("minimumUrgency")?).unwrap_or(Urgency::Low)
+        {
             Some("below_minimum_urgency")
         } else {
             None
@@ -335,18 +348,15 @@ impl AssignmentDelivery<'_, '_, '_> {
                     value.required("result")?.clone(),
                 ]))?
                 .into(),
-                decision
-                    .required("text")?
-                    .as_js_string()
-                    .ok_or_else(IvyError::internal)?,
+                decision.text(),
                 self.clock,
             )
             .await?;
         }
         if field(&saved, "request").is_null() {
             if let Some(reason) = suppressed {
-                let reason = if is(&decision, "notification", "none") {
-                    decision.required("reason")?.clone()
+                let reason = if decision.notification() == Notification::None {
+                    IvyJson::String(decision.reason().clone())
                 } else {
                     reason.into()
                 };
@@ -362,7 +372,7 @@ impl AssignmentDelivery<'_, '_, '_> {
                     ),
                 )
                 .await?;
-                return self.settled(execution, &decision).await;
+                return self.settled(execution, decision).await;
             }
             if let Some(reason) = deferred {
                 if !is(&saved, "reason", reason) {
@@ -383,11 +393,7 @@ impl AssignmentDelivery<'_, '_, '_> {
                 "secretary_assignment_channel_unavailable",
                 "Main must identify Secretary as the actual caller.",
             )?;
-            let mut text = decision
-                .required("text")?
-                .as_js_string()
-                .cloned()
-                .ok_or_else(IvyError::internal)?;
+            let mut text = decision.text().clone();
             text.0.extend(
                 JsString::from(format!(
                     "\n\nSecretary reference: {}",
@@ -456,7 +462,7 @@ impl AssignmentDelivery<'_, '_, '_> {
         let result = self
             .deliver(
                 execution,
-                &decision,
+                decision,
                 &mut latest,
                 &saved,
                 &target,
@@ -482,7 +488,7 @@ impl AssignmentDelivery<'_, '_, '_> {
     async fn deliver(
         &self,
         execution: &IvyJson,
-        decision: &IvyJson,
+        decision: &AssignmentDecision,
         latest: &mut IvyJson,
         saved: &IvyJson,
         target: &IvyJson,
@@ -669,7 +675,8 @@ impl AssignmentDelivery<'_, '_, '_> {
             &reply,
         )
         .await?;
-        if is(reply.required("data")?, "state", "outcome_unknown") {
+        let outcome = DeliveryOutcome::main_reply(reply.required("data")?);
+        if outcome == DeliveryOutcome::Unknown {
             self.save(
                 latest,
                 updated(
@@ -691,7 +698,7 @@ impl AssignmentDelivery<'_, '_, '_> {
             issues.issue(issue_id, "secretary_assignment_notice_outcome_unknown");
             return self.settled(execution, decision).await;
         }
-        if !is(reply.required("data")?, "state", "confirmed") {
+        if outcome != DeliveryOutcome::Confirmed {
             return Ok(false);
         }
         self.save(

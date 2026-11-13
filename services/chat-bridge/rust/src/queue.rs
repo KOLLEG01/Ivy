@@ -4,8 +4,8 @@ use crate::{
     store::{Destination, Document, Pin, Reference, mutation},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json,
+    json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::{collections::HashSet, future::Future};
 
@@ -17,7 +17,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn js<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
     value
@@ -205,10 +205,18 @@ impl<'a> ChatQueue<'a> {
         let binding = self
             .operations
             .store
-            .read("chat-bridge/binding", Reference::Pinned(selected))
+            .read(
+                "chat-bridge/binding",
+                Reference::Current(&selected.object_id),
+            )
             .await
-            .map_err(|e| e.into_ivy())?
-            .value;
+            .map_err(|e| e.into_ivy())?;
+        require(
+            binding.pin == *selected && selected.revision == 1,
+            "chat_binding_mismatch",
+            "Main must retain the exact configured native project, plan and owning thread.",
+        )?;
+        let binding = binding.value;
         let definition = self.operations.admission.definition();
         require(
             binding.get("workspaceId") == definition.get("workspaceId")

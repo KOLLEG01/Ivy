@@ -8,6 +8,7 @@ use super::{
     journal::{HistoryLimits, Inbox},
     journal_owner::Journal,
     messages::Translator,
+    native_event::{EventProjection, MAX_NATIVE_EVENT_BYTES, NativeEvent, NativeEventQueue},
     sender::phone,
 };
 use crate::{generation::ChatGeneration, main_context::object_options};
@@ -43,13 +44,23 @@ pub trait RuntimeSocket: Send + Sync {
     fn state(&self) -> JsString;
     fn status(&self) -> Json;
     fn flush(&self) -> ServiceFuture<()>;
+    fn needs_output(&self) -> bool {
+        true
+    }
     fn read_receipts(&self) -> ServiceFuture<()>;
     fn set_busy(&self, jids: Vec<JsString>);
     fn presence(&self) -> ServiceFuture<()>;
     fn close(&self) -> ServiceFuture<()>;
 }
+#[derive(Clone, Copy)]
+pub enum RuntimeSignal {
+    Input,
+    Receipt,
+    Connected,
+    Status,
+}
 pub struct RuntimeCallbacks {
-    pub wake: Arc<dyn Fn() + Send + Sync>,
+    pub wake: Arc<dyn Fn(RuntimeSignal) + Send + Sync>,
     pub automatic_notifications: Arc<dyn Fn() -> BoolFuture<'static> + Send + Sync>,
     pub file_workspace: Arc<dyn Fn(JsString) -> RequestFuture<'static> + Send + Sync>,
 }
@@ -148,7 +159,8 @@ struct State {
     native_busy: bool,
     native_busy_at: i64,
     event_revision: u64,
-    events: VecDeque<Json>,
+    events: NativeEventQueue,
+    recovering_events: bool,
     last_sequence: f64,
     last_epoch: Option<JsString>,
 }
@@ -164,7 +176,8 @@ impl Default for State {
             native_busy: false,
             native_busy_at: 0,
             event_revision: 0,
-            events: VecDeque::new(),
+            events: NativeEventQueue::default(),
+            recovering_events: false,
             last_sequence: 0.0,
             last_epoch: None,
         }
@@ -280,9 +293,9 @@ impl WhatsAppRuntime {
         let policy = weak.clone();
         let files = weak.clone();
         runtime.0.socket.bind(RuntimeCallbacks {
-            wake: Arc::new(move || {
+            wake: Arc::new(move |signal| {
                 if let Some(inner) = weak.upgrade() {
-                    Self(inner).wake();
+                    Self(inner).signal(signal);
                 }
             }),
             automatic_notifications: Arc::new(move || {
@@ -317,18 +330,31 @@ impl WhatsAppRuntime {
     }
     fn run_job(&self, job: Job) {
         let name = job.name();
-        let (done, receive) = watch::channel(None);
-        {
+        let done = {
             let mut state = self.0.state.lock().unwrap();
             if state.closed {
                 return;
             }
             if state.tasks.contains_key(name) {
-                state.again.insert(name, job);
+                // A plain tick must not replace preparation or invalidation
+                // already requested on the shared listener lane.
+                let keep = matches!(
+                    (state.again.get(name), &job),
+                    (Some(Job::PrepareListen(_)), Job::Work(_))
+                        | (
+                            Some(Job::Work(RuntimeWork::InvalidateListen)),
+                            Job::Work(RuntimeWork::Listener)
+                        )
+                );
+                if !keep {
+                    state.again.insert(name, job);
+                }
                 return;
             }
+            let (done, receive) = watch::channel(None);
             state.tasks.insert(name, receive);
-        }
+            done
+        };
         let owner = self.clone();
         tokio::spawn(async move {
             let result = owner.execute(job).await;
@@ -361,6 +387,19 @@ impl WhatsAppRuntime {
         match job {
             Job::PrepareListen(a) => {
                 a.prepare().await?;
+                // Finish the event already being delivered before recovering
+                // a discarded queue. Ordinary history reads stay independent.
+                let pending = {
+                    let state = self.0.state.lock().unwrap();
+                    if same(&state.attached, &a) && state.recovering_events {
+                        state.tasks.get("native-events").cloned()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(pending) = pending {
+                    let _ = completed(pending).await;
+                }
                 self.listen().await
             }
             Job::Outbox(a) => {
@@ -386,6 +425,26 @@ impl WhatsAppRuntime {
                 RuntimeWork::Retention => self.retention().await,
                 RuntimeWork::NativeEvents => self.native_events().await,
             },
+        }
+    }
+    pub fn signal(&self, signal: RuntimeSignal) {
+        match signal {
+            RuntimeSignal::Input => {
+                self.run(RuntimeWork::Control);
+                self.run(RuntimeWork::Input);
+                self.run(RuntimeWork::ReadReceipts);
+            }
+            RuntimeSignal::Receipt => {
+                self.run(RuntimeWork::Output);
+                self.run(RuntimeWork::Status);
+            }
+            RuntimeSignal::Connected => {
+                self.wake();
+                self.run(RuntimeWork::InvalidateListen);
+                self.run(RuntimeWork::Activity);
+                self.run(RuntimeWork::Status);
+            }
+            RuntimeSignal::Status => self.run(RuntimeWork::Status),
         }
     }
     pub fn wake(&self) {
@@ -424,6 +483,9 @@ impl WhatsAppRuntime {
     fn reset_notification_source(&self) {
         let mut state = self.0.state.lock().unwrap();
         state.errors.retain(|(key, _)| *key != "native-events");
+        state.events.clear();
+        state.recovering_events = false;
+        state.event_revision = state.event_revision.wrapping_add(1);
         state.last_sequence = 0.0;
         state.last_epoch = None;
     }
@@ -439,6 +501,7 @@ impl WhatsAppRuntime {
             if attached.is_none() {
                 state.again.clear();
                 state.events.clear();
+                state.recovering_events = false;
                 state.native_busy = false;
                 state.event_revision = state.event_revision.wrapping_add(1);
                 return;
@@ -449,23 +512,33 @@ impl WhatsAppRuntime {
     }
     pub fn start(&self) {
         self.0.socket.start();
-        for (work, ms) in [
-            (RuntimeWork::Control, 1000),
-            (RuntimeWork::Input, 1000),
-            (RuntimeWork::InvalidateListen, 30000),
-            (RuntimeWork::Output, 5000),
-            (RuntimeWork::Status, 10000),
-            (RuntimeWork::ReadReceipts, 1000),
-            (RuntimeWork::Activity, 1000),
-            (RuntimeWork::Retention, 3600000),
+        for (name, ms) in [
+            ("activity", 5000),
+            ("status", 10000),
+            ("reconcile", 30000),
+            ("retention", 3600000),
         ] {
             let weak = Arc::downgrade(&self.0);
             let tick = Arc::new(move || {
                 if let Some(inner) = weak.upgrade() {
-                    Self(inner).run(work);
+                    let runtime = Self(inner);
+                    match name {
+                        "activity" => {
+                            runtime.run(RuntimeWork::Activity);
+                            if runtime.0.socket.needs_output() {
+                                runtime.run(RuntimeWork::Output);
+                            }
+                        }
+                        "reconcile" => {
+                            runtime.wake();
+                            runtime.run(RuntimeWork::InvalidateListen);
+                        }
+                        "status" => runtime.run(RuntimeWork::Status),
+                        _ => runtime.run(RuntimeWork::Retention),
+                    }
                 }
             });
-            let timer = self.0.timers.every(work.name(), ms, tick);
+            let timer = self.0.timers.every(name, ms, tick);
             self.0.state.lock().unwrap().timers.push(timer);
         }
     }
@@ -495,6 +568,7 @@ impl WhatsAppRuntime {
             let mut state = self.0.state.lock().unwrap();
             state.closed = true;
             state.again.clear();
+            state.events.clear();
             for timer in state.timers.drain(..) {
                 timer.clear();
             }
@@ -785,7 +859,23 @@ impl WhatsAppRuntime {
                 }
             }
             self.run(RuntimeWork::Output);
-            if a.needs_recovery() {
+            let again = {
+                let mut state = self.0.state.lock().unwrap();
+                if same(&state.attached, &a) && state.recovering_events {
+                    if !a.needs_recovery() && state.event_revision == revision {
+                        state.recovering_events = false;
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            };
+            if a.needs_recovery() || again {
+                if again && !a.needs_recovery() {
+                    a.invalidate(false);
+                }
                 self.run(RuntimeWork::Listener);
             }
             Ok(())
@@ -938,8 +1028,7 @@ impl WhatsAppRuntime {
                 if changed || gap { Some(changed) } else { None }
             };
             if let Some(changed) = changed {
-                a.invalidate(changed);
-                self.run_job(Job::PrepareListen(a));
+                self.recover_events(&a, changed);
             }
         }
         let method = string(event.get("method"))?;
@@ -950,41 +1039,66 @@ impl WhatsAppRuntime {
         {
             return Ok(());
         }
-        let overflow = {
+        let projected = NativeEvent::project(event, MAX_NATIVE_EVENT_BYTES)?;
+        let recover = {
             let mut state = self.0.state.lock().unwrap();
-            let overflow = state.events.len() >= 256;
-            if overflow {
-                state.events.pop_front();
+            if state.closed || !same(&state.attached, &a) {
+                return Ok(());
             }
-            state.events.push_back(event.clone());
-            overflow
+            if state.recovering_events {
+                state.event_revision = state.event_revision.wrapping_add(1);
+                return Ok(());
+            }
+            match projected {
+                EventProjection::Ignore => return Ok(()),
+                EventProjection::Recover => true,
+                EventProjection::Event(event) => !state.events.push(event),
+            }
         };
-        if overflow {
-            self.run(RuntimeWork::Listener);
+        if recover {
+            self.recover_events(&a, false);
+        } else {
+            self.run(RuntimeWork::NativeEvents);
         }
-        self.run(RuntimeWork::NativeEvents);
         Ok(())
+    }
+    fn recover_events(&self, attached: &Arc<dyn RuntimeAttached>, changed: bool) {
+        {
+            let mut state = self.0.state.lock().unwrap();
+            if !same(&state.attached, attached) || state.closed {
+                return;
+            }
+            state.events.clear();
+            state.recovering_events = true;
+            state.event_revision = state.event_revision.wrapping_add(1);
+        }
+        attached.invalidate(changed);
+        self.run_job(Job::PrepareListen(attached.clone()));
     }
     async fn native_events(&self) -> IvyResult<()> {
         loop {
             let selected = {
                 let mut state = self.0.state.lock().unwrap();
-                match (state.attached.clone(), state.events.pop_front()) {
-                    (Some(a), Some(event)) => Some((a, event)),
-                    (_, Some(event)) => {
-                        state.events.push_front(event);
-                        None
-                    }
-                    _ => None,
+                if state.recovering_events {
+                    None
+                } else if let Some(a) = state.attached.clone() {
+                    state.events.pop().map(|event| (a, event))
+                } else {
+                    None
                 }
             };
             let Some((a, event)) = selected else {
                 return Ok(());
             };
-            let commentary = (f(&a.preferences()?, "commentary"))
-                .as_bool()
-                .unwrap_or(false);
-            let result = a.notification(&event, commentary).await?;
+            let result = async {
+                let commentary = f(&a.preferences()?, "commentary")
+                    .as_bool()
+                    .unwrap_or(false);
+                a.notification(&event, commentary).await
+            }
+            .await;
+            self.0.state.lock().unwrap().events.complete(&event);
+            let result = result?;
             let current = {
                 let state = self.0.state.lock().unwrap();
                 same(&state.attached, &a)
@@ -1004,7 +1118,8 @@ impl WhatsAppRuntime {
                     }
                     self.run(RuntimeWork::Activity);
                     if !busy {
-                        self.wake();
+                        self.run(RuntimeWork::Control);
+                        self.run(RuntimeWork::Input);
                     }
                 }
                 self.run(RuntimeWork::Output);

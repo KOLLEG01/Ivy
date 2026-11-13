@@ -83,13 +83,9 @@ impl Drop for TemporaryJournal {
 async fn original_follow_up_contexts_calls_recovery_and_authorization() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = reference_data::read(include_bytes!("follow-up-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 109);
+    assert_eq!(rows.len(), 110);
     for row in rows {
         let input = row.required("input").unwrap();
         let label = sql_text(input.required("label").unwrap());
@@ -333,7 +329,7 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
                 ]),
             });
         }
-        let mut statement = journal.db.prepare("SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name").unwrap();
+        let mut statement = journal.db.prepare("SELECT d.key,d.name,d.current_revision,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.key,d.name").unwrap();
         let remaining = statement
             .query_map([], |r| {
                 Ok((
@@ -346,11 +342,69 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
             .unwrap()
             .map(|r| {
                 let (key, name, revision, value) = r.unwrap();
+                let mut value = parse(&value, 1_048_576).unwrap();
+                // The original corpus still compares every original field and RPC.
+                // Check the new, independently reconciled release plan separately.
+                if let Some(release) = value.remove("contextRelease") {
+                    assert_eq!(key, "secretary/follow-up");
+                    assert_eq!(value.get("phase"), Some(&"succeeded".into()));
+                    assert_eq!(release.get("state"), Some(&"pending".into()));
+                    assert_eq!(release.get("call"), Some(&IvyJson::Null));
+                    let pin = release.required("context").unwrap();
+                    let context = journal
+                        .read(
+                            "secretary/follow-up-context",
+                            &pin.required("objectId").unwrap().as_str().unwrap(),
+                            Some(pin.required("revision").unwrap().as_f64().unwrap() as i64),
+                            true,
+                        )
+                        .unwrap();
+                    assert!(context.value.get("createdFor").is_some());
+                    assert_eq!(
+                        context.value.required("start").unwrap().get("method"),
+                        Some(&"thread/start".into())
+                    );
+                    assert_eq!(context.value.get("threadId"), value.get("threadId"));
+                    assert_eq!(release.get("threadId"), value.get("threadId"));
+                    assert_eq!(
+                        ivy_contracts::hash::hash_json(context.value.required("target").unwrap())
+                            .unwrap(),
+                        ivy_contracts::hash::hash_json(release.required("target").unwrap())
+                            .unwrap()
+                    );
+                    let original = js_text(
+                        value
+                            .required("request")
+                            .unwrap()
+                            .required("operationId")
+                            .unwrap(),
+                    );
+                    assert_eq!(
+                        release.get("operationId"),
+                        Some(&IvyJson::String(
+                            ivy_contracts::operation::derive_operation_id_js(
+                                &original,
+                                &"release-secretary-context".into()
+                            )
+                            .unwrap()
+                        ))
+                    );
+                    assert_eq!(
+                        release.get("expectedOperationId"),
+                        Some(&IvyJson::String(
+                            ivy_contracts::operation::derive_operation_id_js(
+                                &original,
+                                &"secretary-follow-up-turn".into()
+                            )
+                            .unwrap()
+                        ))
+                    );
+                }
                 IvyJson::object([
                     ("key", key.into()),
                     ("name", name.into()),
                     ("revision", IvyJson::Number(revision as f64)),
-                    ("value", parse(&value, 1_048_576).unwrap()),
+                    ("value", value),
                 ])
             })
             .collect();

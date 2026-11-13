@@ -252,14 +252,6 @@ pub fn secretary_registry() -> IvyResult<IvyJson> {
     namespace.insert("tools", IvyJson::Array(tools));
     Ok(IvyJson::object([("discoveryHint","Secretary manages scheduled and event-triggered assignments, the inbox and follow-up questions.".into()),("namespaces",IvyJson::Array(vec![namespace])),("contracts",IvyJson::Array(contracts)),("requiredContracts",IvyJson::Array(required))]))
 }
-/// Dormant triage deliberately advertises no contracts or namespaces.
-pub fn triage_registry() -> IvyJson {
-    IvyJson::object([
-        ("namespaces", IvyJson::Array(vec![])),
-        ("contracts", IvyJson::Array(vec![])),
-        ("requiredContracts", IvyJson::Array(vec![])),
-    ])
-}
 /// The service scopes every required contract to its configured original root.
 pub fn service_registry(root: &IvyJson) -> IvyResult<IvyJson> {
     let mut registry = secretary_registry()?;

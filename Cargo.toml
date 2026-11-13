@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["packages/vendor/tungstenite"]
+exclude = ["packages/vendor/tungstenite", "packages/vendor/whatsapp-rust"]
 members = ["packages/contracts/rust","packages/store","packages/sdk/rust","packages/host-runtime/rust","packages/cli/rust","services/agent-manager/rust","services/chat-bridge/rust","services/dashboards/rust","services/secretary/rust","services/service-manager/rust","services/host-executor/rust","services/hive/rust","services/data-collector/rust","services/task-board/rust","services/phone-bridge/rust","services/codex-server/rust"]
 
 [workspace.package]
@@ -74,3 +74,4 @@ strip = "debuginfo"
 
 [patch.crates-io]
 tungstenite = { path = "packages/vendor/tungstenite" }
+whatsapp-rust = { path = "packages/vendor/whatsapp-rust" }

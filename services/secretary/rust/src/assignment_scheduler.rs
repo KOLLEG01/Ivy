@@ -115,6 +115,10 @@ impl AssignmentScheduler<'_, '_, '_> {
                 interface_version: "1.0.0".into(),
             }],
         )?;
+        let manager_host = manager.required("hostId")?.as_js_string().ok_or_else(IvyError::internal)?;
+        let Some(selection) = crate::agent_target::AgentSelection::discover(&self.tools, service_node_id.clone(), manager_host).await? else {
+            return Ok(None);
+        };
         let key = format!(
             "secretary-{}",
             &hash_json(identity.required("scope")?.required("secretaryId")?)?[7..23]
@@ -122,19 +126,22 @@ impl AssignmentScheduler<'_, '_, '_> {
         let location = selected
             .call(
                 &"agent.resolveProject".into(),
-                IvyJson::object([(
+                selection.arguments(IvyJson::object([(
                     "selection",
                     IvyJson::object([
                         ("kind", "internal".into()),
                         ("key", key.into()),
                         ("name", "Secretary assignments".into()),
                     ]),
-                )]),
+                )]))?,
                 None,
                 ToolCallOptions::default(),
             )
             .await?;
-        let target = IvyJson::object([
+        if !ivy_contracts::native_backend::BackendIdentity::matches(&location, selection.backend.as_ref()) {
+            return Err(IvyError::new("native_owner_mismatch", "The project belongs to another backend or account."));
+        }
+        let mut target = IvyJson::object([
             ("serviceNodeId", IvyJson::String(service_node_id)),
             (
                 "threadCwd",
@@ -146,6 +153,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             ("effort", "medium".into()),
             ("permissions", ":read-only".into()),
         ]);
+        if let Some(backend) = selection.backend { target.insert("backend", backend.json()); }
         validate_execution_target(&target)?;
         Ok(Some(target))
     }

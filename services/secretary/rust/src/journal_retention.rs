@@ -47,9 +47,56 @@ fn references(value: &IvyJson, ids: &HashMap<&str, usize>, found: &mut HashSet<u
     }
 }
 
-fn reference_ids(value: &IvyJson, ids: &HashMap<&str, usize>) -> HashSet<usize> {
+fn reference_ids(key: &str, value: &IvyJson, ids: &HashMap<&str, usize>) -> HashSet<usize> {
     let mut found = HashSet::new();
-    references(value, ids, &mut found);
+    // Domain admission owns these exact schemas. Cursors, messages and Hive
+    // pins do not name local technical records or local operation receipts.
+    if matches!(key, SOURCE | OPERATION) && value.get("schemaVersion") == Some(&1.0.into()) {
+        if key == OPERATION {
+            if let Some(pins) = value.get("checkpointCaptures").and_then(IvyJson::as_array) {
+                for pin in pins {
+                    if let Some(id) = pin.get("objectId") {
+                        references(id, ids, &mut found);
+                    }
+                }
+            }
+        }
+        return found;
+    }
+    match key {
+        // These records contain Hive/native identities and user payloads, with
+        // no references into this local journal. Unknown legacy shapes below
+        // retain their original graph until explicit import/archive completes.
+        "secretary/public-operation"
+            if value.get("write").is_some() && value.get("requestHash").is_some() => {}
+        "secretary/assignment-native-call" => {}
+        "secretary/object-window" | "secretary/channel-window"
+            if value.get("assignmentSnapshot").is_some() => {}
+        "secretary/follow-up" if value.as_object().is_some() => {
+            for (name, field) in value.as_object().unwrap_or_default() {
+                if name.eq_str("answer") {
+                    continue;
+                }
+                if name.eq_str("request") {
+                    for (name, field) in field.as_object().unwrap_or_default() {
+                        if !name.eq_str("question") {
+                            references(field, ids, &mut found);
+                        }
+                    }
+                } else {
+                    references(field, ids, &mut found);
+                }
+            }
+        }
+        "secretary/follow-up-context" if value.as_object().is_some() => {
+            for (name, field) in value.as_object().unwrap_or_default() {
+                if !name.eq_str("itemSnapshot") {
+                    references(field, ids, &mut found);
+                }
+            }
+        }
+        _ => references(value, ids, &mut found),
+    }
     found
 }
 
@@ -113,7 +160,7 @@ impl Journal {
     fn technical_retention(&self, ids: &HashMap<&str, usize>) -> IvyResult<Vec<Technical>> {
         let mut statement = self
             .db
-            .prepare("SELECT id,key,value_json FROM technical_documents")
+            .prepare("SELECT d.id,d.key,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision")
             .map_err(storage)?;
         let mut rows = statement.query([]).map_err(storage)?;
         let mut documents = Vec::new();
@@ -123,6 +170,12 @@ impl Journal {
             let raw: String = row.get(2).map_err(storage)?;
             let value = parse(&raw, FRAME)?;
             let phase = text(&value, "phase");
+            let release_pending = key == "secretary/follow-up"
+                && value.get("contextRelease").is_some_and(|release| {
+                    ["pending", "observing", "outcome_unknown"]
+                        .iter()
+                        .any(|state| release.get("state").is_some_and(|v| v.is_str(state)))
+                });
             let follow_up = match key.as_str() {
                 // Preserve missing/null and lossless identifier equality without the body.
                 "secretary/follow-up-context" => FollowUp::Context {
@@ -130,7 +183,8 @@ impl Journal {
                     pending_thread: value.get("threadId").is_some_and(IvyJson::is_null),
                 },
                 "secretary/follow-up"
-                    if matches!(phase.as_str(), "prepared" | "running" | "outcome_unknown") =>
+                    if release_pending
+                        || matches!(phase.as_str(), "prepared" | "running" | "outcome_unknown") =>
                 {
                     FollowUp::Active {
                         item: value
@@ -144,10 +198,11 @@ impl Journal {
             documents.push(Technical {
                 id: ids[id.as_str()],
                 triage_thread: key == "secretary/triage-thread",
-                references: reference_ids(&value, ids).into_iter().collect(),
+                references: reference_ids(&key, &value, ids).into_iter().collect(),
                 follow_up,
                 blocked: has_unresolved_outcome(&value).map(|unknown| {
                     unknown
+                        || release_pending
                         || matches!(
                             phase.as_str(),
                             "accepted"
@@ -175,16 +230,17 @@ impl Journal {
     fn domain_retention(&self, ids: &HashMap<&str, usize>) -> IvyResult<Vec<DomainReferences>> {
         let mut statement = self
             .db
-            .prepare("SELECT id,value_json FROM documents")
+            .prepare("SELECT id,key,value_json FROM documents")
             .map_err(storage)?;
         let mut rows = statement.query([]).map_err(storage)?;
         let mut documents = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: String = row.get(0).map_err(storage)?;
-            let raw: String = row.get(1).map_err(storage)?;
+            let key: String = row.get(1).map_err(storage)?;
+            let raw: String = row.get(2).map_err(storage)?;
             documents.push(DomainReferences {
                 id: ids.get(id.as_str()).copied(),
-                references: reference_ids(&parse(&raw, FRAME)?, ids)
+                references: reference_ids(&key, &parse(&raw, FRAME)?, ids)
                     .into_iter()
                     .collect(),
             });
@@ -197,7 +253,7 @@ impl Journal {
         extra_bytes: i64,
         extra_count: i64,
         protected: Option<&str>,
-        incoming: Option<&IvyJson>,
+        incoming: Option<(&str, &IvyJson)>,
     ) -> IvyResult<()> {
         let needs_room = || -> IvyResult<bool> {
             let usage = self.usage()?;
@@ -221,7 +277,7 @@ impl Journal {
             .map_err(storage)?.collect::<rusqlite::Result<_>>().map_err(storage)?;
         let documents = self.technical_retention(&ids)?;
         let incoming_refs = incoming
-            .map(|value| reference_ids(value, &ids))
+            .map(|(key, value)| reference_ids(key, value, &ids))
             .unwrap_or_default();
         let mut protected_operations = incoming_refs.clone();
         if let Some(id) = protected.and_then(|id| ids.get(id)) {
@@ -235,7 +291,7 @@ impl Journal {
             let mut rows = statement.query([]).map_err(storage)?;
             while let Some(row) = rows.next().map_err(storage)? {
                 let raw: String = row.get(0).map_err(storage)?;
-                protected_operations.extend(reference_ids(&parse(&raw, FRAME)?, &ids));
+                protected_operations.extend(reference_ids(OPERATION, &parse(&raw, FRAME)?, &ids));
             }
         }
         let roots: Vec<(String, i64)> = self

@@ -10,10 +10,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     hash::{digest, hash_json},
-    json::canonical,
+    json::{canonical_equal, parse},
 };
-use ivy_sdk::clock::{Clock, SystemClock, date_to_iso, parse_date};
-use rusqlite::OptionalExtension;
+use ivy_sdk::clock::{Clock, SystemClock, date_to_iso};
+use rusqlite::{OptionalExtension, types::Value};
 use std::sync::Arc;
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -32,7 +32,7 @@ fn storage() -> IvyError {
     )
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, usize::MAX)? == canonical(b, usize::MAX)?)
+    canonical_equal(a, b, usize::MAX)
 }
 fn key(caller: &JsString, operation: &JsString) -> IvyResult<String> {
     Ok(format!(
@@ -63,22 +63,49 @@ pub struct FilePayload {
 }
 /// MIME admission inspects content, never a filename or a filesystem path.
 pub fn outgoing_file_bytes(file: &Json) -> IvyResult<(Vec<u8>, bool)> {
-    let encoded = file.required("bytesBase64")?.as_str()?;
-    let bytes = STANDARD
-        .decode(&encoded)
-        .map_err(|_| IvyError::new("chat_file_integrity", "The file requires canonical base64."))?;
+    let encoded = string(file, "bytesBase64")?;
+    let invalid = || {
+        IvyError::new(
+            "chat_file_integrity",
+            "The file requires canonical base64 up to 8 MiB.",
+        )
+    };
+    if encoded.0.is_empty()
+        || encoded.0.len() % 4 != 0
+        || encoded.0.len() > MAX_BYTES.div_ceil(3) * 4
+    {
+        return Err(invalid());
+    }
+    // Decode straight from the wire's UTF-16 units. STANDARD requires canonical
+    // padding and zero trailing bits; only the final chunk may contain padding.
+    let mut bytes = Vec::with_capacity(encoded.0.len() / 4 * 3);
+    let mut ascii = [0u8; 16 * 1024];
+    for (index, chunk) in encoded.0.chunks(ascii.len()).enumerate() {
+        for (output, unit) in ascii.iter_mut().zip(chunk) {
+            *output = u8::try_from(*unit).map_err(|_| invalid())?;
+        }
+        if (index + 1) * ascii.len() < encoded.0.len() && ascii[..chunk.len()].contains(&b'=') {
+            return Err(invalid());
+        }
+        STANDARD
+            .decode_vec(&ascii[..chunk.len()], &mut bytes)
+            .map_err(|_| invalid())?;
+    }
+    let image = validate_file_bytes(file, &bytes)?;
+    Ok((bytes, image))
+}
+fn validate_file_bytes(file: &Json, bytes: &[u8]) -> IvyResult<bool> {
     require(
         !bytes.is_empty()
             && bytes.len() <= MAX_BYTES
-            && STANDARD.encode(&bytes) == encoded
             && file.get("byteLength").and_then(Json::as_f64) == Some(bytes.len() as f64)
-            && file.get("contentHash") == Some(&Json::from(digest(&bytes))),
+            && file.get("contentHash") == Some(&Json::from(digest(bytes))),
         "chat_file_integrity",
         "Canonical base64, byte length and SHA-256 must match the selected file (at most 8 MiB).",
     )?;
     let mime = file.required("mediaType")?.as_str()?;
     // Text formats follow the public UTF-8 policy rather than a detector's guesses.
-    let detected = infer::get(&bytes).filter(|kind| {
+    let detected = infer::get(bytes).filter(|kind| {
         kind.matcher_type() != infer::MatcherType::Text || kind.mime_type() == "application/rtf"
     });
     if let Some(kind) = detected {
@@ -88,7 +115,7 @@ pub fn outgoing_file_bytes(file: &Json) -> IvyResult<(Vec<u8>, bool)> {
             "Declared MIME does not match the file signature.",
         )?;
     } else {
-        let readable = std::str::from_utf8(&bytes)
+        let readable = std::str::from_utf8(bytes)
             .ok()
             .map(|text| text.strip_prefix('\u{feff}').unwrap_or(text))
             .filter(|text| {
@@ -130,7 +157,55 @@ pub fn outgoing_file_bytes(file: &Json) -> IvyResult<(Vec<u8>, bool)> {
         "limit_exceeded",
         "Native PNG/JPEG chat images are limited to 4 MiB.",
     )?;
-    Ok((bytes, image))
+    Ok(image)
+}
+
+fn save_bytes(j: &mut JournalIo, id: &str, bytes: Vec<u8>) -> IvyResult<()> {
+    j.write(
+        "INSERT INTO file_bytes(id,byte_length,content) VALUES(?,?,?)",
+        vec![
+            Value::Text(id.into()),
+            Value::Integer(bytes.len() as i64),
+            Value::Blob(bytes),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Adopt the current format-2 file intents once, a row at a time. The original
+/// receipt and bytes change representation in the same durable transaction.
+pub(crate) fn adopt_file_bytes(j: &mut JournalIo) -> IvyResult<()> {
+    loop {
+        let row: Option<(String, String)> = j.connection().query_row(
+            "SELECT key,value FROM kv WHERE key LIKE 'file:%' AND json_type(value,'$.bytesBase64')='text' ORDER BY key LIMIT 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional().map_err(|_| storage())?;
+        let Some((key, raw)) = row else {
+            return Ok(());
+        };
+        let mut saved = parse(&raw, usize::MAX)?;
+        drop(raw);
+        let id = saved
+            .required("delivery")?
+            .required("messageId")?
+            .as_str()?;
+        let mut file = saved.required("delivery")?.required("file")?.clone();
+        file.insert(
+            "bytesBase64",
+            saved.remove("bytesBase64").ok_or_else(storage)?,
+        );
+        let (bytes, image) = outgoing_file_bytes(&file)?;
+        require(
+            saved.required("delivery")?.get("kind")
+                == Some(&Json::from(if image { "image" } else { "document" })),
+            "chat_file_integrity",
+            "The original file kind changed.",
+        )?;
+        j.try_transaction(|j| -> IvyResult<()> {
+            save_bytes(j, &id, bytes)?;
+            j.set(&key, &saved)
+        })?;
+    }
 }
 
 #[derive(Clone)]
@@ -307,13 +382,13 @@ impl ChatFiles {
             "chat_file_target_changed",
             "Main changed; a file cannot silently follow another conversation.",
         )?;
-        let (_, image) = outgoing_file_bytes(request.required("file")?)?;
+        let (bytes, image) = outgoing_file_bytes(request.required("file")?)?;
         require(
             same(&target, &self.target(&bridge.workspace(caller).await?)?)?,
             "chat_file_target_changed",
             "Main changed during file admission.",
         )?;
-        self.enqueue(caller, request, &target, &request_hash, image)
+        self.enqueue(caller, request, &target, &request_hash, bytes, image)
             .await
     }
     async fn replay(&self, saved: &Json, request_hash: &str) -> IvyResult<Json> {
@@ -331,20 +406,27 @@ impl ChatFiles {
         request: &Json,
         target: &Json,
         request_hash: &str,
+        bytes: Vec<u8>,
         image: bool,
     ) -> IvyResult<Json> {
         let operation = string(request, "operationId")?;
         let key = key(caller, operation)?;
         let id = message_id(caller, operation)?;
         let at = date_to_iso(self.clock.utc_millis() as f64)?;
-        let mut file = request.required("file")?.clone();
-        let bytes = file.remove("bytesBase64").ok_or_else(storage)?;
+        let file = Json::object(
+            request
+                .required("file")?
+                .as_object()
+                .ok_or_else(storage)?
+                .iter()
+                .filter(|(key, _)| !key.eq_str("bytesBase64"))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         let saved = Json::object([
             ("caller", Json::String(caller.clone())),
             ("expectedBridge", target.required("expectedBridge")?.clone()),
             ("requestHash", request_hash.into()),
             ("transportHash", self.transport_hash()?.into()),
-            ("bytesBase64", bytes),
             ("caption", request.required("caption")?.clone()),
             (
                 "delivery",
@@ -369,18 +451,16 @@ impl ChatFiles {
                 require(prior.get("requestHash") == Some(&request_hash.into()), "chat_identity_conflict", "A concurrent file operation changed its content.")?;
                 return Self::view(j, &prior);
             }
-            let rows = j.kv_rows("SELECT key,value FROM kv WHERE key LIKE 'file:%'")?;
-            let mut pending = 0;
-            let mut retained = 0.0;
-            for (_,row) in rows {
-                if matches!(Self::view(j, &row)?.required("state")?.as_str()?.as_str(), "queued" | "sending" | "outcome_unknown") { pending += 1; }
-                if !row.required("bytesBase64")?.is_null() { retained += row.required("delivery")?.required("file")?.required("byteLength")?.as_f64().ok_or_else(storage)?; }
-            }
-            require(pending < 32 && retained + request.required("file")?.required("byteLength")?.as_f64().ok_or_else(storage)? <= (64*1024*1024) as f64, "limit_exceeded", "The file queue is full (32 unresolved deliveries or 64 MiB). Reconcile original deliveries first.")?;
+            let (pending, retained): (i64, i64) = j.connection().query_row(
+                "SELECT (SELECT count(*) FROM outgoing o JOIN kv k ON k.key='out-file:'||o.id WHERE o.state IN ('pending','sending','unknown')),(SELECT COALESCE(sum(byte_length),0) FROM file_bytes)",
+                [], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).map_err(|_| storage())?;
+            require(pending < 32 && retained + bytes.len() as i64 <= 64*1024*1024, "limit_exceeded", "The file queue is full (32 unresolved deliveries or 64 MiB). Reconcile original deliveries first.")?;
             let number = self.sender()?.required("phoneNumber")?.as_str()?;
             let jid = format!("{}@s.whatsapp.net", phone(&number).ok_or_else(storage)?);
             j.try_transaction(|j| -> IvyResult<()> {
                 j.enqueue_attachment(&id, &jid, &request.required("caption")?.as_str().unwrap_or_default(), self.clock.utc_millis())?;
+                save_bytes(j, &id, bytes)?;
                 j.set(&key, &saved)?;
                 j.set(&format!("out-file:{id}"), &key.as_str().into())
             })?;
@@ -418,15 +498,31 @@ impl ChatFiles {
         Ok(string(&self.saved(id)?, "caller")?.clone())
     }
     pub fn payload(&self, id: &str) -> IvyResult<FilePayload> {
-        let saved = self.saved(id)?;
-        require(
-            saved.get("bytesBase64").is_some_and(|v| !v.is_null()),
-            "chat_file_integrity",
-            "The queued file bytes are unavailable.",
-        )?;
-        let mut file = saved.required("delivery")?.required("file")?.clone();
-        file.insert("bytesBase64", saved.required("bytesBase64")?.clone());
-        let (bytes, image) = outgoing_file_bytes(&file)?;
+        let (saved, bytes) = self.journal.access(|j| {
+            let key = j.get(&format!("out-file:{id}"))?;
+            require(
+                !key.is_null(),
+                "chat_file_integrity",
+                "The queued file bytes are unavailable.",
+            )?;
+            let saved = j.get(&key.as_str()?)?;
+            let bytes: Option<Vec<u8>> = j
+                .connection()
+                .query_row("SELECT content FROM file_bytes WHERE id=?", [id], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(|_| storage())?;
+            Ok((saved, bytes))
+        })?;
+        let bytes = bytes.ok_or_else(|| {
+            IvyError::new(
+                "chat_file_integrity",
+                "The queued file bytes are unavailable.",
+            )
+        })?;
+        let file = saved.required("delivery")?.required("file")?.clone();
+        let image = validate_file_bytes(&file, &bytes)?;
         require(
             saved.required("delivery")?.get("kind")
                 == Some(&Json::from(if image { "image" } else { "document" })),
@@ -445,33 +541,28 @@ impl ChatFiles {
             .access(|j| mark(j, id, state, code, self.clock.utc_millis()))
     }
     pub fn prune(&self) -> IvyResult<()> {
+        let cutoff =
+            date_to_iso(self.clock.utc_millis().saturating_sub(RETENTION_MS) as f64)?.to_utf8()?;
         self.journal.access(|j| {
-            let mut rows = j.kv_rows("SELECT key,value FROM kv WHERE key LIKE 'file:%'")?;
-            rows.sort_by(|a, b| {
-                b.1.get("delivery")
-                    .and_then(|v| v.get("createdAt"))
-                    .and_then(Json::as_js_string)
-                    .cmp(
-                        &a.1.get("delivery")
-                            .and_then(|v| v.get("createdAt"))
-                            .and_then(Json::as_js_string),
-                    )
-            });
-            let mut completed = 0;
-            for (key, row) in rows {
-                let view = Self::view(j, &row)?;
-                let state = view.required("state")?.as_str()?;
-                let id = view.required("messageId")?.as_str()?;
-                let terminal = matches!(state.as_str(), "sent" | "failed");
-                if terminal {
-                    completed += 1;
-                }
-                let expired = self.clock.utc_millis() as f64
-                    - parse_date(string(&view, "createdAt")?)
-                    >= RETENTION_MS as f64;
-                if expired || terminal && completed > 256 {
+            loop {
+                // Select only receipt metadata, in bounded pages. Original byte
+                // BLOBs are never materialized for status, quotas or retention.
+                let rows: Vec<(String, String, String)> = {
+                    let mut query = j.connection().prepare("WITH files AS (
+                        SELECT k.key,json_extract(k.value,'$.delivery.messageId') AS id,
+                            json_extract(k.value,'$.requestHash') AS request_hash,
+                            json_extract(k.value,'$.delivery.createdAt') AS created,o.state,
+                            sum(o.state IN ('sent','failed')) OVER (ORDER BY json_extract(k.value,'$.delivery.createdAt') DESC,k.rowid ROWS UNBOUNDED PRECEDING) AS completed
+                        FROM kv k JOIN outgoing o ON o.id=json_extract(k.value,'$.delivery.messageId') WHERE k.key LIKE 'file:%'
+                    ) SELECT key,id,request_hash FROM files WHERE created<=? OR (state IN ('sent','failed') AND completed>256) ORDER BY created DESC,key LIMIT 32").map_err(|_| storage())?;
+                    query.query_map([&cutoff], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|_| storage())?
+                        .collect::<rusqlite::Result<_>>().map_err(|_| storage())?
+                };
+                if rows.is_empty() { return Ok(()); }
+                for (key, id, request_hash) in rows {
                     j.try_transaction(|j| -> IvyResult<()> {
-                        j.retire_attachment(&id, &row.required("requestHash")?.as_str()?)?;
+                        j.retire_attachment(&id, &request_hash)?;
+                        j.write("DELETE FROM file_bytes WHERE id=?", vec![Value::Text(id.clone())])?;
                         for key in [
                             key,
                             format!("out-file:{id}"),
@@ -485,7 +576,6 @@ impl ChatFiles {
                     })?;
                 }
             }
-            Ok(())
         })
     }
 }
@@ -501,7 +591,7 @@ pub(crate) fn mark(
         return j.mark(id, state);
     }
     let key = key.as_str()?;
-    let mut saved = j.get(&key)?;
+    let saved = j.get(&key)?;
     if ChatFiles::view(j, &saved)?.get("state") == Some(&"sent".into())
         && !matches!(state, OutputState::Sent)
     {
@@ -517,8 +607,10 @@ pub(crate) fn mark(
             ]),
         )?;
         if matches!(state, OutputState::Sent | OutputState::Failed) {
-            saved.insert("bytesBase64", Json::Null);
-            j.set(&key, &saved)?;
+            j.write(
+                "DELETE FROM file_bytes WHERE id=?",
+                vec![Value::Text(id.into())],
+            )?;
         }
         Ok(())
     })

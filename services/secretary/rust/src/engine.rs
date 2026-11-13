@@ -157,11 +157,14 @@ impl<'a, 'engine, 'journal> SecretaryEngine<'a, 'engine, 'journal> {
                     Record::Source,
                     &source_name(id)?,
                     &value,
-                    &mutation(&[
-                        IvyJson::String(store.root.clone()),
-                        "source".into(),
-                        source_identity(definition)?,
-                    ])?,
+                    &mutation(
+                        None,
+                        vec![
+                            IvyJson::String(store.root.clone()),
+                            "source".into(),
+                            source_identity(definition)?,
+                        ],
+                    )?,
                 )
                 .await?;
             let source = evidence.source(id).await?;
@@ -301,23 +304,26 @@ impl<'a, 'engine, 'journal> SecretaryEngine<'a, 'engine, 'journal> {
         if nonempty(request.get("cursor")) {
             query.insert("cursor", request.required("cursor")?.clone());
         }
-        let page = evidence
+        let mut page = evidence
             .store
             .client
             .request("objects.query", query, RequestOptions::default())
             .await?;
         let mut assignments = Vec::new();
-        for row in page
-            .required("items")?
-            .as_array()
+        for mut row in page
+            .remove("items")
+            .and_then(IvyJson::into_array)
             .ok_or_else(IvyError::internal)?
         {
-            let current = evidence
-                .store
-                .decode(Record::Assignment, query_document(row)?)?;
+            query_document(&row)?;
+            let raw = row.remove("document").ok_or_else(IvyError::internal)?;
+            let mut current = evidence.store.decode(Record::Assignment, raw)?;
             assignments.push(IvyJson::object([
-                ("pin", current.required("pin")?.clone()),
-                ("assignment", current.required("value")?.clone()),
+                ("pin", current.remove("pin").ok_or_else(IvyError::internal)?),
+                (
+                    "assignment",
+                    current.remove("value").ok_or_else(IvyError::internal)?,
+                ),
             ]));
         }
         Ok(IvyJson::object([
@@ -350,10 +356,13 @@ impl<'a, 'engine, 'journal> SecretaryEngine<'a, 'engine, 'journal> {
             "not_found",
             "The Secretary assignment was not found.",
         )?;
-        let current = current.ok_or_else(IvyError::internal)?;
+        let mut current = current.ok_or_else(IvyError::internal)?;
         Ok(IvyJson::object([
-            ("pin", current.required("pin")?.clone()),
-            ("assignment", current.required("value")?.clone()),
+            ("pin", current.remove("pin").ok_or_else(IvyError::internal)?),
+            (
+                "assignment",
+                current.remove("value").ok_or_else(IvyError::internal)?,
+            ),
             ("observedAt", IvyJson::String(self.now()?)),
         ]))
     }

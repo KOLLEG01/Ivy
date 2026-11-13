@@ -75,14 +75,15 @@ pub(crate) fn heads(
     state: &IvyJson,
     after: Option<&str>,
 ) -> IvyResult<Option<String>> {
-    let rows=ctx.journal.db.prepare(&format!("SELECT id,key,name,current_revision,value_json FROM technical_documents WHERE key IN ({KEYS}) AND (? IS NULL OR id>?) ORDER BY id LIMIT ?")).map_err(sqlite::error)?.query_map(params![after,after,ctx.page_size as i64+1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,String>(4)?))).map_err(sqlite::error)?.collect::<Result<Vec<_>,_>>().map_err(sqlite::error)?;
+    let rows=ctx.journal.db.prepare(&format!("SELECT d.id,d.key,d.name,d.current_revision,d.value_json,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key IN ({KEYS}) AND (? IS NULL OR d.id>?) ORDER BY d.id LIMIT ?")).map_err(sqlite::error)?.query_map(params![after,after,ctx.page_size as i64+1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?))).map_err(sqlite::error)?.collect::<Result<Vec<_>,_>>().map_err(sqlite::error)?;
     let more = rows.len() > ctx.page_size;
     let transaction = ctx
         .journal
         .db
         .unchecked_transaction()
         .map_err(sqlite::error)?;
-    for (id, key, name, revision, raw) in rows.iter().take(ctx.page_size) {
+    for (id, key, name, revision, head, raw) in rows.iter().take(ctx.page_size) {
+        crate::journal::check_technical_head(head, raw).map_err(|_| failure("The current local head differs from its original revision."))?;
         let source = source_local(ctx.source, id)?;
         if source.get("key") != Some(&key.clone().into())
             || source.get("name") != Some(&name.clone().into())
@@ -176,18 +177,19 @@ pub(crate) fn history(ctx: &ImportContext<'_>, state: &IvyJson) -> IvyResult<Opt
                 |r| r.get(0),
             )
             .map_err(sqlite::error)?;
-        let head: (i64, String) = ctx
+        let head: (i64, String, String) = ctx
             .journal
             .db
             .query_row(
-                "SELECT current_revision,value_json FROM technical_documents WHERE id=?",
+                "SELECT d.current_revision,d.value_json,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.id=?",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .map_err(sqlite::error)?;
+        crate::journal::check_technical_head(&head.1, &head.2).map_err(|_| failure("The current local head differs from its original revision."))?;
         if original != *raw
             || source.required("pin")?.get("revision") != Some(&IvyJson::Number(head.0 as f64))
-            || source.get("rawHash") != Some(&digest(head.1.as_bytes()).into())
+            || source.get("rawHash") != Some(&digest(head.2.as_bytes()).into())
         {
             return Err(failure(
                 "The technical history no longer matches its sealed baseline.",
@@ -249,11 +251,12 @@ pub(crate) fn references(
     } else {
         "documents"
     };
+    let revisions = if technical { "technical_revisions" } else { "revisions" };
     let rows = ctx
         .journal
         .db
         .prepare(&format!(
-            "SELECT id,value_json FROM {table} WHERE (? IS NULL OR id>?) ORDER BY id LIMIT ?"
+            "SELECT d.id,r.value_json FROM {table} d LEFT JOIN {revisions} r ON r.id=d.id AND r.revision=d.current_revision WHERE (? IS NULL OR d.id>?) ORDER BY d.id LIMIT ?"
         ))
         .map_err(sqlite::error)?
         .query_map(params![after, after, ctx.page_size as i64 + 1], |r| {

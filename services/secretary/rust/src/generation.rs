@@ -19,7 +19,10 @@ use std::{
     task::Poll,
     time::Duration,
 };
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+    sync::{Notify, mpsc},
+    time::Instant,
+};
 
 pub enum ServiceEvent {
     Reconcile(ServiceConnection),
@@ -105,7 +108,7 @@ impl ReconciledGeneration<'_, '_, '_> {
         let scans = RefCell::new(Some(SchedulerAssignments::default()));
         let notices = RefCell::new(Some(NoticeScan::default()));
         let stage = Cell::new("idle");
-        let (wake, mut wakes) = mpsc::unbounded_channel::<()>();
+        let wake = Notify::new();
         let mut work = Vec::<Work<'_>>::new();
         let mut deadline = None;
         let mut kick = false;
@@ -266,17 +269,17 @@ impl ReconciledGeneration<'_, '_, '_> {
                             let result = invoke(None, request.method, &request.arguments, &request.context, || self.connection.check_open(), || {}).await;
                             let _ = request.reply.send(result);
                         } else {
-                            let wake = wake.clone();
+                            let wake = &wake;
                             work.push(Work { name: WorkName::Invocation, future: Box::pin(async move {
                                 let result = invoke(Some(&self.handlers), request.method, &request.arguments, &request.context,
-                                    || self.connection.check_open(), || { let _ = wake.send(()); }).await;
+                                    || self.connection.check_open(), || wake.notify_one()).await;
                                 let _ = request.reply.send(result);
                                 Ok(())
                             }) });
                         }
                     } else { invocation_open = false; self.connection.close(); closing = true; }
                 },
-                _ = wakes.recv(), if !closing => { kick = true; },
+                _ = wake.notified(), if !closing => { kick = true; },
                 _ = async { match deadline { Some(at) => tokio::time::sleep_until(at).await, None => pending().await } }, if !closing => {
                     deadline = None; kick = true;
                 },

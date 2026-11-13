@@ -56,6 +56,7 @@ impl Journal {
         value: &IvyJson,
     ) -> IvyResult<Document> {
         let encoded = canonical(value, FRAME)?;
+        let head = technical_head(value)?;
         self.transaction(|| {
             let current = self.read(key, &pin.object_id, None, true)?;
             if current.pin != *pin {
@@ -67,7 +68,7 @@ impl Journal {
                 return Err(IvyError::new("capacity_exceeded", "Explicit import needs room to retain the original journal history."));
             }
             let next = pin.revision.checked_add(1).ok_or_else(IvyError::internal)?;
-            let changed = self.db.execute("UPDATE technical_documents SET current_revision=?,value_json=? WHERE id=? AND key=? AND current_revision=?", params![next, encoded, pin.object_id, key, pin.revision]).map_err(storage)?;
+            let changed = self.db.execute("UPDATE technical_documents SET current_revision=?,value_json=? WHERE id=? AND key=? AND current_revision=?", params![next, head, pin.object_id, key, pin.revision]).map_err(storage)?;
             if changed != 1 { return Err(IvyError::new("revision_conflict", "The local workflow row changed.")); }
             self.db.execute("INSERT INTO technical_revisions VALUES(?,?,?)", params![pin.object_id, next, encoded]).map_err(storage)?;
             self.read(key, &pin.object_id, Some(next), true)

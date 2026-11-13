@@ -23,7 +23,7 @@ pub(crate) async fn read(store: &Store<'_>, key: Record, selected: &IvyJson) -> 
     object.insert("effectivelyArchived", false.into());
     raw.insert("object", object);
     let _ = archived;
-    store.decode(key, &raw)
+    store.decode(key, raw)
 }
 pub(crate) async fn original(
     store: &Store<'_>,

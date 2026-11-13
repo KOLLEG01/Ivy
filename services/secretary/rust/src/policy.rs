@@ -7,12 +7,42 @@ pub enum Urgency {
     High,
     Critical,
 }
+impl Urgency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+    pub fn read(value: &IvyJson) -> Option<Self> {
+        [Self::Low, Self::Normal, Self::High, Self::Critical]
+            .into_iter()
+            .find(|v| value.is_str(v.as_str()))
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Notification {
     NeedsAttention,
     None,
     Main,
     Voice,
+}
+impl Notification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsAttention => "needs_attention",
+            Self::None => "none",
+            Self::Main => "main",
+            Self::Voice => "voice",
+        }
+    }
+    pub fn read(value: &IvyJson) -> Option<Self> {
+        [Self::NeedsAttention, Self::None, Self::Main, Self::Voice]
+            .into_iter()
+            .find(|v| value.is_str(v.as_str()))
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
@@ -76,24 +106,25 @@ pub fn quiet(
 }
 
 fn urgency(value: &IvyJson) -> IvyResult<Urgency> {
-    match value.as_str()?.as_str() {
-        "low" => Ok(Urgency::Low),
-        "normal" => Ok(Urgency::Normal),
-        "high" => Ok(Urgency::High),
-        "critical" => Ok(Urgency::Critical),
-        _ => Err(IvyError::internal()),
+    match Urgency::read(value) {
+        Some(urgency) => Ok(urgency),
+        None => {
+            value.as_str()?;
+            Err(IvyError::internal())
+        }
     }
 }
 pub(crate) fn assessment_suppression(
     assessment: &IvyJson,
     policy: &IvyJson,
 ) -> IvyResult<Option<&'static str>> {
-    let notification = match assessment.required("notification")?.as_str()?.as_str() {
-        "needs_attention" => Notification::NeedsAttention,
-        "none" => Notification::None,
-        "main" => Notification::Main,
-        "voice" => Notification::Voice,
-        _ => return Err(IvyError::internal()),
+    let value = assessment.required("notification")?;
+    let notification = match Notification::read(value) {
+        Some(notification) => notification,
+        None => {
+            value.as_str()?;
+            return Err(IvyError::internal());
+        }
     };
     let disposition = match assessment.required("disposition")?.as_str()?.as_str() {
         "ignore" => Disposition::Ignore,

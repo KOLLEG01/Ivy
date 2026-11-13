@@ -1,13 +1,12 @@
 //! Durable Voice admission and reconciliation for one assignment execution.
 use crate::{
-    assignment_voice::{
-        ForwardedVoiceOutcome, VoiceMethod, call_voice, forwarded_voice_outcome, voice_prompt,
-    },
+    assignment_voice::{VoiceMethod, call_voice, forwarded_voice_outcome, voice_prompt},
+    delivery_outcome::DeliveryOutcome,
     inbox_evidence::InboxEvidence,
     store::Record,
     voice_target::discover_voice_target,
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome, hash::hash_json};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome};
 use ivy_sdk::{
     clock::{Clock, automatic_notifications_allowed},
     rpc::RequestOptions,
@@ -115,12 +114,13 @@ impl AssignmentVoice<'_, '_, '_> {
     pub async fn step(
         &self,
         execution: &IvyJson,
-        decision: &IvyJson,
+        text: &JsString,
+        result_hash: &str,
         eligible: bool,
     ) -> IvyResult<VoiceResult> {
         self.evidence.verify_owner().await?;
         let value = execution.required("value")?;
-        let result_hash = IvyJson::from(hash_json(value.required("result")?)?);
+        let result_hash = IvyJson::from(result_hash);
         let expires_at = self.expiry();
         let mut latest = self
             .evidence
@@ -159,15 +159,7 @@ impl AssignmentVoice<'_, '_, '_> {
                 ("operationId", uuid::Uuid::new_v4().to_string().into()),
                 ("recipientId", target.required("recipientId")?.clone()),
                 ("route", "voice".into()),
-                (
-                    "voicePrompt",
-                    IvyJson::String(voice_prompt(
-                        decision
-                            .required("text")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?,
-                    )),
-                ),
+                ("voicePrompt", IvyJson::String(voice_prompt(text))),
             ]);
             self.save(
                 &mut latest,
@@ -193,13 +185,7 @@ impl AssignmentVoice<'_, '_, '_> {
                     == execution.required("pin")?.get("objectId")
                 && request.get("recipientId") == saved.required("target")?.get("recipientId")
                 && request.get("route") == Some(&"voice".into())
-                && request.get("voicePrompt")
-                    == Some(&IvyJson::String(voice_prompt(
-                        decision
-                            .required("text")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?,
-                    ))),
+                && request.get("voicePrompt") == Some(&IvyJson::String(voice_prompt(text))),
             "The original Voice request changed.",
         )?;
         match saved.required("state")?.as_str()?.as_str() {
@@ -338,7 +324,7 @@ impl AssignmentVoice<'_, '_, '_> {
                 &call_id,
                 request.required("operationId")?,
                 request.required("voicePrompt")?,
-            )? == ForwardedVoiceOutcome::Pending
+            )? == DeliveryOutcome::Pending
             {
                 return Ok(VoiceResult::Pending);
             }
@@ -351,7 +337,7 @@ impl AssignmentVoice<'_, '_, '_> {
                     None,
                 )
                 .await?;
-            if dial.is_null() || dial.get("phase") == Some(&"submitted".into()) {
+            if DeliveryOutcome::phone_receipt(&dial, "connected") == DeliveryOutcome::Pending {
                 return Ok(VoiceResult::Pending);
             }
             if dial.get("phase") == Some(&"outcome_unknown".into()) {
@@ -361,7 +347,7 @@ impl AssignmentVoice<'_, '_, '_> {
                 )
                 .with_outcome(Outcome::Unknown));
             }
-            if !receipt_sent(&dial, "connected") {
+            if DeliveryOutcome::phone_receipt(&dial, "connected") != DeliveryOutcome::Confirmed {
                 self.save(
                     latest,
                     changed(saved, "failed", "phone_not_answered".into()),
@@ -381,7 +367,7 @@ impl AssignmentVoice<'_, '_, '_> {
                     None,
                 )
                 .await?;
-            if prompted.is_null() || prompted.get("phase") == Some(&"submitted".into()) {
+            if DeliveryOutcome::phone_receipt(&prompted, "sent") == DeliveryOutcome::Pending {
                 return Ok(VoiceResult::Pending);
             }
             if prompted.get("phase") == Some(&"outcome_unknown".into()) {
@@ -391,7 +377,7 @@ impl AssignmentVoice<'_, '_, '_> {
                 )
                 .with_outcome(Outcome::Unknown));
             }
-            if !receipt_sent(&prompted, "sent") {
+            if DeliveryOutcome::phone_receipt(&prompted, "sent") != DeliveryOutcome::Confirmed {
                 self.save(
                     latest,
                     changed(saved, "failed", "phone_prompt_failed".into()),
@@ -405,12 +391,4 @@ impl AssignmentVoice<'_, '_, '_> {
         self.save(latest, next).await?;
         Ok(VoiceResult::Confirmed)
     }
-}
-fn receipt_sent(operation: &IvyJson, state: &str) -> bool {
-    let receipt = operation.get("receipt");
-    receipt.and_then(|r| r.get("ok")) == Some(&IvyJson::Bool(true))
-        && receipt
-            .and_then(|r| r.get("result"))
-            .and_then(|r| r.get("state"))
-            == Some(&state.into())
 }

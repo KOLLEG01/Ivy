@@ -10,14 +10,15 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
     operation::parse_operation_id_js,
 };
-use ivy_store::receipts::has_unresolved_outcome;
-use rusqlite::{Connection, OptionalExtension, Params, params};
+use rusqlite::{Connection, OptionalExtension, Params, params, types::Value};
 use std::{
     collections::{HashSet, VecDeque},
     path::Path,
 };
 
 const SCHEMA: &str = include_str!("local.sql");
+#[path = "local_metadata.rs"]
+mod metadata;
 
 #[derive(Clone, Copy)]
 pub struct Limits {
@@ -40,6 +41,16 @@ pub struct LocalStore {
     runtime_epoch: Option<JsString>,
     last_maintenance: i64,
 }
+struct OperationCandidate {
+    id: String,
+    operation_id: String,
+    issued_at: i64,
+    sort: Value,
+    order: i64,
+    input_id: Option<String>,
+    notice_hash: Option<String>,
+    reply_id: Option<String>,
+}
 fn encoded(value: &Json) -> StoreResult<String> {
     Ok(canonical(value, MANAGEMENT_FRAME_BYTES)?)
 }
@@ -61,27 +72,6 @@ fn text(value: &Json, key: &str) -> StoreResult<String> {
 fn at<'a>(value: &'a Json, keys: &[&str]) -> Option<&'a Json> {
     keys.iter().try_fold(value, |v, key| v.get(key))
 }
-fn is(value: Option<&Json>, expected: &str) -> bool {
-    value == Some(&Json::from(expected))
-}
-fn terminal(value: &Json) -> bool {
-    is(value.get("phase"), "succeeded") || is(value.get("phase"), "failed")
-}
-fn strings(value: &Json) -> HashSet<JsString> {
-    let mut found = HashSet::new();
-    let mut pending = vec![value];
-    while let Some(v) = pending.pop() {
-        match v {
-            Json::String(v) => {
-                found.insert(v.clone());
-            }
-            Json::Array(v) => pending.extend(v),
-            Json::Object(v) => pending.extend(v.iter().map(|(_, v)| v)),
-            _ => {}
-        }
-    }
-    found
-}
 fn number(value: &Json) -> StoreResult<f64> {
     value.as_f64().ok_or_else(|| IvyError::internal().into())
 }
@@ -93,7 +83,18 @@ impl LocalStore {
             Some(root) => Connection::open(root.join("chat-bridge.sqlite"))?,
             None => Connection::open_in_memory()?,
         };
-        db.execute_batch(SCHEMA)?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;")?;
+        let initialized: StoreResult<()> = (|| {
+            db.execute_batch(SCHEMA)?;
+            metadata::refresh(&db)?;
+            db.execute("INSERT INTO markers VALUES('journal.metadata.version','1') ON CONFLICT(key) DO UPDATE SET value_json='1'", [])?;
+            db.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+        if initialized.is_err() {
+            db.execute_batch("ROLLBACK")?;
+        }
+        initialized?;
         Ok(Self {
             db,
             limits: Limits::default(),
@@ -124,9 +125,6 @@ impl LocalStore {
     fn current(&self, key: &str) -> StoreResult<Vec<(String, Json)>> {
         self.rows("SELECT d.id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key=?", [key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .into_iter().map(|(id, value)| Ok((id, decoded(&value)?))).collect()
-    }
-    fn current_value(&self, id: &str) -> StoreResult<Option<Json>> {
-        self.db.query_row("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.id=?", [id], |r| r.get::<_, String>(0)).optional()?.map(|s| decoded(&s)).transpose()
     }
     fn set_marker(&self, key: &str, value: &Json) -> StoreResult<()> {
         self.db.execute("INSERT INTO markers VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", params![key, encoded(value)?])?;
@@ -255,35 +253,24 @@ impl LocalStore {
         )?;
         Ok(())
     }
-    fn protected_pins(&self) -> StoreResult<HashSet<String>> {
+    fn protected_pins(&self) -> StoreResult<HashSet<Pin>> {
+        metadata::refresh(&self.db)?;
         let mut result = HashSet::new();
         for (id, main) in self.current("chat-bridge/main")? {
             let Some(pending) = main.get("pendingAction").filter(|v| !(v).is_null()) else {
                 continue;
             };
             let operation_id = text(pending, "objectId")?;
-            result.insert(format!(
-                "{}:{}",
-                operation_id,
-                pending.required("revision")?.as_f64().unwrap_or(0.0)
-            ));
-            let raw = self.db.query_row("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.id=? AND d.key='chat-bridge/operation'", [&operation_id], |r| r.get::<_, String>(0)).optional()?;
-            if let Some(raw) = raw {
-                let value = decoded(&raw)?;
-                if is(at(&value, &["request", "action"]), "createMain") {
-                    let request = value.required("request")?;
-                    if let Some(rev) = request.get("expectedMainRevision").filter(|v| !v.is_null())
-                    {
-                        result.insert(format!("{id}:{}", rev.as_f64().unwrap_or(0.0)));
-                    }
-                    if let Some(resume) = request.get("resumeMain").filter(|v| !(v).is_null()) {
-                        result.insert(format!(
-                            "{}:{}",
-                            text(resume, "objectId")?,
-                            resume.required("revision")?.as_f64().unwrap_or(0.0)
-                        ));
-                    }
-                }
+            result.insert(Pin {
+                object_id: operation_id.clone(),
+                revision: pending.required("revision")?.as_f64().unwrap_or(0.0) as i64,
+            });
+            let expected = self.db.query_row("SELECT m.expected_main_revision FROM documents d JOIN journal_metadata m ON m.id=d.id AND m.revision=d.current_revision WHERE d.id=? AND d.key='chat-bridge/operation'",[operation_id],|r|r.get::<_,Option<i64>>(0)).optional()?.flatten();
+            if let Some(revision) = expected {
+                result.insert(Pin {
+                    object_id: id,
+                    revision,
+                });
             }
         }
         Ok(result)
@@ -297,14 +284,22 @@ impl LocalStore {
         }
         let mut queue = VecDeque::from([root.to_owned()]);
         while let Some(parent) = queue.pop_front() {
-            for id in self.rows(
-                "SELECT id FROM documents WHERE parent_id=?",
-                [&parent],
-                |r| r.get::<_, String>(0),
-            )? {
-                if selected.insert(id.clone()) {
-                    result.push(id.clone());
-                    queue.push_back(id);
+            let mut after: Option<String> = None;
+            loop {
+                let page = self.rows(
+                    "SELECT id FROM documents WHERE parent_id=? AND (? IS NULL OR id>?) ORDER BY id LIMIT ?",
+                    params![parent, after, after, metadata::PAGE],
+                    |r| r.get::<_, String>(0),
+                )?;
+                if page.is_empty() {
+                    break;
+                }
+                for id in page {
+                    after = Some(id.clone());
+                    if selected.insert(id.clone()) {
+                        result.push(id.clone());
+                        queue.push_back(id);
+                    }
                 }
             }
         }
@@ -324,14 +319,26 @@ impl LocalStore {
     }
     fn prune_historical_revisions(
         &self,
-        protected: &HashSet<String>,
+        protected: &HashSet<Pin>,
         id: Option<&str>,
     ) -> StoreResult<()> {
-        let rows = self.rows("SELECT r.id,r.revision,d.key,d.current_revision FROM revisions r JOIN documents d ON d.id=r.id WHERE r.revision<>d.current_revision AND (? IS NULL OR r.id=?)", params![id, id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?;
-        for (id, revision, key, current) in rows {
-            if !(key == "chat-bridge/collection" && revision > current - 32)
-                && !protected.contains(&format!("{id}:{revision}"))
-            {
+        metadata::refresh(&self.db)?;
+        let mut after = (String::new(), i64::MAX);
+        loop {
+            let rows = self.rows("SELECT r.id,r.revision FROM revisions r JOIN documents d ON d.id=r.id WHERE r.revision<>d.current_revision AND (? IS NULL OR r.id=?) AND NOT(d.key='chat-bridge/collection' AND r.revision>d.current_revision-32) AND (r.id>? OR (r.id=? AND r.revision<?)) ORDER BY r.id,r.revision DESC LIMIT ?", params![id,id,after.0,after.0,after.1,metadata::PAGE], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?;
+            if rows.is_empty() {
+                break;
+            }
+            for (id, revision) in rows {
+                after = (id.clone(), revision);
+                let pinned = self.db.query_row("SELECT 1 FROM journal_references WHERE target_id=? AND target_revision=? AND NOT(source_id=? AND source_revision=?) LIMIT 1",params![id,revision,id,revision],|_|Ok(())).optional()?.is_some();
+                if protected.contains(&Pin {
+                    object_id: id.clone(),
+                    revision,
+                }) || pinned
+                {
+                    continue;
+                }
                 self.db.execute(
                     "DELETE FROM revisions WHERE id=? AND revision=?",
                     params![id, revision],
@@ -341,7 +348,11 @@ impl LocalStore {
         Ok(())
     }
     fn needs_room(&self) -> StoreResult<bool> {
-        let (rows, bytes) = self.db.query_row("SELECT (SELECT COUNT(*) FROM revisions)+(SELECT COUNT(*) FROM blobs),COALESCE((SELECT SUM(length(CAST(value_json AS BLOB))) FROM revisions),0)+COALESCE((SELECT SUM(length(bytes)) FROM blobs),0)+(SELECT COUNT(*)*1048576 FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/operation' AND json_extract(r.value_json,'$.phase') NOT IN ('succeeded','failed'))", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let (rows, bytes) = self.db.query_row(
+            "SELECT entries,bytes+reserved_bytes FROM journal_usage WHERE id=1",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
         Ok(rows as u64 > self.limits.count as u64 || bytes as u64 > self.limits.bytes as u64)
     }
     fn make_room(&mut self, id: &str, incoming: &Json, now: i64) -> StoreResult<()> {
@@ -372,6 +383,111 @@ impl LocalStore {
         }
         result
     }
+    fn retained_tree(
+        &self,
+        roots: [&str; 3],
+        protected: &HashSet<String>,
+        incoming: &HashSet<String>,
+    ) -> StoreResult<bool> {
+        for root in roots {
+            for id in self.technical_tree(root, true)? {
+                if protected.contains(&id) || incoming.contains(&id) {
+                    return Ok(true);
+                }
+            }
+        }
+        // This closure includes blob IDs, but never reads their bytes. References
+        // within the released tree do not keep their own sources alive.
+        let retained = self.db.query_row(
+            "WITH RECURSIVE doomed(id) AS (
+               SELECT ?1 UNION SELECT ?2 UNION SELECT ?3
+               UNION SELECT d.id FROM documents d JOIN doomed p ON d.parent_id=p.id
+               UNION SELECT b.id FROM blobs b JOIN doomed p ON b.parent_id=p.id)
+             SELECT EXISTS(SELECT 1 FROM doomed t JOIN documents d ON d.id=t.id JOIN journal_metadata m ON m.id=d.id AND m.revision=d.current_revision WHERE m.retain=1)
+               OR EXISTS(SELECT 1 FROM journal_references e JOIN doomed t ON t.id=e.target_id WHERE NOT EXISTS(SELECT 1 FROM doomed s WHERE s.id=e.source_id))",
+            params![roots[0],roots[1],roots[2]],|r|r.get::<_,bool>(0))?;
+        Ok(retained)
+    }
+
+    fn retire_operation(
+        &self,
+        candidate: &OperationCandidate,
+        protected: &HashSet<String>,
+        incoming: &HashSet<String>,
+        queued_inputs: &HashSet<String>,
+        queued_notices: &HashSet<String>,
+    ) -> StoreResult<()> {
+        if protected.contains(&candidate.id)
+            || incoming.contains(&candidate.id)
+            || candidate
+                .input_id
+                .as_ref()
+                .is_some_and(|id| queued_inputs.contains(id))
+            || candidate
+                .notice_hash
+                .as_ref()
+                .is_some_and(|id| queued_notices.contains(id))
+        {
+            return Ok(());
+        }
+        if let Some(reply) = &candidate.reply_id {
+            if self.marker(&format!("notice-delivered:{reply}"))? < 0.0 {
+                return Ok(());
+            }
+        }
+        let mut receipts = Vec::new();
+        for (key, prefix) in [
+            ("chat-bridge/offer", "Chat offer "),
+            ("chat-bridge/acknowledgement", "Chat acknowledgement "),
+        ] {
+            let receipt = self.db.query_row("SELECT id FROM documents WHERE key=? AND name=? AND parent_id IS (SELECT parent_id FROM documents WHERE id=?)",params![key,format!("{prefix}{}",candidate.id),candidate.id],|r|r.get::<_,String>(0)).optional()?;
+            if key == "chat-bridge/offer" {
+                if let Some(offer) = &receipt {
+                    let pending = self.db.query_row("SELECT 1 FROM journal_metadata m JOIN documents d ON d.id=m.id AND d.current_revision=m.revision WHERE d.key='chat-bridge/operation' AND m.op_terminal=0 AND m.action='acknowledge' AND m.offer_id=? LIMIT 1",[offer],|_|Ok(())).optional()?.is_some();
+                    let unconfirmed = self.db.query_row("SELECT 1 FROM journal_references e JOIN documents d ON d.id=e.source_id AND d.current_revision=e.source_revision WHERE e.source_id=? AND NOT EXISTS(SELECT 1 FROM offer_acknowledgements a WHERE a.offer_id=e.source_id AND a.reply_id=e.target_id) LIMIT 1",[offer],|_|Ok(())).optional()?.is_some();
+                    if pending || unconfirmed || incoming.contains(offer) {
+                        return Ok(());
+                    }
+                }
+            }
+            receipts.push(receipt);
+        }
+        let roots = [
+            candidate.id.as_str(),
+            receipts[0].as_deref().unwrap_or(&candidate.id),
+            receipts[1].as_deref().unwrap_or(&candidate.id),
+        ];
+        if self.retained_tree(roots, protected, incoming)? {
+            return Ok(());
+        }
+        for receipt in receipts.into_iter().flatten() {
+            self.db.execute(
+                "DELETE FROM offer_acknowledgements WHERE offer_id=?",
+                [&receipt],
+            )?;
+            self.delete_technical_tree(&receipt, true)?;
+        }
+        if let Some(reply) = &candidate.reply_id {
+            self.db.execute(
+                "DELETE FROM markers WHERE key=?",
+                [format!("notice-delivered:{reply}")],
+            )?;
+        }
+        self.db.execute(
+            "INSERT OR IGNORE INTO retired_operations VALUES(?,?)",
+            params![candidate.operation_id, candidate.issued_at],
+        )?;
+        self.delete_technical_tree(&candidate.id, true)?;
+        self.set_marker(
+            "operations.expiredBefore",
+            &Json::Number(
+                self.marker("operations.expiredBefore")?
+                    .max(candidate.issued_at as f64),
+            ),
+        )?;
+        Ok(())
+    }
+
     pub fn expire_operations(
         &mut self,
         now: i64,
@@ -382,196 +498,130 @@ impl LocalStore {
         if !force && now as f64 - (self.last_maintenance as f64) < 60_000.0 && !self.needs_room()? {
             return Ok(());
         }
-        self.db.execute("DELETE FROM workflow_cleanup WHERE NOT EXISTS(SELECT 1 FROM documents WHERE parent_id=workflow_cleanup.root_id) AND NOT EXISTS(SELECT 1 FROM blobs WHERE parent_id=workflow_cleanup.root_id)", [])?;
-        let mut incoming_ids = incoming.map(strings).unwrap_or_default();
-        if let Some(id) = protected_id {
-            incoming_ids.insert(id.into());
-        }
-        let protected = self.protected_pins()?;
-        let protected_objects = protected
-            .iter()
-            .filter_map(|s| s.rsplit_once(':').map(|(id, _)| id.to_owned()))
-            .collect::<HashSet<_>>();
-        let mut queued_inputs = HashSet::new();
-        let mut queued_notices = HashSet::new();
-        for (_, main) in self.current("chat-bridge/main")? {
-            if let Some(queue) = main.get("queue").and_then(Json::as_array) {
-                for ticket in queue {
-                    if let Some(id) = ticket.get("inputId").and_then(Json::as_js_string) {
-                        queued_inputs.insert(id.clone());
-                    }
-                    if let Some(identity) = ticket.get("identity").filter(|v| !(v).is_null()) {
-                        queued_notices.insert(hash_json(&Json::Array(vec![
-                            identity.required("senderPrincipalId")?.clone(),
-                            identity.required("messageId")?.clone(),
-                        ]))?);
-                    }
-                }
-            }
-        }
-        let rows = self.rows("SELECT d.id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/operation' ORDER BY json_extract(r.value_json,'$.updatedAt'),d.rowid", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .into_iter().map(|(id, s)| Ok((id, decoded(&s)?))).collect::<StoreResult<Vec<_>>>()?;
-        let pending_offers = rows
-            .iter()
-            .filter(|(_, v)| !terminal(v) && is(at(v, &["request", "action"]), "acknowledge"))
-            .filter_map(|(_, v)| {
-                at(v, &["request", "offerId"])
-                    .and_then(Json::as_js_string)
-                    .cloned()
-            })
-            .collect::<HashSet<_>>();
         let own_transaction = self.db.is_autocommit();
         if own_transaction {
             self.db.execute_batch("BEGIN IMMEDIATE")?;
         }
         let result = (|| {
-            let mut pressure = self.needs_room()?;
-            for (id, value) in rows {
-                if !pressure {
-                    break;
-                }
-                let mut outcome_fields = Json::Object(vec![]);
-                for key in ["error", "nativeCall"] {
-                    if let Some(v) = value.get(key) {
-                        outcome_fields.insert(key, v.clone());
-                    }
-                }
-                if !terminal(&value)
-                    || protected_objects.contains(&id)
-                    || incoming_ids.contains(&JsString::from(id.as_str()))
-                    || has_unresolved_outcome(&outcome_fields)?
-                {
-                    continue;
-                }
-                let Some(operation_id) = value.get("operationId").and_then(Json::as_js_string)
-                else {
-                    continue;
-                };
-                let Ok(identity) = parse_operation_id_js(operation_id) else {
-                    continue;
-                };
-                if at(&value, &["outcome", "input", "object", "objectId"])
-                    .and_then(Json::as_js_string)
-                    .is_some_and(|id| queued_inputs.contains(id))
-                {
-                    continue;
-                }
-                if is(at(&value, &["request", "action"]), "notify")
-                    && queued_notices.contains(&hash_json(&Json::Array(vec![
-                        value
-                            .get("callerPrincipalId")
-                            .cloned()
-                            .unwrap_or(Json::Null),
-                        value.required("operationId")?.clone(),
-                    ]))?)
-                {
-                    continue;
-                }
-                let notified_reply = if is(at(&value, &["outcome", "action"]), "notify") {
-                    Some(
-                        at(&value, &["outcome", "reply", "object", "objectId"])
-                            .ok_or_else(IvyError::internal)?
-                            .as_str()?,
-                    )
-                } else {
-                    None
-                };
-                if let Some(reply) = &notified_reply {
-                    if self.marker(&format!("notice-delivered:{reply}"))? < 0.0 {
-                        continue;
-                    }
-                }
-                let offer = self.db.query_row("SELECT d.id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/offer' AND d.name=? AND d.parent_id IS (SELECT parent_id FROM documents WHERE id=?)", params![format!("Chat offer {id}"), id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()?;
-                if let Some((offer_id, raw)) = offer {
-                    if pending_offers.contains(&JsString::from(offer_id.as_str()))
-                        || incoming_ids.contains(&JsString::from(offer_id.as_str()))
-                    {
-                        continue;
-                    }
-                    let offer_value = decoded(&raw)?;
-                    let mut unconfirmed = false;
-                    if let Some(replies) = offer_value.get("replies").and_then(Json::as_array) {
-                        for reply in replies {
-                            if self.db.query_row("SELECT 1 FROM offer_acknowledgements WHERE offer_id=? AND reply_id=?", params![offer_id, text(reply, "objectId")?], |_| Ok(())).optional()?.is_none() { unconfirmed = true; break; }
+            metadata::refresh(&self.db)?;
+            self.db.execute("DELETE FROM workflow_cleanup WHERE NOT EXISTS(SELECT 1 FROM documents WHERE parent_id=workflow_cleanup.root_id) AND NOT EXISTS(SELECT 1 FROM blobs WHERE parent_id=workflow_cleanup.root_id)",[])?;
+            let key = match protected_id {
+                Some(id) => self
+                    .db
+                    .query_row("SELECT key FROM documents WHERE id=?", [id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()?
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            let mut incoming_ids = incoming
+                .map(|v| {
+                    metadata::references(&key, v)
+                        .into_iter()
+                        .map(|p| p.object_id)
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(id) = protected_id {
+                incoming_ids.insert(id.to_owned());
+            }
+            let protected = self.protected_pins()?;
+            let protected_objects = protected
+                .iter()
+                .map(|p| p.object_id.clone())
+                .collect::<HashSet<_>>();
+            let mut queued_inputs = HashSet::new();
+            let mut queued_notices = HashSet::new();
+            for (_, main) in self.current("chat-bridge/main")? {
+                if let Some(queue) = main.get("queue").and_then(Json::as_array) {
+                    for ticket in queue {
+                        if let Some(id) = ticket.get("inputId").and_then(|v| v.as_str().ok()) {
+                            queued_inputs.insert(id);
+                        }
+                        if let Some(identity) = ticket.get("identity").filter(|v| !v.is_null()) {
+                            queued_notices.insert(hash_json(&Json::Array(vec![
+                                identity.required("senderPrincipalId")?.clone(),
+                                identity.required("messageId")?.clone(),
+                            ]))?);
                         }
                     }
-                    if unconfirmed {
-                        continue;
-                    }
                 }
-                for (key, name) in [
-                    ("chat-bridge/offer", "Chat offer "),
-                    ("chat-bridge/acknowledgement", "Chat acknowledgement "),
-                ] {
-                    let receipt = self.db.query_row("SELECT id FROM documents WHERE key=? AND name=? AND parent_id IS (SELECT parent_id FROM documents WHERE id=?)", params![key, format!("{name}{id}"), id], |r| r.get::<_, String>(0)).optional()?;
-                    if let Some(receipt) = receipt {
-                        self.db.execute(
-                            "DELETE FROM offer_acknowledgements WHERE offer_id=?",
-                            [&receipt],
+            }
+            loop {
+                let before: (i64, i64) = self.db.query_row(
+                    "SELECT entries,bytes+reserved_bytes FROM journal_usage WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                self.prune_historical_revisions(&protected, None)?;
+                let mut after: Option<(Value, i64)> = None;
+                while self.needs_room()? {
+                    let (sort, order) = after
+                        .as_ref()
+                        .map(|(v, n)| (v.clone(), *n))
+                        .unwrap_or((Value::Null, 0));
+                    let page = self.rows(
+                        "SELECT d.id,m.operation_id,m.issued_at,m.sort_key,m.document_order,m.input_id,m.notice_hash,m.reply_id FROM journal_metadata m JOIN documents d ON d.id=m.id AND d.current_revision=m.revision WHERE d.key='chat-bridge/operation' AND m.op_terminal=1 AND m.op_blocked=0 AND m.operation_id IS NOT NULL AND (?=0 OR (m.sort_key IS ? AND m.document_order>?) OR m.sort_key>? OR (? IS NULL AND m.sort_key IS NOT NULL)) ORDER BY m.sort_key,m.document_order LIMIT ?",
+                        params![after.is_some(),sort,order,sort,sort,metadata::PAGE],|r|Ok(OperationCandidate {id:r.get(0)?,operation_id:r.get(1)?,issued_at:r.get(2)?,sort:r.get(3)?,order:r.get(4)?,input_id:r.get(5)?,notice_hash:r.get(6)?,reply_id:r.get(7)?}))?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    for candidate in page {
+                        after = Some((candidate.sort.clone(), candidate.order));
+                        if !self.needs_room()? {
+                            break;
+                        }
+                        self.retire_operation(
+                            &candidate,
+                            &protected_objects,
+                            &incoming_ids,
+                            &queued_inputs,
+                            &queued_notices,
                         )?;
-                        self.delete_technical_tree(&receipt, true)?;
                     }
                 }
-                if let Some(reply) = notified_reply {
-                    self.db.execute(
-                        "DELETE FROM markers WHERE key=?",
-                        [format!("notice-delivered:{reply}")],
-                    )?;
+                let mut after_root: Option<(f64, i64)> = None;
+                while self.needs_room()? {
+                    let (time, order) = after_root.unwrap_or((0.0, 0));
+                    let page = self.rows("SELECT root_id,delete_after,rowid FROM workflow_cleanup WHERE ?=0 OR delete_after>? OR (delete_after=? AND rowid>?) ORDER BY delete_after,rowid LIMIT ?",params![after_root.is_some(),time,time,order,metadata::PAGE],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?,r.get::<_,i64>(2)?)))?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    for (root, time, order) in page {
+                        after_root = Some((time, order));
+                        if !self.needs_room()? {
+                            break;
+                        }
+                        if queued_inputs.contains(&root)
+                            || self.retained_tree(
+                                [&root, &root, &root],
+                                &protected_objects,
+                                &incoming_ids,
+                            )?
+                        {
+                            continue;
+                        }
+                        self.delete_technical_tree(&root, false)?;
+                        self.db
+                            .execute("DELETE FROM workflow_cleanup WHERE root_id=?", [root])?;
+                    }
                 }
-                self.db.execute(
-                    "INSERT OR IGNORE INTO retired_operations VALUES(?,?)",
-                    params![operation_id.to_utf8()?, identity.issued_at_unix_ms as i64],
+                let after: (i64, i64) = self.db.query_row(
+                    "SELECT entries,bytes+reserved_bytes FROM journal_usage WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
-                self.delete_technical_tree(&id, true)?;
-                self.set_marker(
-                    "operations.expiredBefore",
-                    &Json::Number(
-                        self.marker("operations.expiredBefore")?
-                            .max(identity.issued_at_unix_ms as f64),
-                    ),
-                )?;
-                pressure = self.needs_room()?;
+                if !self.needs_room()? || after == before {
+                    break;
+                }
+                // A released source may unblock an older referenced receipt.
             }
             self.db.execute(
                 "DELETE FROM retired_operations WHERE issued_at<?",
                 [self.marker("operations.expiredBefore")?],
             )?;
-            for root in self.rows(
-                "SELECT root_id FROM workflow_cleanup ORDER BY delete_after,rowid",
-                [],
-                |r| r.get::<_, String>(0),
-            )? {
-                if !pressure {
-                    break;
-                }
-                let ids = self.technical_tree(&root, false)?;
-                if queued_inputs.contains(&JsString::from(root.as_str()))
-                    || std::iter::once(&root).chain(ids.iter()).any(|id| {
-                        protected_objects.contains(id)
-                            || incoming_ids.contains(&JsString::from(id.as_str()))
-                    })
-                {
-                    continue;
-                }
-                let mut unresolved = false;
-                for id in ids {
-                    if let Some(value) = self.current_value(&id)? {
-                        if has_unresolved_outcome(&value)? {
-                            unresolved = true;
-                            break;
-                        }
-                    }
-                }
-                if unresolved {
-                    continue;
-                }
-                self.delete_technical_tree(&root, false)?;
-                self.db
-                    .execute("DELETE FROM workflow_cleanup WHERE root_id=?", [&root])?;
-                pressure = self.needs_room()?;
-            }
-            self.db.execute("DELETE FROM markers WHERE key LIKE 'notice-input:%' AND CAST(value_json AS INTEGER)<=?", [now])?;
-            self.prune_historical_revisions(&protected, None)?;
+            self.db.execute("DELETE FROM markers WHERE key LIKE 'notice-input:%' AND CAST(value_json AS INTEGER)<=?",[now])?;
             if own_transaction {
                 self.db.execute_batch("COMMIT")?;
             }
@@ -583,6 +633,7 @@ impl LocalStore {
         }
         result
     }
+
     pub fn document(
         &self,
         key: &str,
@@ -697,6 +748,7 @@ impl LocalStore {
                         "INSERT INTO revisions VALUES(?,?,?,?)",
                         params![id, 1, encoded, iso],
                     )?;
+                    metadata::save(&self.db, key, &id, 1, value)?;
                     self.make_room(&id, value, now)?;
                     self.db.execute_batch("COMMIT")?;
                     Ok(())
@@ -736,6 +788,7 @@ impl LocalStore {
                         "INSERT INTO revisions VALUES(?,?,?,?)",
                         params![object_id, next, encoded, iso],
                     )?;
+                    metadata::save(&self.db, key, object_id, next, value)?;
                     self.prune_historical_revisions(&self.protected_pins()?, Some(object_id))?;
                     self.make_room(object_id, value, now)?;
                     self.db.execute_batch("COMMIT")?;
@@ -833,7 +886,7 @@ impl LocalStore {
                 "INSERT INTO blobs VALUES(?,?,?,?,?)",
                 params![id, key, name, parent, bytes],
             )?;
-            self.make_room(&id, &Json::from(parent), now)?;
+            self.make_room(parent, &Json::Null, now)?;
             self.db.execute_batch("COMMIT")?;
             Ok(())
         })();

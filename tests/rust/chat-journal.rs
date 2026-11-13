@@ -15,6 +15,8 @@ mod desktop;
 mod desktop_host;
 #[path = "chat-listener-cases.rs"]
 mod listener;
+#[path = "chat-native-events.rs"]
+mod native_events;
 #[path = "chat-session-cases.rs"]
 mod session;
 #[path = "chat-wa-runtime-cases.rs"]

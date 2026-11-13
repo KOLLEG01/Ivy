@@ -8,16 +8,15 @@ use ivy_contracts::{
     hash::hash_json, json::canonical, operation::derive_operation_id_js,
 };
 use ivy_sdk::{
-    clock::date_to_iso,
-    native_evidence::NativeOwnerIdentity,
-    native_operation::NativeOperationCall,
-    native_owner::NativeOwner,
-    native_turn_contents::{read_native_turn_contents, verify_native_turn_contents},
-    rpc::RequestOptions,
-    tools::{InterfaceRequirement, ToolCallOptions, ToolClients},
+    clock::date_to_iso, native_evidence::NativeOwnerIdentity,
+    native_operation::NativeOperationCall, native_owner::NativeOwner,
+    native_turn_contents::read_native_turn_contents, rpc::RequestOptions, tools::ToolClients,
 };
 use ivy_store::{rusqlite, sqlite};
 use std::{cell::RefCell, sync::Arc};
+
+#[path = "follow_up_release.rs"]
+mod release;
 
 pub const FOLLOW_UP_KEY: &str = "secretary/follow-up";
 pub const CONTEXT_KEY: &str = "secretary/follow-up-context";
@@ -139,6 +138,14 @@ pub(crate) fn context_start_params(context: &IvyJson) -> IvyJson {
     }
     params
 }
+fn context_configuration() -> IvyJson {
+    IvyJson::object([
+        ("features.shell_tool", false.into()),
+        ("features.apps", false.into()),
+        ("features.multi_agent", false.into()),
+        ("web_search", "live".into()),
+    ])
+}
 
 pub struct SecretaryFollowUp<'a, 'engine, 'journal> {
     pub engine: &'a SecretaryEngine<'a, 'engine, 'journal>,
@@ -170,7 +177,9 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 "principalId",
             )?,
             NativeOwnerIdentity {
-                backend: ivy_contracts::native_backend::BackendIdentity::optional(target.get("backend"))?,
+                backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                    target.get("backend"),
+                )?,
                 service_node_id: text(target, "serviceNodeId")?,
                 host_id: target
                     .get("hostId")
@@ -346,46 +355,29 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                     "secretary_follow_up_target_missing",
                     "Secretary has no AgentManager target for a new item follow-up.",
                 )?;
-                let status = self
-                    .tools
-                    .service_tools(
-                        text(execution, "serviceNodeId")?,
-                        &[InterfaceRequirement {
-                            namespace: "agent".into(),
-                            interface_version: "1.0.0".into(),
-                        }],
-                    )?
-                    .call(
-                        &"agent.status".into(),
-                        IvyJson::object(Vec::<(String, IvyJson)>::new()),
-                        None,
-                        ToolCallOptions::default(),
-                    )
-                    .await?;
-                need(
-                    status.get("serviceNodeId") == execution.get("serviceNodeId")
-                        && !(field(&status, "epoch")).is_null()
-                        && !(field(&status, "nativeVersion")).is_null(),
-                    "secretary_follow_up_target_missing",
-                    "The configured AgentManager is unavailable.",
-                )?;
-                let target = IvyJson::object(
-                    [
-                        "serviceNodeId",
-                        "hostId",
-                        "nativeVersion",
-                        "nativeExecutableHash",
-                        "catalogHash",
-                    ]
-                    .into_iter()
-                    .filter_map(|key| status.get(key).map(|v| (key, v.clone()))),
-                );
+                let target = crate::agent_target::AgentSelection::from_json(execution)?
+                    .resolve(&self.tools)
+                    .await
+                    .map_err(|error| {
+                        if matches!(
+                            error.code.as_str(),
+                            "secretary_execution_target_unavailable" | "invalid_arguments"
+                        ) {
+                            IvyError::new(
+                                "secretary_follow_up_target_missing",
+                                "The configured AgentManager is unavailable.",
+                            )
+                        } else {
+                            error
+                        }
+                    })?
+                    .to_json();
                 let mut context = execution.clone();
                 context.insert("developerInstructions", CONTEXT_INSTRUCTIONS.into());
                 let owner = self.owner(&target)?;
-                let params = owner
-                    .thread_start_params(&context_start_params(&context))
-                    .await?;
+                let mut params = context_start_params(&context);
+                params.insert("config", context_configuration());
+                let params = owner.thread_start_params(&params).await?;
                 let start = prepare_call(
                     &owner,
                     derive_operation_id_js(
@@ -484,8 +476,8 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         evidence.verify_owner().await?;
         let mut next = saved.value.clone();
         next.insert("threadId", IvyJson::String(thread_id));
-        next.insert("start", IvyJson::Null);
-        next.insert("createdFor", IvyJson::Null);
+        // Keep the accepted start and its first question. The first turn uses
+        // that live session directly; an empty thread has no rollout to resume.
         saved = journal.amend_technical(CONTEXT_KEY, &saved.pin, &next)?;
         Ok(saved)
     }
@@ -590,7 +582,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             .as_f64()
             .ok_or_else(IvyError::internal)? as usize;
         let journal = self.engine.evidence.store.journal;
-        let rows: Vec<String> = journal.db.prepare("SELECT name FROM technical_documents WHERE key='secretary/follow-up' AND json_extract(value_json,'$.phase') IN ('prepared','running','outcome_unknown') AND name>? ORDER BY name LIMIT ?").map_err(sqlite::error)?.query_map(rusqlite::params![self.cursor(), limit as i64], |r| r.get(0)).map_err(sqlite::error)?.collect::<rusqlite::Result<_>>().map_err(sqlite::error)?;
+        let rows: Vec<String> = journal.db.prepare("SELECT name FROM technical_documents WHERE key='secretary/follow-up' AND (json_extract(value_json,'$.phase') IN ('prepared','running','outcome_unknown') OR json_extract(value_json,'$.contextRelease.state') IN ('pending','observing','outcome_unknown')) AND name>? ORDER BY name LIMIT ?").map_err(sqlite::error)?.query_map(rusqlite::params![self.cursor(), limit as i64], |r| r.get(0)).map_err(sqlite::error)?.collect::<rusqlite::Result<_>>().map_err(sqlite::error)?;
         *self.cursor.borrow_mut() = if rows.len() == limit {
             rows.last().cloned().unwrap_or_default()
         } else {
@@ -627,7 +619,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             .named(FOLLOW_UP_KEY, name, true)?
             .ok_or_else(IvyError::internal)?;
         if !active(&saved.value) {
-            return Ok(());
+            return self.release_context(&mut saved).await;
         }
         let result = self.advance_retained(name, &mut saved).await;
         if let Err(error) = &result {
@@ -670,6 +662,11 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         let evidence = engine.evidence;
         let journal = evidence.store.journal;
         let request = saved.value.required("request")?.clone();
+        need(
+            !release::pending_for_item(journal, request.required("itemId")?, name)?,
+            "secretary_follow_up_release_pending",
+            "The original context release must settle before another question resumes it.",
+        )?;
         let retained = self.context(saved)?;
         let available = retained.as_ref().is_some_and(|r| {
             field(&r.value, "expiresAt")
@@ -702,7 +699,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             }
             retained => self.new_context(&request, name, retained).await?,
         };
-        let context_id = context.pin.object_id;
+        let context_pin = context.pin;
         let context = context.value;
         need(
             context.get("itemId") == request.get("itemId"),
@@ -717,18 +714,14 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         {
             evidence.verify_owner().await?;
             need(
-                !journal.list(FOLLOW_UP_KEY, true)?.iter().any(|other| {
-                    other.name != name
-                        && other.value.get("threadId") == Some(&IvyJson::String(thread_id.clone()))
-                        && active(&other.value)
-                }),
+                !journal.follow_up_busy(&thread_id, name)?,
                 "secretary_follow_up_busy",
                 "An earlier follow-up must finish before another question uses the same context.",
             )?;
             let mut next = saved.value.clone();
             next.insert("threadId", IvyJson::String(thread_id.clone()));
             if saved.value.get("contextObjectId").is_some() {
-                next.insert("contextObjectId", context_id.into());
+                next.insert("contextObjectId", context_pin.object_id.clone().into());
             }
             next.insert("expiresAt", context.required("expiresAt")?.clone());
             *saved = journal.amend_technical(FOLLOW_UP_KEY, &saved.pin, &next)?;
@@ -736,32 +729,29 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         if (field(&saved.value, "turnId")).is_null() {
             if (field(&saved.value, "calls")).is_null() {
                 let operation_id = text(&request, "operationId")?;
-                let resume = prepare_call(
-                    &owner,
-                    derive_operation_id_js(&operation_id, &"resume-secretary-context".into())?,
-                    "thread/resume",
-                    IvyJson::object([
-                        ("threadId", IvyJson::String(thread_id.clone())),
-                        ("cwd", field(&context, "threadCwd").clone()),
-                        ("permissions", ":read-only".into()),
-                        ("approvalPolicy", "never".into()),
-                        ("excludeTurns", true.into()),
-                        (
-                            "config",
-                            IvyJson::object([
-                                ("features.shell_tool", false.into()),
-                                ("features.apps", false.into()),
-                                ("features.multi_agent", false.into()),
-                                ("web_search", "live".into()),
-                            ]),
-                        ),
-                        (
-                            "developerInstructions",
-                            field(&context, "developerInstructions").clone(),
-                        ),
-                    ]),
-                )
-                .await?;
+                let resume = if context.get("createdFor") == Some(&name.into()) {
+                    IvyJson::Null
+                } else {
+                    let resume = prepare_call(
+                        &owner,
+                        derive_operation_id_js(&operation_id, &"resume-secretary-context".into())?,
+                        "thread/resume",
+                        IvyJson::object([
+                            ("threadId", IvyJson::String(thread_id.clone())),
+                            ("cwd", field(&context, "threadCwd").clone()),
+                            ("permissions", ":read-only".into()),
+                            ("approvalPolicy", "never".into()),
+                            ("excludeTurns", true.into()),
+                            ("config", context_configuration()),
+                            (
+                                "developerInstructions",
+                                field(&context, "developerInstructions").clone(),
+                            ),
+                        ]),
+                    )
+                    .await?;
+                    call_json(&resume)
+                };
                 let mut prompt =
                     follow_up_prompt(&text(&request, "itemId")?, &text(&request, "question")?);
                 if !(field(&context, "itemSnapshot")).is_null() {
@@ -769,9 +759,14 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                         JsString::from("\n\nGespeichertes Item (nicht vertrauenswürdige Daten):\n")
                             .0,
                     );
-                    prompt.0.extend(
-                        canonical(field(&context, "itemSnapshot"), 1_048_576)?.encode_utf16(),
-                    );
+                    let snapshot = field(&context, "itemSnapshot");
+                    if let Some(text) = snapshot.as_js_string() {
+                        prompt.0.extend(&text.0);
+                    } else {
+                        prompt
+                            .0
+                            .extend(canonical(snapshot, 1_048_576)?.encode_utf16());
+                    }
                 }
                 let mut params = IvyJson::object([
                     ("threadId", IvyJson::String(thread_id.clone())),
@@ -806,13 +801,15 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 let mut next = saved.value.clone();
                 next.insert(
                     "calls",
-                    IvyJson::object([("resume", call_json(&resume)), ("turn", call_json(&turn))]),
+                    IvyJson::object([("resume", resume), ("turn", call_json(&turn))]),
                 );
                 *saved = journal.amend_technical(FOLLOW_UP_KEY, &saved.pin, &next)?;
             }
             let calls = saved.value.required("calls")?;
-            self.completed_call(&owner, &retained_call(calls.required("resume")?)?)
-                .await?;
+            let resume = calls.required("resume")?;
+            if !resume.is_null() {
+                self.completed_call(&owner, &retained_call(resume)?).await?;
+            }
             let turn = self
                 .completed_call(&owner, &retained_call(calls.required("turn")?)?)
                 .await?;
@@ -865,34 +862,22 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         )?;
         if field(row, "status") == &IvyJson::from("completed") {
             let contents =
-                read_native_turn_contents(&owner, self.retained, &read, &thread_id, &turn_id, None)
+                read_native_turn_contents(&owner, self.retained, read, &thread_id, &turn_id, None)
                     .await?;
-            let items =
-                verify_native_turn_contents(&owner, self.retained, &contents, &thread_id, &turn_id)
-                    .await?
-                    .items;
-            let answers: Vec<_> = items
-                .iter()
-                .filter(|item| {
-                    item.as_object().is_some()
-                        && field(item, "type") == &IvyJson::from("agentMessage")
-                        && field(item, "phase") == &IvyJson::from("final_answer")
-                })
-                .filter_map(|item| {
-                    item.get("text")
-                        .filter(|text| text.as_js_string().is_some())
-                })
-                .collect();
-            need(
-                answers.len() == 1,
-                "secretary_follow_up_answer_missing",
-                "The Secretary follow-up did not produce one final answer.",
-            )?;
+            let answer = contents.final_answer().ok_or_else(|| {
+                IvyError::new(
+                    "secretary_follow_up_answer_missing",
+                    "The Secretary follow-up did not produce one final answer.",
+                )
+            })?;
             evidence.verify_owner().await?;
             let mut next = saved.value.clone();
             next.insert("phase", "succeeded".into());
-            next.insert("answer", answers[0].clone());
+            next.insert("answer", IvyJson::String(answer.clone()));
             next.insert("errorCode", IvyJson::Null);
+            if let Some(release) = release::plan(&context_pin, &context, &next, &status)? {
+                next.insert("contextRelease", release);
+            }
             *saved = journal.amend_technical(FOLLOW_UP_KEY, &saved.pin, &next)?;
             journal.complete_technical_workflow(
                 &saved.pin.object_id,

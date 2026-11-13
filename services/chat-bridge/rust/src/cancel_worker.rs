@@ -11,7 +11,7 @@ use crate::{
     store::{Destination, Document, Pin, mutation},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical,
+    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES, operation::derive_operation_id_js,
 };
 
@@ -65,7 +65,7 @@ fn present(value: &Json, key: &str) -> bool {
     value.get(key).is_some_and(|value| !value.is_null())
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn state(value: &Json, choices: &[&str]) -> bool {
     choices

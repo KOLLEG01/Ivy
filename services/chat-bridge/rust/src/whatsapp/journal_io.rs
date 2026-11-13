@@ -1,15 +1,6 @@
-//! Ordered SQLite transport writer and synchronous memory view. A flush is a
-//! committed-write fence, never just acknowledgement of queue admission.
+//! One durable WAL database, owned by the transport database worker.
 use rusqlite::{Connection, params_from_iter, types::Value};
-use std::{
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    thread,
-};
+use std::path::Path;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -17,6 +8,7 @@ CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY,sender TEXT NOT NULL,jid T
 CREATE TABLE IF NOT EXISTS outgoing (sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,jid TEXT NOT NULL,text TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE IF NOT EXISTS retired_inbox(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,retired INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS retired_outgoing(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS file_bytes(id TEXT PRIMARY KEY,byte_length INTEGER NOT NULL,content BLOB NOT NULL,CHECK(byte_length>0 AND byte_length=length(content)));
 CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(received,id) WHERE state='pending';
 CREATE INDEX IF NOT EXISTS outgoing_pending ON outgoing(jid,sequence) WHERE state<>'sent';";
 
@@ -35,236 +27,92 @@ impl From<rusqlite::Error> for StorageUnavailable {
 }
 pub type StorageResult<T> = Result<T, StorageUnavailable>;
 
-struct Statement {
-    sql: &'static str,
-    args: Vec<Value>,
-}
-enum Write {
-    Batch(Vec<Statement>),
-    Fence(mpsc::SyncSender<StorageResult<()>>),
-}
-
 pub struct JournalIo {
     db: Connection,
-    writer: Option<mpsc::SyncSender<Write>>,
-    worker: Option<thread::JoinHandle<StorageResult<()>>>,
-    failure: Arc<AtomicBool>,
-    batch: Option<Vec<Statement>>,
+    failed: bool,
 }
-
 impl JournalIo {
     /// The owner establishes the protected data directory before opening.
     /// Call on the database owner task, outside the asynchronous reactor.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let path = path.as_ref();
-        let disk = Connection::open(path)?;
-        disk.execute_batch(
+        let db = Connection::open(path)?;
+        db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
         )?;
-        disk.execute_batch(SCHEMA)?;
-        let db = Connection::open_in_memory()?;
         db.execute_batch(SCHEMA)?;
-        db.execute_batch("BEGIN")?;
-        for table in [
-            "kv",
-            "inbox",
-            "outgoing",
-            "retired_inbox",
-            "retired_outgoing",
-        ] {
-            let mut query = disk.prepare(&format!("SELECT * FROM {table}"))?;
-            let columns = query.column_count();
-            let sql = format!(
-                "INSERT INTO {table} VALUES({})",
-                vec!["?"; columns].join(",")
-            );
-            let mut rows = query.query([])?;
-            while let Some(row) = rows.next()? {
-                let values = (0..columns)
-                    .map(|i| row.get::<_, Value>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                db.execute(&sql, params_from_iter(values))?;
-            }
-        }
-        // sqlite_sequence is durable even if the newest output row was removed.
-        let mut sequences = disk.prepare("SELECT name,seq FROM sqlite_sequence")?;
-        let rows = sequences.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (name, sequence) = row?;
-            db.execute("DELETE FROM sqlite_sequence WHERE name=?", [&name])?;
-            db.execute("INSERT INTO sqlite_sequence VALUES(?,?)", (&name, sequence))?;
-        }
-        drop(sequences);
-        db.execute_batch("COMMIT")?;
-        let failure = Arc::new(AtomicBool::new(false));
-        let (writer, worker) = if path == Path::new(":memory:") {
-            disk.close().map_err(|_| StorageUnavailable)?;
-            (None, None)
-        } else {
-            let (send, receive) = mpsc::sync_channel(1);
-            let failed = Arc::clone(&failure);
-            let worker = thread::Builder::new()
-                .name("chat-whatsapp-writer".into())
-                .spawn(move || {
-                    while let Ok(message) = receive.recv() {
-                        match message {
-                            Write::Batch(batch) if !failed.load(Ordering::Acquire) => {
-                                let result = commit(&disk, batch);
-                                if result.is_err() {
-                                    failed.store(true, Ordering::Release);
-                                }
-                            }
-                            Write::Batch(_) => {}
-                            Write::Fence(reply) => {
-                                let _ = reply.send(if failed.load(Ordering::Acquire) {
-                                    Err(StorageUnavailable)
-                                } else {
-                                    Ok(())
-                                });
-                            }
-                        }
-                    }
-                    disk.close().map_err(|_| StorageUnavailable)
-                })
-                .map_err(|_| StorageUnavailable)?;
-            (Some(send), Some(worker))
-        };
-        Ok(Self {
-            db,
-            writer,
-            worker,
-            failure,
-            batch: None,
-        })
+        let mut io = Self { db, failed: false };
+        crate::files::adopt_file_bytes(&mut io).map_err(|_| StorageUnavailable)?;
+        Ok(io)
     }
-
-    /// Read access for the domain journal. Mutations must go through write so
-    /// memory and durable order cannot diverge during ordinary operation.
     pub fn connection(&self) -> &Connection {
         &self.db
     }
-
     pub fn write(&mut self, sql: &'static str, args: Vec<Value>) -> StorageResult<()> {
         self.healthy()?;
-        self.db.execute(sql, params_from_iter(&args))?;
-        let statement = Statement { sql, args };
-        if let Some(batch) = self.batch.as_mut() {
-            batch.push(statement);
-        } else {
-            self.submit(vec![statement])?;
+        if self.db.execute(sql, params_from_iter(args)).is_err() {
+            self.failed = true;
+            return Err(StorageUnavailable);
         }
         Ok(())
     }
-
     pub fn transaction<T>(
         &mut self,
         body: impl FnOnce(&mut Self) -> StorageResult<T>,
     ) -> StorageResult<T> {
         self.try_transaction(body)
     }
-
     pub fn try_transaction<T, E: From<StorageUnavailable>>(
         &mut self,
         body: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E> {
         self.healthy()?;
-        if self.batch.is_some() {
+        if !self.db.is_autocommit() {
             return body(self);
         }
         self.db
-            .execute_batch("BEGIN")
+            .execute_batch("BEGIN IMMEDIATE")
             .map_err(StorageUnavailable::from)?;
-        self.batch = Some(Vec::new());
         let result = body(self);
-        let batch = self.batch.take().expect("transaction owns batch");
         match result {
-            Ok(value) => {
-                self.db
-                    .execute_batch("COMMIT")
-                    .map_err(StorageUnavailable::from)?;
-                self.submit(batch)?;
+            Ok(value) if !self.failed => {
+                if self.db.execute_batch("COMMIT").is_err() {
+                    self.failed = true;
+                    let _ = self.db.execute_batch("ROLLBACK");
+                    return Err(StorageUnavailable.into());
+                }
                 Ok(value)
             }
-            Err(error) => {
-                self.db
-                    .execute_batch("ROLLBACK")
-                    .map_err(StorageUnavailable::from)?;
-                Err(error)
+            other => {
+                if self.db.execute_batch("ROLLBACK").is_err() {
+                    self.failed = true;
+                    return Err(StorageUnavailable.into());
+                }
+                match other {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(StorageUnavailable.into()),
+                }
             }
         }
     }
-
+    /// Every successful mutation already committed. Never confirm an open
+    /// transaction or let a failed write be mistaken for durable progress.
     pub fn flush(&self) -> StorageResult<()> {
         self.healthy()?;
-        // No fence may claim a not-yet-enqueued transaction has committed.
-        if self.batch.is_some() {
+        if !self.db.is_autocommit() {
             return Err(StorageUnavailable);
         }
-        if let Some(writer) = &self.writer {
-            let (send, receive) = mpsc::sync_channel(1);
-            writer
-                .send(Write::Fence(send))
-                .map_err(|_| StorageUnavailable)?;
-            receive.recv().map_err(|_| StorageUnavailable)??;
-        }
-        self.healthy()
+        Ok(())
     }
-
-    pub fn close(mut self) -> StorageResult<()> {
-        let flushed = self.flush();
-        self.writer.take();
-        let joined = self.join();
-        // Drop closes the memory view after the durable writer has exited.
-        flushed.and(joined)
+    pub fn close(self) -> StorageResult<()> {
+        let committed = self.flush();
+        let closed = self.db.close().map_err(|_| StorageUnavailable);
+        committed.and(closed)
     }
-
     fn healthy(&self) -> StorageResult<()> {
-        if self.failure.load(Ordering::Acquire) {
+        if self.failed {
             Err(StorageUnavailable)
         } else {
             Ok(())
         }
     }
-    fn submit(&self, batch: Vec<Statement>) -> StorageResult<()> {
-        if !batch.is_empty()
-            && let Some(writer) = &self.writer
-        {
-            if writer.send(Write::Batch(batch)).is_err() {
-                self.failure.store(true, Ordering::Release);
-                return Err(StorageUnavailable);
-            }
-        }
-        Ok(())
-    }
-    fn join(&mut self) -> StorageResult<()> {
-        if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| StorageUnavailable)??;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for JournalIo {
-    fn drop(&mut self) {
-        // Explicit close reports failures. Drop still drains accepted batches and
-        // joins the owner, so a normal unwinding path cannot orphan the writer.
-        self.writer.take();
-        let _ = self.join();
-    }
-}
-
-fn commit(db: &Connection, batch: Vec<Statement>) -> StorageResult<()> {
-    db.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| {
-        for statement in batch {
-            db.execute(statement.sql, params_from_iter(statement.args))?;
-        }
-        db.execute_batch("COMMIT")
-    })();
-    if result.is_err() {
-        let _ = db.execute_batch("ROLLBACK");
-    }
-    result.map_err(Into::into)
 }

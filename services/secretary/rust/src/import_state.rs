@@ -322,6 +322,7 @@ pub fn prepare(
     parse_operation_id_js(operation)?;
     let journal = Journal::claim_exclusive(path, limits)?;
     if current(&journal, identity)? {
+        journal.initialize_schema()?;
         return Ok(PreparedImport {
             journal,
             state: None,
@@ -336,6 +337,7 @@ pub fn prepare(
             ));
         }
         verify_backup(path, state.required("source")?)?;
+        journal.initialize_schema()?;
         return Ok(PreparedImport {
             journal,
             state: Some(state),

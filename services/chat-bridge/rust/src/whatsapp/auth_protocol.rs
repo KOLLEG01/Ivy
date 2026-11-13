@@ -1,7 +1,7 @@
 use super::auth_backend::*;
 use async_trait::async_trait;
 use ivy_contracts::IvyJson as Json;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Serialize, de::DeserializeOwned};
 use wacore::store::{error::Result, traits::*};
 
@@ -28,6 +28,9 @@ fn timestamp(v: &Json) -> Result<i64> {
 }
 fn mapping(db: &Connection, pn: &str, lid: &str) -> Result<LidPnMappingEntry> {
     if let Some(value) = typed::<LidPnMappingEntry>(db, "native-lid-mapping", lid)? {
+        if value.lid != lid {
+            return Err(invalid("LID mapping identity"));
+        }
         if value.phone_number == pn {
             return Ok(value);
         }
@@ -43,12 +46,144 @@ fn mapping(db: &Connection, pn: &str, lid: &str) -> Result<LidPnMappingEntry> {
 fn lid_for_pn(db: &Connection, pn: &str) -> Result<Option<String>> {
     get(db, "lid-mapping", pn)?.map(|v| text(&v)).transpose()
 }
+pub(super) fn pn_mapping(db: &Connection, pn: &str) -> Result<Option<LidPnMappingEntry>> {
+    let Some(lid) = lid_for_pn(db, pn)? else {
+        return Ok(None);
+    };
+    if let Some(entry) = typed::<LidPnMappingEntry>(db, "native-pn-mapping", pn)? {
+        if entry.lid == lid && entry.phone_number == pn {
+            return Ok(Some(entry));
+        }
+    }
+    mapping(db, pn, &lid).map(Some)
+}
+pub(super) fn lid_mapping(db: &Connection, lid: &str) -> Result<Option<LidPnMappingEntry>> {
+    if let Some(pn) = get(db, "lid-mapping", &format!("{lid}_reverse"))?
+        .map(|v| text(&v))
+        .transpose()?
+    {
+        // A retired LID remains a valid Signal namespace for its original
+        // number even after that number learns a newer current LID.
+        return mapping(db, &pn, lid).map(Some);
+    }
+    if let Some(entry) = typed::<LidPnMappingEntry>(db, "native-lid-mapping", lid)? {
+        if entry.lid != lid {
+            return Err(invalid("LID mapping identity"));
+        }
+        return Ok(Some(entry));
+    }
+    let pn: Option<String> = db.query_row(
+        "SELECT id FROM auth WHERE category='lid-mapping' AND substr(id,-8)!='_reverse' AND substr(id,1,3)!='pn:' AND json_extract(value,'$')=? ORDER BY id LIMIT 1",
+        [lid], |row| row.get(0),
+    ).optional().map_err(database)?;
+    pn.map(|pn| mapping(db, &pn, lid)).transpose()
+}
+fn save_mapping_metadata(
+    db: &Connection,
+    category: &str,
+    id: &str,
+    entry: &LidPnMappingEntry,
+) -> Result<()> {
+    let mut value = object(get(db, category, id)?)?;
+    // Update the known projection without removing future metadata fields.
+    for (key, field) in encode(entry)?.as_object().unwrap() {
+        value.insert(key.clone(), field.clone());
+    }
+    put(db, category, id, Some(&value))
+}
+pub(super) fn save_mapping(db: &Connection, entry: &LidPnMappingEntry) -> Result<()> {
+    let previous = pn_mapping(db, &entry.phone_number)?;
+    let wins = previous
+        .as_ref()
+        .is_none_or(|old| old.created_at <= entry.created_at);
+    if let Some(old) = lid_mapping(db, &entry.lid)? {
+        if old.phone_number != entry.phone_number {
+            if let Some(forward) = pn_mapping(db, &old.phone_number)? {
+                // Keep the old PN entry's timestamp if a LID changes numbers.
+                // Its forward alias and the latest reverse entry are distinct.
+                save_mapping_metadata(db, "native-pn-mapping", &old.phone_number, &forward)?;
+            }
+        }
+    }
+    if wins {
+        put(
+            db,
+            "lid-mapping",
+            &entry.phone_number,
+            Some(&entry.lid.as_str().into()),
+        )?;
+        save_mapping_metadata(db, "native-pn-mapping", &entry.phone_number, entry)?;
+    }
+    put(
+        db,
+        "lid-mapping",
+        &format!("{}_reverse", entry.lid),
+        Some(&entry.phone_number.as_str().into()),
+    )?;
+    save_mapping_metadata(db, "native-lid-mapping", &entry.lid, entry)?;
+    save_mapping_hashes(db, &entry.lid, &entry.phone_number, wins)?;
+    Ok(())
+}
+pub(super) fn contact_hash_key(user: &str) -> String {
+    let hash = wacore::crypto::contact_notification_hash(user);
+    u32::from_be_bytes([0, hash[0], hash[1], hash[2]]).to_string()
+}
+fn save_contact_hash(db: &Connection, user: &str, lid: &str) -> Result<bool> {
+    let key = contact_hash_key(user);
+    let value: Json = lid.into();
+    let changed = get(db, "native-contact-hash", &key)?.as_ref() != Some(&value);
+    put(db, "native-contact-hash", &key, Some(&value))?;
+    Ok(changed)
+}
+pub(super) fn save_mapping_hashes(
+    db: &Connection,
+    lid: &str,
+    phone: &str,
+    wins: bool,
+) -> Result<bool> {
+    let a = save_contact_hash(db, lid, lid)?;
+    let b = if wins {
+        save_contact_hash(db, phone, lid)?
+    } else {
+        false
+    };
+    Ok(a || b)
+}
+pub(super) fn seed_contact_hashes(db: &Connection) -> Result<()> {
+    // Match native warm-up order, in one transaction without retaining all
+    // mappings. Existing original account rows are never rewritten here.
+    visit_mappings(db, |entry| {
+        save_contact_hash(db, &entry.lid, &entry.lid)?;
+        save_contact_hash(db, &entry.phone_number, &entry.lid).map(|_| ())
+    })
+}
+fn visit_mappings(
+    db: &Connection,
+    mut visit: impl FnMut(LidPnMappingEntry) -> Result<()>,
+) -> Result<()> {
+    let mut query = db.prepare("SELECT id FROM auth WHERE category='lid-mapping' AND substr(id,-8)!='_reverse' AND substr(id,1,3)!='pn:' ORDER BY id").map_err(database)?;
+    let phones = query
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(database)?;
+    for pn in phones {
+        let pn = pn.map_err(database)?;
+        let entry = pn_mapping(db, &pn)?.ok_or_else(|| invalid("LID mapping"))?;
+        // Warm only the current reciprocal pairs. Historical aliases remain
+        // in SQLite and are loaded on demand, without changing a tied winner
+        // merely because warm-up visits rows in another order.
+        if lid_mapping(db, &entry.lid)?.is_some_and(|reverse| reverse.phone_number == pn) {
+            visit(entry)?;
+        }
+    }
+    Ok(())
+}
 fn mappings(db: &Connection) -> Result<Vec<LidPnMappingEntry>> {
-    entries(db, "lid-mapping")?
-        .into_iter()
-        .filter(|(id, _)| !id.ends_with("_reverse") && !id.starts_with("pn:"))
-        .map(|(pn, v)| mapping(db, &pn, &text(&v)?))
-        .collect()
+    let mut result = Vec::new();
+    visit_mappings(db, |entry| {
+        result.push(entry);
+        Ok(())
+    })?;
+    Ok(result)
 }
 fn token(v: &Json) -> Result<TcTokenEntry> {
     Ok(TcTokenEntry {
@@ -194,24 +329,10 @@ impl ProtocolStore for NativeAuthStore {
         })
     }
     async fn get_pn_mapping(&self, pn: &str) -> Result<Option<LidPnMappingEntry>> {
-        self.read(|db| {
-            lid_for_pn(db, pn)?
-                .map(|lid| mapping(db, pn, &lid))
-                .transpose()
-        })
+        self.read(|db| pn_mapping(db, pn))
     }
     async fn get_lid_mapping(&self, lid: &str) -> Result<Option<LidPnMappingEntry>> {
-        self.read(|db| {
-            if let Some(pn) = get(db, "lid-mapping", &format!("{lid}_reverse"))?
-                .map(|v| text(&v))
-                .transpose()?
-            {
-                if lid_for_pn(db, &pn)?.as_deref() == Some(lid) {
-                    return mapping(db, &pn, lid).map(Some);
-                }
-            }
-            Ok(mappings(db)?.into_iter().find(|m| m.lid == lid))
-        })
+        self.read(|db| lid_mapping(db, lid))
     }
     async fn put_lid_mapping(&self, entry: &LidPnMappingEntry) -> Result<()> {
         self.put_lid_mappings(std::slice::from_ref(entry)).await
@@ -219,22 +340,16 @@ impl ProtocolStore for NativeAuthStore {
     async fn put_lid_mappings(&self, entries: &[LidPnMappingEntry]) -> Result<()> {
         self.write(|db| {
             for entry in entries {
-                put(
-                    db,
-                    "lid-mapping",
-                    &entry.phone_number,
-                    Some(&entry.lid.as_str().into()),
-                )?;
-                put(
-                    db,
-                    "lid-mapping",
-                    &format!("{}_reverse", entry.lid),
-                    Some(&entry.phone_number.as_str().into()),
-                )?;
-                put(db, "native-lid-mapping", &entry.lid, Some(&encode(entry)?))?
+                save_mapping(db, entry)?;
             }
             Ok(())
-        })
+        })?;
+        // Background native persistence uses this same store interface. Its
+        // commits must invalidate an L1 held by a different native caller.
+        if !entries.is_empty() {
+            self.mappings_changed();
+        }
+        Ok(())
     }
     async fn get_all_lid_mappings(&self) -> Result<Vec<LidPnMappingEntry>> {
         self.read(mappings)

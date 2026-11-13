@@ -1,25 +1,32 @@
 <script setup lang="ts">
-import { Button, PageControls, PageHeader, RemoteState, StatusBadge } from "@ivy/ui";
-import { CalendarClock, ExternalLink, Zap } from "@lucide/vue";
-import { agentTaskUrl, dateLabel, listDocuments, route, tr } from "./runtime";
-import type { Execution } from "./types";
+import { ref } from "vue";
+import ExecutionDetails from "./ExecutionDetails.vue";
+import {
+  Button,
+  PageControls,
+  PageHeader,
+  RemoteState,
+  StatusBadge,
+} from "@ivy/ui";
+import { CalendarClock, Zap } from "@lucide/vue";
+import { dateLabel, listSummaries, summaryPageKey, route, tr } from "./runtime";
+import type { ExecutionSummary, Pin } from "./types";
 import { usePage } from "../../../packages/ui-client/src/runtime";
 const props = defineProps<{ root: string }>();
 const rows = usePage(
   (signal, cursor) =>
-    listDocuments("secretary/execution", props.root, signal, 50, cursor),
+    listSummaries("secretary/execution", props.root, signal, 50, cursor),
   5000,
-  () => "secretary-journal:" + props.root,
+  () => summaryPageKey("secretary/execution", props.root),
   ["objects/secretary/execution"],
 );
+const selected = ref<Pin | null>(null);
 const tone = (phase: string) =>
   phase === "failed"
     ? ("bad" as const)
-    : ["archived", "deleted"].includes(phase)
+    : ["completed", "settled", "archived", "deleted"].includes(phase)
       ? ("good" as const)
-      : ["running", "starting", "archiving", "deleting"].includes(
-            phase,
-          )
+      : ["running", "starting", "archiving", "deleting"].includes(phase)
         ? ("warning" as const)
         : ("neutral" as const);
 const phaseLabel = (phase: string) =>
@@ -36,18 +43,37 @@ const phaseLabel = (phase: string) =>
     deleted: tr("Task gelöscht", "Task deleted"),
     failed: tr("Fehlgeschlagen", "Failed"),
   })[phase] ?? phase;
-const resultText = (result: string) => {
-  try { const value = JSON.parse(result); return typeof value?.text === "string" ? value.text || value.reason : result; }
-  catch { return result; }
+const cleanupLabel = (execution: ExecutionSummary) => {
+  if (execution.cleanupState)
+    return (
+      tr("Bereinigung", "Cleanup") +
+      ": " +
+      ({
+        pending: tr("Ausstehend", "Pending"),
+        blocked: tr("Blockiert", "Blocked"),
+        outcome_unknown: tr("Ausgang unklar", "Outcome unknown"),
+        confirmed: tr("Bestätigt", "Confirmed"),
+      }[execution.cleanupState] ?? execution.cleanupState) +
+      (execution.cleanupError ? " · " + execution.cleanupError : "")
+    );
+  return ["archiving", "archived", "deleting", "deleted"].includes(
+    execution.phase,
+  )
+    ? phaseLabel(execution.phase)
+    : "";
 };
-const isCatchUp = (execution: Execution) =>
-  Date.parse(execution.createdAt) - Date.parse(execution.trigger.occurredAt) > 60_000;
-const deliveryLabel = (state: string) => ({
-  queued: tr("Wartet", "Queued"), dispatching: tr("Wird zugestellt", "Dispatching"),
-  confirmed: tr("Zugestellt", "Confirmed"), suppressed: tr("Unterdrückt", "Suppressed"),
-  failed: tr("Fehlgeschlagen", "Failed"), outcome_unknown: tr("Ausgang unklar", "Outcome unknown"),
-  fallback: tr("Weiter an Main", "Main fallback"),
-})[state] ?? state;
+const isCatchUp = (execution: ExecutionSummary) =>
+  Date.parse(execution.createdAt) - Date.parse(execution.occurredAt) > 60_000;
+const deliveryLabel = (state: string) =>
+  ({
+    queued: tr("Wartet", "Queued"),
+    dispatching: tr("Wird zugestellt", "Dispatching"),
+    confirmed: tr("Zugestellt", "Confirmed"),
+    suppressed: tr("Unterdrückt", "Suppressed"),
+    failed: tr("Fehlgeschlagen", "Failed"),
+    outcome_unknown: tr("Ausgang unklar", "Outcome unknown"),
+    fallback: tr("Weiter an Main", "Main fallback"),
+  })[state] ?? state;
 </script>
 <template>
   <PageHeader
@@ -70,7 +96,14 @@ const deliveryLabel = (state: string) => ({
       "
       @retry="rows.refresh"
     />
-    <Button v-if="rows.value.value?.items.length === 0" as-child variant="outline"><a :href="route('assignments')">{{ tr("Möglichkeiten ansehen", "Explore what Secretary can do") }}</a></Button>
+    <Button
+      v-if="rows.value.value?.items.length === 0"
+      as-child
+      variant="outline"
+      ><a :href="route('assignments')">{{
+        tr("Möglichkeiten ansehen", "Explore what Secretary can do")
+      }}</a></Button
+    >
     <ol
       v-if="rows.value.value?.items.length"
       class="divide-y overflow-hidden rounded-lg border bg-card"
@@ -82,20 +115,20 @@ const deliveryLabel = (state: string) => ({
       >
         <div class="flex flex-wrap items-start gap-3">
           <component
-            :is="row.value.trigger.kind === 'schedule' ? CalendarClock : Zap"
+            :is="row.value.triggerKind === 'schedule' ? CalendarClock : Zap"
             class="mt-0.5 size-4 shrink-0 text-muted-foreground"
             :aria-label="
-              row.value.trigger.kind === 'schedule'
+              row.value.triggerKind === 'schedule'
                 ? tr('Zeitplan', 'Schedule')
                 : tr('Ereignis', 'Event')
             "
           />
           <div class="min-w-0 flex-1">
             <h3 class="text-sm font-medium break-words">
-              {{ row.value.assignmentSnapshot.name }}
+              {{ row.value.name }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ dateLabel(row.value.trigger.occurredAt) }}
+              {{ dateLabel(row.value.occurredAt) }}
               <template v-if="row.value.completedAt">
                 · {{ tr("Beendet", "Completed") }}
                 {{ dateLabel(row.value.completedAt) }}</template
@@ -113,57 +146,35 @@ const deliveryLabel = (state: string) => ({
           />
         </div>
         <div
-          v-if="row.value.delivery || row.value.voice"
+          v-if="
+            row.value.deliveryState ||
+            row.value.voiceState ||
+            cleanupLabel(row.value)
+          "
           class="flex flex-wrap gap-2 text-xs text-muted-foreground"
         >
-          <span v-if="row.value.delivery" class="break-words"
-            >Main: {{ deliveryLabel(row.value.delivery.state)
-            }}<template v-if="row.value.delivery.reason">
-              · {{ row.value.delivery.reason }}</template
+          <span v-if="row.value.deliveryState" class="break-words"
+            >Main: {{ deliveryLabel(row.value.deliveryState)
+            }}<template v-if="row.value.deliveryReason">
+              · {{ row.value.deliveryReason }}</template
             ></span
           >
-          <span v-if="row.value.voice" class="break-words"
-            >Voice: {{ deliveryLabel(row.value.voice.state)
-            }}<template v-if="row.value.voice.reason">
-              · {{ row.value.voice.reason }}</template
+          <span v-if="cleanupLabel(row.value)" class="break-words">{{
+            cleanupLabel(row.value)
+          }}</span>
+          <span v-if="row.value.voiceState" class="break-words"
+            >Voice: {{ deliveryLabel(row.value.voiceState)
+            }}<template v-if="row.value.voiceReason">
+              · {{ row.value.voiceReason }}</template
             ></span
           >
         </div>
-        <p
-          v-if="row.value.result"
-          class="line-clamp-3 pl-7 text-sm whitespace-pre-wrap text-muted-foreground"
-          :title="resultText(row.value.result)"
-        >
-          {{ resultText(row.value.result) }}
-        </p>
         <p v-if="row.value.errorCode" class="pl-7 text-sm text-destructive">
           {{ row.value.errorCode }}
         </p>
-        <p
-          v-if="row.value.errorCode && row.value.preflightOutput"
-          class="line-clamp-3 pl-7 text-sm whitespace-pre-wrap text-muted-foreground"
-        >
-          {{ row.value.preflightOutput }}
-        </p>
-        <div
-          v-if="
-            row.value.phase !== 'deleted' &&
-            (row.value.threadId || row.value.deleteAfter)
-          "
-          class="flex flex-wrap items-center gap-3 pl-7 text-xs text-muted-foreground"
-        >
-          <a
-            v-if="row.value.threadId"
-            class="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
-            :href="agentTaskUrl(row.value.serviceNodeId, row.value.threadId)"
-            >{{ tr("Codex-Task öffnen", "Open Codex task")
-            }}<ExternalLink class="size-3" aria-hidden="true"
-          /></a>
-          <span v-if="row.value.deleteAfter"
-            >{{ tr("Task-Löschung", "Task deletion") }}
-            {{ dateLabel(row.value.deleteAfter) }}</span
-          >
-        </div>
+        <Button size="sm" variant="ghost" @click="selected = { ...row.pin }">{{
+          tr("Details ansehen", "View details")
+        }}</Button>
       </li>
     </ol>
     <PageControls
@@ -187,4 +198,5 @@ const deliveryLabel = (state: string) => ({
       }}
     </p>
   </section>
+  <ExecutionDetails :pin="selected" :root="root" @close="selected = null" />
 </template>

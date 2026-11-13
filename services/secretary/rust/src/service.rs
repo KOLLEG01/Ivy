@@ -3,7 +3,7 @@
 use crate::{
     assignment_prompt::load_notification_policy,
     config::{
-        load_minimum_message_age_minutes, load_triage_configuration, service_configuration_path,
+        load_minimum_message_age_minutes, service_configuration_path,
         startup_settings,
     },
     generation::ServiceEvent,
@@ -236,9 +236,6 @@ async fn start_configured(
     let service_path = PathBuf::from(service_configuration_path(data_root)?.to_utf8()?);
     let minimum_message_age_minutes =
         load_minimum_message_age_minutes(service_path.clone()).await?;
-    // Loading validates configured dormant capability without starting it or
-    // broadening the service's active registration.
-    let _triage = load_triage_configuration(service_path).await?;
     let service_node_id = value
         .required("serviceNodeId")?
         .as_js_string()

@@ -29,6 +29,8 @@ fn fixed_uuid() -> JsString {
 
 #[tokio::test]
 async fn original_public_inbox_admission_and_retained_history() {
+    // Incomplete injected Hive reads use typed missing-property errors. Their
+    // original RPC traces and unchanged retained state remain part of each case.
     let output = reference_data::read(include_bytes!("engine-inbox-cases.json.gz"));
     let corpus = parse(
         std::str::from_utf8(&output).unwrap(),

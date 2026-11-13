@@ -1,11 +1,16 @@
 //! Independent Main history and exact transport delivery checkpoints.
 pub use super::listener_main::ListenerMain;
 use super::{
-    identity::identity, journal_owner::Journal, messages::Translator, native::WhatsAppNative,
+    history::{HistoryFuture, MAX_HISTORY_BYTES, turn_bytes},
+    identity::identity,
+    journal_owner::Journal,
+    messages::Translator,
+    native::WhatsAppNative,
+    native_event::{EventProjection, NativeEvent, NativeEventKind},
     sender::phone,
 };
 use crate::{generation::ChatGenerationLease, store::mutation};
-use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::stringify};
+use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
 use ivy_sdk::{
     clock::{Clock, SystemClock},
     rpc::RequestFuture,
@@ -20,15 +25,15 @@ use std::{
 
 pub trait ListenerNative: Send + Sync {
     fn bound(&self) -> RequestFuture<'_>;
-    fn turn_page<'a>(&'a self, thread: &'a JsString, cursor: Json) -> RequestFuture<'a>;
+    fn turn_page<'a>(&'a self, thread: &'a JsString, cursor: Json) -> HistoryFuture<'a>;
     fn source_name(&self, thread: JsString) -> RequestFuture<'_>;
 }
 impl ListenerNative for WhatsAppNative {
     fn bound(&self) -> RequestFuture<'_> {
         Box::pin(WhatsAppNative::bound(self))
     }
-    fn turn_page<'a>(&'a self, thread: &'a JsString, cursor: Json) -> RequestFuture<'a> {
-        Box::pin(WhatsAppNative::turn_page(self, thread, cursor))
+    fn turn_page<'a>(&'a self, thread: &'a JsString, cursor: Json) -> HistoryFuture<'a> {
+        Box::pin(WhatsAppNative::shared_turn_page(self, thread, cursor))
     }
     fn source_name(&self, thread: JsString) -> RequestFuture<'_> {
         Box::pin(async move {
@@ -521,65 +526,65 @@ fn jid(sender: &Json) -> IvyResult<String> {
 }
 impl WhatsAppListener {
     pub async fn notification(&self, event: &Json, commentary: bool) -> IvyResult<Json> {
-        let method = object_field(event, "method")?;
-        if !["turn/started", "turn/completed", "item/completed"]
-            .iter()
-            .any(|v| method == Some(&Json::from(*v)))
-        {
-            return Ok(Json::Null);
+        match NativeEvent::project(event, usize::MAX)? {
+            EventProjection::Event(event) => self.native_notification(&event, commentary).await,
+            _ => Ok(Json::Null),
         }
-        let params = event.required("params").map_err(|_| IvyError::internal())?;
-        let item = object_field(params, "item")?;
-        if method == Some(&Json::from("item/completed")) {
-            let Some(item) = item.filter(|v| v.as_object().is_some()) else {
-                return Ok(Json::Null);
-            };
-            let kind = string(item.get("type"))?;
-            if !["agentMessage", "userMessage", "steeringUserMessage"]
-                .iter()
-                .any(|v| kind == JsString::from(*v))
-            {
-                return Ok(Json::Null);
-            }
-        }
+    }
+    pub async fn native_notification(
+        &self,
+        event: &NativeEvent,
+        commentary: bool,
+    ) -> IvyResult<Json> {
         let bound = self.0.native.bound().await?;
         let binding = bound.required("binding")?;
         let bid = text(f(binding, "pin"), "objectId")?;
-        if params.get("threadId") != f(f(binding, "value"), "primary").get("nativeId") {
+        if event.thread_id.as_ref()
+            != f(f(binding, "value"), "primary")
+                .get("nativeId")
+                .and_then(Json::as_js_string)
+        {
             return Ok(Json::Null);
         }
-        if method == Some(&Json::from("turn/started")) {
+        if matches!(event.kind, NativeEventKind::Started) {
             return Ok(Json::object([("busy", true.into())]));
         }
-        if method == Some(&Json::from("turn/completed")) {
+        if matches!(event.kind, NativeEventKind::Completed) {
             return Ok(Json::object([("busy", false.into())]));
         }
-        let item = item.ok_or_else(IvyError::internal)?;
         let mut state = self.0.state.lock().await;
-        if let Some(turn) = params.get("turnId").and_then(Json::as_js_string) {
-            self.source(&mut state, &bid, turn, item).await?;
-        }
-        if item.get("type") != Some(&Json::from("agentMessage")) {
+        if let NativeEventKind::User { source, client_id } = &event.kind {
+            if let Some(turn) = &event.turn_id {
+                self.source_identity(&mut state, &bid, turn, source.clone()?, client_id.as_ref())
+                    .await?;
+            }
             return Ok(Json::Null);
         }
-        require(
-            params.get("turnId").and_then(Json::as_js_string).is_some()
-                && item.get("id").and_then(Json::as_js_string).is_some()
-                && item.get("text").and_then(Json::as_js_string).is_some(),
-            "native_read_failed",
-            "Completed native message identity missing.",
-        )?;
-        let turn = text(params, "turnId")?;
+        let NativeEventKind::Agent {
+            id,
+            text,
+            commentary: is_commentary,
+        } = &event.kind
+        else {
+            return Ok(Json::Null);
+        };
+        let missing = || {
+            IvyError::new(
+                "native_read_failed",
+                "Completed native message identity missing.",
+            )
+        };
+        let turn = event.turn_id.as_ref().ok_or_else(missing)?;
+        let id = id.as_ref().ok_or_else(missing)?;
+        let body = text.as_ref().ok_or_else(missing)?;
         let notice_key = key(&[&"notice-turn:".into(), &bid, &":".into(), &turn])?;
-        if !state.sources.iter().any(|(id, _)| id == &turn)
+        if !state.sources.iter().any(|(id, _)| id == turn)
             || (&self.0.journal.get(&sql_key(&notice_key)?)?)
                 .as_bool()
                 .unwrap_or(false)
         {
             return Ok(Json::object([("busy", Json::Null)]));
         }
-        let body = text(item, "text")?;
-        let id = text(item, "id")?;
         for sender in self.senders()? {
             let message_key = key(&[
                 &"message:".into(),
@@ -600,7 +605,7 @@ impl WhatsAppListener {
                 )?;
                 continue;
             }
-            let suppressed = item.get("phase") == Some(&Json::from("commentary")) && !commentary;
+            let suppressed = *is_commentary && !commentary;
             self.0.journal.access(|j| {
                 j.try_transaction(|j| -> IvyResult<()> {
                     let ids = if suppressed {
@@ -669,49 +674,33 @@ impl WhatsAppListener {
                     turns: vec![],
                     bytes: 0,
                     busy: false,
+                    complete: false,
                 })));
             }
             state.recovery.as_ref().unwrap().clone()
         };
         self.0.needs_recovery.store(false, Ordering::Relaxed);
-        let mut done = false;
+        let mut done = recovery.lock().unwrap().complete;
         let began = self.0.clock.utc_millis();
         let thread = text(f(f(binding, "value"), "primary"), "nativeId")?;
         for _ in 0..64 {
+            if done {
+                break;
+            }
             let next = recovery.lock().unwrap().next.clone();
             let page = self.0.native.turn_page(&thread, next.clone()).await?;
-            let mut turns = page
-                .get("data")
-                .and_then(Json::as_array)
-                .map(<[Json]>::to_vec)
-                .ok_or_else(|| IvyError::new("native_read_failed", "Native turn page missing."))?;
-            for turn in &mut turns {
-                object_field(turn, "items")?;
-                if let Some(items) = turn.get("items").and_then(Json::as_array) {
-                    let mut projected = Vec::new();
-                    for item in items {
-                        let kind = string(object_field(item, "type")?)?;
-                        projected.push(
-                            if ["userMessage", "steeringUserMessage", "agentMessage"]
-                                .iter()
-                                .any(|v| kind == JsString::from(*v))
-                            {
-                                item.clone()
-                            } else {
-                                Json::object(["id", "type"].into_iter().filter_map(|field| {
-                                    item.get(field).map(|value| (field, value.clone()))
-                                }))
-                            },
-                        );
-                    }
-                    turn.insert("items", Json::Array(projected));
-                }
-            }
-            let bytes = stringify(&Json::Array(turns.clone()), usize::MAX)?.len();
+            let turns = page.turns;
+            let bytes = turns.iter().map(|turn| turn_bytes(turn)).sum::<usize>();
             let over_limit = {
-                let mut r = recovery.lock().unwrap();
-                r.bytes += bytes;
-                r.bytes > 32 * 1024 * 1024
+                let r = recovery.lock().unwrap();
+                let value = page.next_cursor.as_ref();
+                require(
+                    value == Some(&Json::Null)
+                        || value.and_then(Json::as_js_string).is_some() && value != Some(&r.next),
+                    "native_read_failed",
+                    "Native cursor did not progress.",
+                )?;
+                r.bytes.saturating_add(bytes) > MAX_HISTORY_BYTES
             };
             if over_limit {
                 self.0.state.lock().await.recovery = None;
@@ -722,6 +711,7 @@ impl WhatsAppListener {
             }
             {
                 let mut r = recovery.lock().unwrap();
+                r.bytes = r.bytes.saturating_add(bytes);
                 if r.head.is_none() {
                     r.head = turns.first().and_then(|t| t.get("id")).cloned();
                 }
@@ -734,15 +724,10 @@ impl WhatsAppListener {
                         break;
                     }
                 }
-                let value = page.get("nextCursor");
-                require(
-                    value == Some(&Json::Null)
-                        || value.and_then(Json::as_js_string).is_some() && value != Some(&r.next),
-                    "native_read_failed",
-                    "Native cursor did not progress.",
-                )?;
+                let value = page.next_cursor.as_ref();
                 r.next = value.unwrap().clone();
                 done |= (f(&r.cursor, "baseline")).as_bool().unwrap_or(false) || r.next.is_null();
+                r.complete = done;
             }
             if done || self.0.clock.utc_millis() - began >= 12000 {
                 break;
@@ -752,15 +737,17 @@ impl WhatsAppListener {
             self.0.needs_recovery.store(true, Ordering::Relaxed);
             return Ok(recovery.lock().unwrap().busy);
         }
-        let (cursor, busy, head, length) = {
+        let (cursor, busy, head) = {
             let r = recovery.lock().unwrap();
-            (r.cursor.clone(), r.busy, r.head.clone(), r.turns.len())
+            (r.cursor.clone(), r.busy, r.head.clone())
         };
         // Local marker reads may use the blocking SQLite owner. Keep this
         // delivery segment together; no native/Hive request holds this guard.
         let mut state = self.0.state.lock().await;
-        for index in (0..length).rev() {
-            let turn = recovery.lock().unwrap().turns[index].clone();
+        loop {
+            let Some(turn) = recovery.lock().unwrap().turns.last().cloned() else {
+                break;
+            };
             let turn_id = string(turn.get("id"))?;
             let turn_busy = turn.get("status") == Some(&Json::from("inProgress"));
             require(
@@ -899,6 +886,9 @@ impl WhatsAppListener {
                 ])?)?,
                 &delivered,
             )?;
+            let mut r = recovery.lock().unwrap();
+            r.turns.pop();
+            r.bytes = r.bytes.saturating_sub(turn_bytes(&turn));
         }
         let mut watermark = Json::object([
             ("cursor", Json::Null),
@@ -919,9 +909,10 @@ struct Recovery {
     cursor: Json,
     next: Json,
     head: Option<Json>,
-    turns: Vec<Json>,
+    turns: Vec<Arc<Json>>,
     bytes: usize,
     busy: bool,
+    complete: bool,
 }
 #[derive(Default)]
 struct State {
@@ -1009,9 +1000,25 @@ impl WhatsAppListener {
         {
             return Ok(());
         }
-        let id = delegation_source(item)?;
+        self.source_identity(
+            state,
+            bid,
+            turn,
+            delegation_source(item)?,
+            item.get("clientId").and_then(Json::as_js_string),
+        )
+        .await
+    }
+    async fn source_identity(
+        &self,
+        state: &mut State,
+        bid: &JsString,
+        turn: &JsString,
+        id: Option<JsString>,
+        client: Option<&JsString>,
+    ) -> IvyResult<()> {
         map_set(&mut state.sources, turn.clone(), id.clone());
-        if let Some(client) = item.get("clientId").and_then(Json::as_js_string) {
+        if let Some(client) = client {
             if (&self.0.main.is_notice_input(client).await?)
                 .as_bool()
                 .unwrap_or(false)

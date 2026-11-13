@@ -13,8 +13,8 @@ use crate::{
     worker::ChatWorker,
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat,
+    json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::service::InvocationContext;
 
@@ -26,7 +26,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 
 pub struct ChatBridge<'a> {

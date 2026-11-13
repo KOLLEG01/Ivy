@@ -1,12 +1,143 @@
 //! Decode the retained assignment result without changing its UTF-16 text.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse_utf16};
+use crate::policy::{Notification, Urgency};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::parse_utf16};
 fn whitespace(c: u16) -> bool {
     JsString::trim_ecmascript_units(&[c]).is_empty()
 }
 pub(crate) fn trimmed(text: &[u16]) -> &[u16] {
     JsString::trim_ecmascript_units(text)
 }
-pub fn assignment_decision(answer: &JsString) -> IvyResult<IvyJson> {
+#[derive(Debug)]
+pub struct AssignmentDecision {
+    urgency: Urgency,
+    notification: Notification,
+    text: JsString,
+    reason: JsString,
+}
+impl AssignmentDecision {
+    pub fn from_json(mut value: IvyJson) -> IvyResult<Self> {
+        let invalid = |message| IvyError::new("secretary_assignment_result_invalid", message);
+        if value.as_object().is_none() {
+            return Err(invalid("The assignment decision must be an object."));
+        }
+        let incomplete = || invalid("The assignment decision is incomplete.");
+        let urgency = value
+            .get("urgency")
+            .and_then(Urgency::read)
+            .ok_or_else(incomplete)?;
+        let notification = value
+            .get("notification")
+            .and_then(Notification::read)
+            .filter(|n| *n != Notification::NeedsAttention)
+            .ok_or_else(incomplete)?;
+        let text = value
+            .get("text")
+            .and_then(IvyJson::as_js_string)
+            .ok_or_else(incomplete)?;
+        let reason = value
+            .get("reason")
+            .and_then(IvyJson::as_js_string)
+            .ok_or_else(incomplete)?;
+        if value.get("schemaVersion") != Some(&IvyJson::Number(1.0))
+            || text.0.len() > 8192
+            || (notification != Notification::None && trimmed(&text.0).is_empty())
+            || reason.0.len() > 1024
+            || (notification == Notification::Voice && urgency != Urgency::Critical)
+        {
+            return Err(incomplete());
+        }
+        let text = match value.get_mut("text") {
+            Some(IvyJson::String(text)) => JsString(std::mem::take(&mut text.0)),
+            _ => unreachable!(),
+        };
+        let reason = match value.get_mut("reason") {
+            Some(IvyJson::String(reason)) => JsString(std::mem::take(&mut reason.0)),
+            _ => unreachable!(),
+        };
+        Ok(Self {
+            urgency,
+            notification,
+            text,
+            reason,
+        })
+    }
+    pub fn urgency(&self) -> Urgency {
+        self.urgency
+    }
+    pub fn notification(&self) -> Notification {
+        self.notification
+    }
+    pub fn text(&self) -> &JsString {
+        &self.text
+    }
+    pub fn reason(&self) -> &JsString {
+        &self.reason
+    }
+    pub fn json(&self) -> IvyJson {
+        IvyJson::object([
+            ("schemaVersion", 1.0.into()),
+            ("urgency", self.urgency.as_str().into()),
+            ("notification", self.notification.as_str().into()),
+            ("text", IvyJson::String(self.text.clone())),
+            ("reason", IvyJson::String(self.reason.clone())),
+        ])
+    }
+}
+
+/// A call-local parsed decision belongs to one exact saved execution revision.
+/// Only the original result remains persisted; retries parse a fresh read once.
+pub struct RecordedDecision {
+    object_id: JsString,
+    revision: u64,
+    decision: AssignmentDecision,
+    result_hash: String,
+}
+impl RecordedDecision {
+    pub fn read(execution: &IvyJson) -> IvyResult<Self> {
+        let original = execution
+            .required("value")?
+            .required("result")?
+            .as_js_string()
+            .ok_or_else(IvyError::internal)?;
+        Self::record(execution, assignment_decision(original)?)
+    }
+    pub(crate) fn record(execution: &IvyJson, decision: AssignmentDecision) -> IvyResult<Self> {
+        let pin = execution.required("pin")?;
+        let object_id = pin
+            .required("objectId")?
+            .as_js_string()
+            .cloned()
+            .ok_or_else(IvyError::internal)?;
+        let revision = pin
+            .required("revision")?
+            .as_f64()
+            .filter(|v| v.fract() == 0.0 && (1.0..=9_007_199_254_740_991.0).contains(v))
+            .ok_or_else(IvyError::internal)? as u64;
+        Ok(Self {
+            object_id,
+            revision,
+            decision,
+            result_hash: hash_json(execution.required("value")?.required("result")?)?,
+        })
+    }
+    pub fn for_execution(&self, execution: &IvyJson) -> IvyResult<&AssignmentDecision> {
+        let pin = execution.required("pin")?;
+        if pin.get("objectId").and_then(IvyJson::as_js_string) != Some(&self.object_id)
+            || pin.get("revision").and_then(IvyJson::as_f64) != Some(self.revision as f64)
+        {
+            return Err(IvyError::new(
+                "secretary_assignment_result_changed",
+                "The parsed decision belongs to another execution revision.",
+            ));
+        }
+        Ok(&self.decision)
+    }
+    pub fn result_hash(&self) -> &str {
+        &self.result_hash
+    }
+}
+
+pub fn assignment_decision(answer: &JsString) -> IvyResult<AssignmentDecision> {
     let mut units = trimmed(&answer.0);
     if units.starts_with(&[96, 96, 96]) && units.ends_with(&[10, 96, 96, 96]) {
         let mut offset = 3;
@@ -27,30 +158,5 @@ pub fn assignment_decision(answer: &JsString) -> IvyResult<IvyJson> {
     let invalid = |message| IvyError::new("secretary_assignment_result_invalid", message);
     let value = parse_utf16(units, usize::MAX)
         .map_err(|_| invalid("The assignment did not return its required decision."))?;
-    if value.as_object().is_none() {
-        return Err(invalid("The assignment decision must be an object."));
-    }
-    let string = |key| value.get(key).and_then(IvyJson::as_js_string);
-    let notification = value.get("notification");
-    let is = |key: &str, choices: &[&str]| {
-        choices
-            .iter()
-            .any(|s| value.get(key) == Some(&IvyJson::from(*s)))
-    };
-    if value.get("schemaVersion") != Some(&IvyJson::Number(1.0))
-        || !is("urgency", &["low", "normal", "high", "critical"])
-        || !is("notification", &["none", "main", "voice"])
-        || !string("text").is_some_and(|s| {
-            s.0.len() <= 8192 && (notification == Some(&"none".into()) || !trimmed(&s.0).is_empty())
-        })
-        || !string("reason").is_some_and(|s| s.0.len() <= 1024)
-        || (notification == Some(&"voice".into())
-            && value.get("urgency") != Some(&"critical".into()))
-    {
-        return Err(invalid("The assignment decision is incomplete."));
-    }
-    Ok(IvyJson::object(
-        ["schemaVersion", "urgency", "notification", "text", "reason"]
-            .map(|key| (key, value.get(key).unwrap().clone())),
-    ))
+    AssignmentDecision::from_json(value)
 }

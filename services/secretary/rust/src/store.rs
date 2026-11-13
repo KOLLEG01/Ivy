@@ -6,7 +6,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     hash::hash_json,
-    json::canonical,
+    json::canonical_size,
     operation::{derive_operation_id_js, parse_operation_id_js},
 };
 use ivy_sdk::{
@@ -60,9 +60,10 @@ impl Record {
             Self::Configuration => &["1.0.0", "1.1.0", "1.2.0"],
             Self::Item => &["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
             Self::Assignment => &["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"],
-            Self::ScheduleProgress | Self::EventProgress => &["1.0.0", "1.1.0", "1.2.0"],
+            Self::ScheduleProgress => &["1.0.0", "1.1.0", "1.2.0"],
+            Self::EventProgress => &["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
             Self::Execution => &[
-                "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0",
+                "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0",
             ],
             _ => &["1.0.0"],
         }
@@ -139,22 +140,11 @@ pub fn record_references(key: Record, value: &IvyJson) -> IvyResult<IvyJson> {
     }
     Ok(refs)
 }
-fn operation_identity(value: &IvyJson) -> Option<&JsString> {
-    match value {
-        IvyJson::String(s) => parse_operation_id_js(s)
-            .ok()
-            .filter(|id| id.issued_at_unix_ms >= 1_000_000_000_000)
-            .map(|_| s),
-        IvyJson::Array(a) => a.iter().find_map(operation_identity),
-        IvyJson::Object(values) => values
-            .iter()
-            .find_map(|(_, value)| operation_identity(value)),
-        _ => None,
-    }
-}
-pub fn mutation(parts: &[IvyJson]) -> IvyResult<JsString> {
-    let value = IvyJson::Array(parts.to_vec());
-    match operation_identity(&value) {
+/// The workflow supplies its original parent. User data cannot select an owner
+/// or operation epoch. Local bootstrap records have no external parent.
+pub fn mutation(parent: Option<&JsString>, parts: Vec<IvyJson>) -> IvyResult<JsString> {
+    let value = IvyJson::Array(parts);
+    match parent {
         Some(parent) => derive_operation_id_js(parent, &value),
         None => Ok(format!("secretary:{}", &hash_json(&value)?[7..]).into()),
     }
@@ -173,7 +163,7 @@ pub struct Store<'a> {
     pub journal: &'a Journal,
 }
 impl Store<'_> {
-    pub fn decode(&self, key: Record, read: &IvyJson) -> IvyResult<IvyJson> {
+    pub fn decode(&self, key: Record, mut read: IvyJson) -> IvyResult<IvyJson> {
         let object = read.required("object")?;
         let revision = read.required("revision")?;
         let content = read.required("content")?;
@@ -197,7 +187,7 @@ impl Store<'_> {
         need(
             revision.get("contentHash") == Some(&hash_json(value)?.into())
                 && revision.get("byteLength").and_then(IvyJson::as_f64)
-                    == Some(canonical(value, 33_554_432)?.len() as f64),
+                    == Some(canonical_size(value, 33_554_432)? as f64),
             "secretary_evidence_conflict",
             "The saved record does not match its declared bytes.",
         )?;
@@ -210,16 +200,19 @@ impl Store<'_> {
             "secretary_evidence_conflict",
             "The Secretary record references must match its exact revision content.",
         )?;
+        let pin = IvyJson::object([
+            ("objectId", object.required("id")?.clone()),
+            ("revision", revision.required("revision")?.clone()),
+        ]);
+        let written_at = revision.required("createdAt")?.clone();
+        let value = read
+            .get_mut("content")
+            .and_then(|content| content.remove("value"))
+            .ok_or_else(IvyError::internal)?;
         Ok(IvyJson::object([
-            (
-                "pin",
-                IvyJson::object([
-                    ("objectId", object.required("id")?.clone()),
-                    ("revision", revision.required("revision")?.clone()),
-                ]),
-            ),
-            ("value", value.clone()),
-            ("writtenAt", revision.required("createdAt")?.clone()),
+            ("pin", pin),
+            ("value", value),
+            ("writtenAt", written_at),
         ]))
     }
     pub async fn read(&self, key: Record, selected: &IvyJson) -> IvyResult<IvyJson> {
@@ -241,8 +234,7 @@ impl Store<'_> {
         };
         self.decode(
             key,
-            &self
-                .client
+            self.client
                 .request("objects.read", params, RequestOptions::default())
                 .await?,
         )
@@ -321,6 +313,16 @@ impl Store<'_> {
             "Local Secretary records do not have Hive write receipts.",
         )?;
         schema::validate(key.schema(), value)?;
+        self.checked_write_request(key, value, destination, id)
+    }
+    /// The public caller has already validated this record at its boundary.
+    fn checked_write_request(
+        &self,
+        key: Record,
+        value: &IvyJson,
+        destination: &IvyJson,
+        id: &JsString,
+    ) -> IvyResult<IvyJson> {
         parse_operation_id_js(id)?;
         let mut request = IvyJson::object([
             ("mutationId", IvyJson::String(id.clone())),
@@ -372,7 +374,7 @@ impl Store<'_> {
         id: &JsString,
     ) -> IvyResult<IvyJson> {
         schema::validate(key.schema(), value)?;
-        canonical(value, 33_554_432)?;
+        canonical_size(value, 33_554_432)?;
         if key.local() {
             let now = SystemClock.utc_millis();
             return Ok(pin_value(
@@ -389,7 +391,7 @@ impl Store<'_> {
                 },
             ));
         }
-        self.write_prepared(self.object_write_request(key, value, destination, id)?)
+        self.write_prepared(self.checked_write_request(key, value, destination, id)?)
             .await
     }
     pub async fn create(
@@ -426,7 +428,9 @@ impl Store<'_> {
         key: Record,
         value: &IvyJson,
     ) -> IvyResult<IvyJson> {
-        if same(current.required("value")?, value)? {
+        let current_hash = hash_json(current.required("value")?)?;
+        let value_hash = hash_json(value)?;
+        if current_hash == value_hash {
             return Ok(current.clone());
         }
         let p = current.required("pin")?;
@@ -437,7 +441,7 @@ impl Store<'_> {
                 IvyJson::String(self.root.clone()),
                 key.key().into(),
                 p.clone(),
-                hash_json(value)?.into(),
+                value_hash.as_str().into(),
             ]),
         )
         .await?;
@@ -453,7 +457,7 @@ impl Store<'_> {
                 ) =>
             {
                 let saved = self.read(key, p.required("objectId")?).await?;
-                if same(saved.required("value")?, value)? {
+                if hash_json(saved.required("value")?)? == value_hash {
                     Ok(saved)
                 } else {
                     Err(error)

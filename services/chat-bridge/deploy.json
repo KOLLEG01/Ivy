@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "chat-bridge",
   "kind": "service",
-  "version": "0.4.12",
+  "version": "0.4.23",
   "description": "WhatsApp Main, explicit file delivery and durable notifications",
   "connectsToHive": true,
   "requirements": {
@@ -65,9 +65,9 @@
     "maximumDelayMs": 60000
   },
   "storage": {
-    "minReadableFormat": 1,
-    "maxReadableFormat": 2,
-    "writeFormat": 2
+    "minReadableFormat": 2,
+    "maxReadableFormat": 3,
+    "writeFormat": 3
   },
   "runtimeReset": {
     "delete": [

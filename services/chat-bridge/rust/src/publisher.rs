@@ -9,7 +9,7 @@ use crate::{
     store::{Destination, Document, Pin, Reference, mutation},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical,
+    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::{future::Future, pin::Pin as FuturePin, sync::Arc};
@@ -49,7 +49,7 @@ fn pin(value: &Json) -> IvyResult<Pin> {
     })
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn safe_integer(value: f64) -> bool {
     value.is_finite() && value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0

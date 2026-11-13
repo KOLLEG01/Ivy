@@ -2,7 +2,9 @@
 //! The retained-plan and dynamic payload compiler are required shared boundaries.
 use crate::{
     admission::ChatAdmission,
-    evidence_bytes::{read_chat_evidence, save_chat_evidence},
+    evidence_bytes::{
+        EncodedEvidence, read_chat_evidence, save_chat_evidence, save_encoded_chat_evidence,
+    },
     main_context::{main_input_origin, main_turn_context, object_options},
     native_plan::{chat_turn_options, selected},
     operations::ChatOperations,
@@ -13,7 +15,7 @@ use ivy_contracts::{
     chat_schema::validate_chat,
     checked_native_contract::CheckedNativeContracts,
     hash::hash_json,
-    json::canonical,
+    json::{canonical, canonical_equal},
     limits::{MANAGEMENT_FRAME_BYTES, NATIVE_FRAME_BYTES, NATIVE_REQUEST_FRAME_BYTES},
     native_backend::BackendIdentity,
     native_contract::NativeContract,
@@ -65,7 +67,7 @@ fn string<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
         .ok_or_else(IvyError::internal)
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn pin(value: &Json) -> IvyResult<Pin> {
     let revision = field(value, "revision")?
@@ -576,6 +578,23 @@ impl<'a> ChatNativeEvidence<'a> {
             parent_id,
             "agent-read-observation/canonical-json",
             value,
+            &|v| self.validation.validate_draft(v),
+        )
+        .await
+    }
+    pub(crate) async fn save_encoded_read(
+        &self,
+        parent_id: &str,
+        expected: &Json,
+        encoded: EncodedEvidence<'_>,
+    ) -> IvyResult<Pin> {
+        self.verify_read(encoded.original(), expected)?;
+        self.scope(parent_id).await?;
+        save_encoded_chat_evidence(
+            self.store,
+            parent_id,
+            "agent-read-observation/canonical-json",
+            encoded,
             &|v| self.validation.validate_draft(v),
         )
         .await

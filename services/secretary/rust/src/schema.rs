@@ -1,5 +1,7 @@
 //! Service-local schema admission uses the original SchemaValidators defaults.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, builtin_schema::SchemaBundle, json::canonical};
+use ivy_contracts::{
+    IvyError, IvyJson, IvyResult, builtin_schema::SchemaBundle, json::canonical_size,
+};
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy)]
@@ -55,7 +57,7 @@ impl Schema {
 }
 
 pub fn validate(schema: Schema, value: &IvyJson) -> IvyResult<()> {
-    canonical(value, 1024 * 1024)?;
+    canonical_size(value, 1024 * 1024)?;
     static BUNDLE: OnceLock<IvyResult<SchemaBundle>> = OnceLock::new();
     let bundle = BUNDLE
         .get_or_init(|| {

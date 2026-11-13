@@ -105,6 +105,7 @@ impl<'a> ChatWorker<'a> {
                 .and_then(|q| q.as_array())
                 .and_then(|q| q.first());
             let Some(ticket) = ticket else {
+                self.collector.clear();
                 self.idle = true;
                 self.selected_turn(None);
                 return Ok(());

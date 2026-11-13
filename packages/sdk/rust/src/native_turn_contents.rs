@@ -1,6 +1,7 @@
 //! Retain original native item pages without synthesizing a full-history reply.
 use crate::{
-    IvyError, IvyJson, IvyResult, JsString, native_observations::NativeObservations,
+    IvyError, IvyJson, IvyResult, JsString,
+    native_observations::{ItemLayout, NativeObservations},
     rpc::RequestFuture,
 };
 use ivy_contracts::{
@@ -32,10 +33,68 @@ pub trait NativeTurnOwner: Send + Sync {
     fn selected_contract(&self) -> ContractFuture<'_>;
 }
 
+/// Own the exact admitted observations once. Immutable views borrow their
+/// original items; callers cannot mutate evidence after complete verification.
+#[derive(Debug)]
 pub struct VerifiedNativeTurnContents {
-    pub snapshot: IvyJson,
-    pub turn: IvyJson,
-    pub items: Vec<IvyJson>,
+    original: IvyJson,
+    item_layout: Option<ItemLayout>,
+}
+impl VerifiedNativeTurnContents {
+    pub fn original(&self) -> &IvyJson {
+        &self.original
+    }
+    pub fn into_original(self) -> IvyJson {
+        self.original
+    }
+    pub fn snapshot(&self) -> &IvyJson {
+        native_turn_snapshot(&self.original)
+    }
+    pub fn turn(&self) -> &IvyJson {
+        &field(field(self.snapshot(), "reply"), "result")
+            .get("data")
+            .and_then(IvyJson::as_array)
+            .expect("verified native turn")[0]
+    }
+    pub fn items(&self) -> impl Iterator<Item = &IvyJson> {
+        let direct = if self.item_layout.is_none() {
+            field(self.turn(), "items")
+                .as_array()
+                .expect("verified full items")
+        } else {
+            &[]
+        };
+        let pages = if self.item_layout.is_some() {
+            field(&self.original, "pages")
+                .as_array()
+                .expect("verified native pages")
+        } else {
+            &[]
+        };
+        let layout = self.item_layout.unwrap_or(ItemLayout::Direct);
+        direct.iter().chain(pages.iter().flat_map(move |page| {
+            field(field(page, "reply"), "result")
+                .get("data")
+                .and_then(IvyJson::as_array)
+                .expect("verified native page items")
+                .iter()
+                .map(move |entry| layout.original(entry))
+        }))
+    }
+    pub fn final_answer(&self) -> Option<&JsString> {
+        single_final_answer(self.items())
+    }
+}
+/// Preserve the domain rule: exactly one final agent message with string text.
+pub fn single_final_answer<'a>(
+    items: impl IntoIterator<Item = &'a IvyJson>,
+) -> Option<&'a JsString> {
+    let mut answers = items
+        .into_iter()
+        .filter(|item| text(item, "type", "agentMessage") && text(item, "phase", "final_answer"))
+        .filter_map(|item| item.get("text").and_then(IvyJson::as_js_string));
+    let answer = answers.next()?;
+    answers.next().is_none().then_some(answer)
 }
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -49,7 +108,7 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
     value.get(key).unwrap_or(&NULL)
 }
 fn text(value: &IvyJson, key: &str, expected: &str) -> bool {
-    value.get(key).and_then(IvyJson::as_js_string) == Some(&JsString::from(expected))
+    value.get(key).is_some_and(|value| value.is_str(expected))
 }
 fn empty_record() -> IvyJson {
     IvyJson::object(Vec::<(String, IvyJson)>::new())
@@ -136,16 +195,16 @@ fn epoch(snapshot: &IvyJson) -> IvyResult<&JsString> {
 pub async fn verify_native_turn_contents(
     owner: &dyn NativeTurnOwner,
     retained: &CheckedNativeContracts,
-    value: &IvyJson,
+    value: IvyJson,
     thread_id: &JsString,
     turn_id: &JsString,
 ) -> IvyResult<VerifiedNativeTurnContents> {
-    let snapshot = native_turn_snapshot(value);
+    let snapshot = native_turn_snapshot(&value);
     let paged = value.get("format").is_some();
     require(
         !paged
-            || text(value, "format", "native-turn-item-pages-1")
-                && field(value, "pages").as_array().is_some(),
+            || text(&value, "format", "native-turn-item-pages-1")
+                && field(&value, "pages").as_array().is_some(),
         "native_turn_mismatch",
         "Unknown native contents representation.",
     )?;
@@ -164,13 +223,8 @@ pub async fn verify_native_turn_contents(
     )?;
     let mut seen = HashSet::new();
     if !paged {
-        let items: Vec<_> = field(turn, "items")
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(record)
-            .collect();
-        for item in &items {
+        let items = field(turn, "items").as_array().unwrap();
+        for item in items {
             item_identity(
                 item,
                 &mut seen,
@@ -178,9 +232,8 @@ pub async fn verify_native_turn_contents(
             )?;
         }
         return Ok(VerifiedNativeTurnContents {
-            snapshot: snapshot.clone(),
-            turn: turn.clone(),
-            items,
+            original: value,
+            item_layout: None,
         });
     }
     let identity = IvyJson::object([
@@ -205,13 +258,12 @@ pub async fn verify_native_turn_contents(
         Err(error) => return Err(error),
     };
     let interpreter = NativeObservations::new(&contract);
-    let pages = field(value, "pages").as_array().unwrap();
+    let pages = field(&value, "pages").as_array().unwrap();
     require(
         !pages.is_empty(),
         "native_turn_incomplete",
         "A paginated turn needs its original item observations.",
     )?;
-    let mut items = Vec::new();
     let mut cursors = HashSet::new();
     let mut observations = HashSet::from([field(snapshot, "observationId")
         .as_js_string()
@@ -240,7 +292,7 @@ pub async fn verify_native_turn_contents(
             "Complete turn contents cannot omit a failed item page.",
         )?;
         let result = result.unwrap();
-        let page_items = interpreter.native_turn_items(result, turn_id)?;
+        let page_items = interpreter.native_turn_item_refs(result, turn_id)?;
         let next = result.get("nextCursor");
         let final_cursor = next == Some(&IvyJson::Null);
         let advancing = next
@@ -260,11 +312,10 @@ pub async fn verify_native_turn_contents(
         )?;
         for item in page_items {
             item_identity(
-                &item,
+                item,
                 &mut seen,
                 "Turn items need distinct original identities.",
             )?;
-            items.push(item);
         }
         if let Some(previous) = cursor.as_js_string() {
             cursors.insert(previous.clone());
@@ -272,9 +323,8 @@ pub async fn verify_native_turn_contents(
         cursor = next.unwrap().clone();
     }
     Ok(VerifiedNativeTurnContents {
-        snapshot: snapshot.clone(),
-        turn: turn.clone(),
-        items,
+        original: value,
+        item_layout: Some(interpreter.item_layout()?),
     })
 }
 
@@ -282,24 +332,24 @@ pub async fn verify_native_turn_contents(
 pub async fn read_native_turn_contents(
     owner: &dyn NativeTurnOwner,
     retained: &CheckedNativeContracts,
-    snapshot: &IvyJson,
+    snapshot: IvyJson,
     thread_id: &JsString,
     turn_id: &JsString,
     maximum_bytes: Option<usize>,
-) -> IvyResult<IvyJson> {
+) -> IvyResult<VerifiedNativeTurnContents> {
     let maximum = maximum_bytes.unwrap_or(64 * 1024 * 1024);
-    let epoch = epoch(snapshot)?;
+    let epoch = epoch(&snapshot)?;
     owner.check_read(
-        snapshot,
+        &snapshot,
         "thread/turns/list",
-        field(snapshot, "params"),
+        field(&snapshot, "params"),
         epoch,
     )?;
-    let turn = turn_of(snapshot, thread_id, turn_id, "notLoaded")?;
+    let turn = turn_of(&snapshot, thread_id, turn_id, "notLoaded")?;
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
     let mut cursor = IvyJson::Null;
-    let mut bytes = canonical_size(snapshot, maximum)?;
+    let mut bytes = canonical_size(&snapshot, maximum)?;
     loop {
         let observed = owner
             .read(
@@ -318,7 +368,7 @@ pub async fn read_native_turn_contents(
                 "native_read_failed",
                 "Only an unsupported first item page permits the full-turn fallback.",
             )?;
-            let mut params = record(field(snapshot, "params"));
+            let mut params = record(field(&snapshot, "params"));
             params.insert("itemsView", "full".into());
             let full = owner
                 .read("thread/turns/list", params, epoch, false)
@@ -330,7 +380,7 @@ pub async fn read_native_turn_contents(
                 "The native turn changed while reading its contents.",
             )?;
             canonical_size(&full, maximum)?;
-            return Ok(full);
+            return verify_native_turn_contents(owner, retained, full, thread_id, turn_id).await;
         }
         let size = canonical_size(&observed, maximum)?;
         require(
@@ -357,9 +407,8 @@ pub async fn read_native_turn_contents(
     }
     let value = IvyJson::object([
         ("format", "native-turn-item-pages-1".into()),
-        ("snapshot", snapshot.clone()),
+        ("snapshot", snapshot),
         ("pages", IvyJson::Array(pages)),
     ]);
-    verify_native_turn_contents(owner, retained, &value, thread_id, turn_id).await?;
-    Ok(value)
+    verify_native_turn_contents(owner, retained, value, thread_id, turn_id).await
 }

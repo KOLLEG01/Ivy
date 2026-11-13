@@ -1,7 +1,6 @@
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
 use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
-mod triage_workflow_cases;
 mod video_cases;
 mod video_codec_cases;
 mod video_command_cases;
@@ -59,6 +58,8 @@ fn poison_legacy_record(journal: &ivy_secretary::journal::Journal, key: &str, na
 mod assignment_delivery_cases;
 #[path = "assignment_events_cases.rs"]
 mod assignment_events_cases;
+#[path = "assignment_event_stream_cases.rs"]
+mod assignment_event_stream_cases;
 #[path = "assignment_execution_cases.rs"]
 mod assignment_execution_cases;
 #[path = "assignment_import_cases.rs"]
@@ -104,28 +105,18 @@ mod inbox_evidence_cases;
 mod inbox_recovery_cases;
 #[path = "journal_import_cases.rs"]
 mod journal_import_cases;
-#[path = "media_store_cases.rs"]
-mod media_store_cases;
-#[path = "microsoft_store_cases.rs"]
-mod microsoft_store_cases;
 #[path = "notice_evidence_cases.rs"]
 mod notice_evidence_cases;
 #[path = "notice_scan_cases.rs"]
 mod notice_scan_cases;
 #[path = "notices_cases.rs"]
 mod notices_cases;
-#[path = "outlook_projection_cases.rs"]
-mod outlook_projection_cases;
-#[path = "outlook_source_cases.rs"]
-mod outlook_source_cases;
 #[path = "registry_cases.rs"]
 mod registry_cases;
 #[path = "service_handlers_cases.rs"]
 mod service_handlers_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
-#[path = "triage_prompt_cases.rs"]
-mod triage_prompt_cases;
 #[path = "workflow_cases.rs"]
 mod workflow_cases;
 
@@ -254,8 +245,3 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
         assert_eq!(&actual, row.required("expected").unwrap(), "case {index}");
     }
 }
-
-#[path = "teams_projection_cases.rs"]
-mod teams_projection_cases;
-#[path = "teams_source_cases.rs"]
-mod teams_source_cases;

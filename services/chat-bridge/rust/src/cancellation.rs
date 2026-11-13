@@ -11,7 +11,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
-    hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    hash::hash_json, json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -35,7 +35,7 @@ fn pin(v: &Json) -> IvyResult<Pin> {
     })
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn present(v: &Json, key: &str) -> bool {
     v.get(key).is_some_and(|value| !value.is_null())

@@ -16,7 +16,7 @@ fn retained(journal: &Journal) -> (IvyJson, IvyJson) {
     let mut statement = journal
         .db
         .prepare(
-            "SELECT id,key,name,current_revision,value_json FROM technical_documents ORDER BY id",
+            "SELECT d.id,d.key,d.name,d.current_revision,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.id",
         )
         .unwrap();
     let documents = statement
@@ -66,6 +66,50 @@ fn retained(journal: &Journal) -> (IvyJson, IvyJson) {
     (IvyJson::Array(documents), IvyJson::Array(revisions))
 }
 
+#[tokio::test]
+async fn cleanup_failure_preserves_the_original_completion_and_delete_call() {
+    use ivy_secretary::assignment_cleanup::{CleanupAction, blocked, identity_missing};
+    let original = IvyJson::object([
+        ("phase", "deleting".into()), ("result", "original final answer".into()),
+        ("errorCode", IvyJson::Null), ("completedAt", "2026-11-05T05:17:42.633Z".into()),
+        ("threadId", "original-thread".into()),
+        ("nativeOperations", IvyJson::object([("delete", "original-operation".into())])),
+    ]);
+    let now = "2026-11-12T05:25:28.863Z".into();
+    for code in ["native_backend_required", "request_timeout"] {
+        let next = CleanupAction::Delete.issue(&original, code, &now, identity_missing(code));
+        for key in ["phase", "result", "errorCode", "completedAt", "threadId", "nativeOperations"] {
+            assert_eq!(next.get(key), original.get(key));
+        }
+        assert_eq!(blocked(&next), code == "native_backend_required");
+        assert_eq!(next.required("cleanup").unwrap().get("state"), Some(&if code == "request_timeout" { "outcome_unknown" } else { "blocked" }.into()));
+        let mut confirmed = next;
+        CleanupAction::Delete.confirmed(&mut confirmed, &now);
+        assert!(!blocked(&confirmed));
+        assert_eq!(confirmed.required("cleanup").unwrap().get("state"), Some(&"confirmed".into()));
+        assert_eq!(confirmed.get("nativeOperations"), original.get("nativeOperations"));
+    }
+}
+#[test]
+fn historical_cleanup_requires_the_original_success_and_exact_owner_and_operation() {
+    use ivy_secretary::assignment_cleanup::failed_delete_matches;
+    let prior = IvyJson::object([
+        ("phase", "deleting".into()), ("result", "saved answer".into()), ("errorCode", IvyJson::Null),
+        ("completedAt", "2026-11-05T05:17:42.633Z".into()), ("archivedAt", "2026-11-05T05:17:43.187Z".into()),
+        ("executionId", "original-execution".into()), ("serviceNodeId", "original-service".into()),
+        ("threadId", "original-thread".into()), ("turnId", "original-turn".into()),
+        ("nativeTarget", IvyJson::object([("serviceNodeId", "original-owner".into())])),
+        ("nativeOperations", IvyJson::object([("delete", "original-delete".into())])),
+    ]);
+    let mut current = prior.clone(); current.insert("phase", "failed".into()); current.insert("errorCode", "native_backend_required".into());
+    assert!(failed_delete_matches(&prior, &current));
+    for key in ["result", "completedAt", "executionId", "nativeTarget", "nativeOperations", "threadId", "turnId"] {
+        let mut changed = current.clone(); changed.insert(key, "changed".into());
+        assert!(!failed_delete_matches(&prior, &changed), "{key}");
+    }
+    let mut failed = prior.clone(); failed.insert("errorCode", "native_turn_failed".into());
+    assert!(!failed_delete_matches(&failed, &current));
+}
 #[tokio::test]
 async fn original_execution_failure_and_retained_resource_policy() {
     let output = reference_data::read(include_bytes!("assignment-runner-cases.json.gz"));

@@ -21,14 +21,41 @@ fn record(value: &IvyJson) -> Record {
         _ => panic!("Unknown record"),
     }
 }
+#[test]
+fn mutation_parent_is_explicit_and_never_selected_from_user_data() {
+    let parent: ivy_contracts::JsString = "owner:1800000000000:original".into();
+    let parts = vec![
+        "foreign:1900000000000:decoy".into(),
+        IvyJson::object([
+            ("text", "nested:1900000000001:another".into()),
+            (
+                "original",
+                IvyJson::String(ivy_contracts::JsString(vec![0xd800, 0, 0xdc00])),
+            ),
+        ]),
+    ];
+    let derived = mutation(Some(&parent), parts.clone()).unwrap();
+    let identity = parse_operation_id_js(&derived).unwrap();
+    assert_eq!(identity.runtime_epoch, "owner".into());
+    assert_eq!(identity.issued_at_unix_ms, 1_800_000_000_000);
+    assert!(
+        mutation(None, parts.clone())
+            .unwrap()
+            .to_utf8()
+            .unwrap()
+            .starts_with("secretary:")
+    );
+    assert_eq!(
+        mutation(Some(&"invalid-parent".into()), parts)
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+}
 #[tokio::test]
 async fn original_store_records_and_rpc_recovery() {
     let output = reference_data::read(include_bytes!("store-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        16 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 16 * 1024 * 1024).unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert!(rows.len() > 200);
     for (index, row) in rows.iter().enumerate() {
@@ -86,7 +113,7 @@ async fn original_store_records_and_rpc_recovery() {
             journal: &journal,
         };
         let result = match method.as_str() {
-            "decode" => store.decode(record(&args[0]), &args[1]),
+            "decode" => store.decode(record(&args[0]), args[1].clone()),
             "objectWriteRequest" => store.object_write_request(
                 record(&args[0]),
                 &args[1],
@@ -110,7 +137,11 @@ async fn original_store_records_and_rpc_recovery() {
             }
             "amend" => store.amend(&args[0], record(&args[1]), &args[2]).await,
             "original" => store.original(record(&args[0]), &args[1]).await,
-            "mutation" => mutation(args).map(IvyJson::String),
+            "mutation" => mutation(
+                input.get("parent").and_then(IvyJson::as_js_string),
+                args.to_vec(),
+            )
+            .map(IvyJson::String),
             "conflict" => {
                 let value = &args[0];
                 let outcome = match value

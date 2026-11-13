@@ -29,7 +29,10 @@ fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
 }
 fn time(value: &IvyJson, key: &str) -> IvyResult<f64> {
     let milliseconds = parse_date(&text(value, key)?);
-    milliseconds.is_finite().then_some(milliseconds).ok_or_else(IvyError::internal)
+    milliseconds
+        .is_finite()
+        .then_some(milliseconds)
+        .ok_or_else(IvyError::internal)
 }
 fn iso(value: f64) -> IvyResult<JsString> {
     date_to_iso(value).map_err(|_| IvyError::internal())
@@ -150,29 +153,8 @@ impl SchedulerAssignments {
                         "The archived assignment must retain its original identity.",
                     )?;
                     let key = key.unwrap();
-                    let name = format!(
-                        "secretary-assignment-{}",
-                        &hash_json(&IvyJson::String(key.clone()))?[7..48]
-                    );
-                    let selected = IvyJson::from(name);
-                    let mutation_id = scheduler
-                        .operation(vec![
-                            "retire-assignment-subscription".into(),
-                            IvyJson::String(object_id.clone()),
-                            IvyJson::String(retirement.clone()),
-                            selected.clone(),
-                        ])
-                        .await?;
-                    store
-                        .client
-                        .request(
-                            "events.unsubscribe",
-                            IvyJson::object([
-                                ("name", selected),
-                                ("mutationId", IvyJson::String(mutation_id)),
-                            ]),
-                            RequestOptions::default(),
-                        )
+                    scheduler
+                        .retire_assignment_event_streams(key, &object_id, &retirement)
                         .await?;
                     self.retired.insert(object_id.clone(), retirement);
                     let assignment_issue =
@@ -199,7 +181,13 @@ impl SchedulerAssignments {
                 Err(error) if evidence.cancellation.cancellation.is_cancelled() => {
                     return Err(error);
                 }
-                Err(error) => issues.issue(&issue_key, crate::assignment_scheduler::diagnostic_code(&error, "secretary_assignment_invalid")),
+                Err(error) => issues.issue(
+                    &issue_key,
+                    crate::assignment_scheduler::diagnostic_code(
+                        &error,
+                        "secretary_assignment_invalid",
+                    ),
+                ),
             }
         }
         Ok(result)

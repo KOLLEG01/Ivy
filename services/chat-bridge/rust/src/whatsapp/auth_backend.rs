@@ -6,7 +6,10 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use wacore::store::error::{Result, StoreError};
 
 /// Owns the account lock for the whole native client's lifetime. SQLite calls
@@ -14,11 +17,23 @@ use wacore::store::error::{Result, StoreError};
 pub struct NativeAuthStore(
     pub(super) Mutex<Option<AuthAccount>>,
     pub(super) OnceLock<super::journal_owner::Journal>,
+    AtomicU64,
 );
 
 impl NativeAuthStore {
     pub fn new(account: AuthAccount) -> Self {
-        Self(Mutex::new(Some(account)), OnceLock::new())
+        Self(
+            Mutex::new(Some(account)),
+            OnceLock::new(),
+            AtomicU64::new(0),
+        )
+    }
+
+    pub(super) fn mapping_revision(&self) -> u64 {
+        self.2.load(Ordering::Acquire)
+    }
+    pub(super) fn mappings_changed(&self) {
+        self.2.fetch_add(1, Ordering::Release);
     }
 
     pub(super) fn bind_journal(

@@ -14,7 +14,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
-    json::canonical, limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
+    json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
     operation::derive_operation_id_js,
 };
 use ivy_sdk::{
@@ -30,7 +30,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn text<'a>(v: &'a Json, key: &str) -> IvyResult<&'a JsString> {
     v.required(key)?

@@ -1,33 +1,32 @@
-//! Object event projections and freshness policy using shared Date.parse semantics.
+//! Object event projections and freshness policy using shared timestamp semantics.
 use ivy_contracts::{IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::clock::parse_date;
 
 pub const OBJECT_WINDOW_KEY: &str = "secretary/object-window";
 
 pub fn pointer(value: &IvyJson, path: &JsString) -> IvyJson {
-    let Ok(path) = path.to_utf8() else {
-        return IvyJson::Null;
-    };
-    if path.is_empty() {
+    if path.0.is_empty() {
         return value.clone();
     }
-    let Some(path) = path.strip_prefix('/') else {
+    let Ok(parts) = ivy_contracts::schema::pointer_parts(path) else {
         return IvyJson::Null;
     };
     let mut current = value;
-    for token in path.split('/') {
-        let token = token.replace("~1", "/").replace("~0", "~");
+    for token in parts {
         let selected = match current {
-            IvyJson::Object(_) => current.get(&token),
+            IvyJson::Object(_) => current.get_key(&token),
             IvyJson::Array(values)
-                if token == "0"
-                    || (!token.is_empty()
-                        && !token.starts_with('0')
-                        && token.bytes().all(|byte| byte.is_ascii_digit())) =>
+                if token.0 == [48]
+                    || (!token.0.is_empty()
+                        && token.0[0] != 48
+                        && token.0.iter().all(|unit| (48..=57).contains(unit))) =>
             {
                 token
-                    .parse::<usize>()
-                    .ok()
+                    .0
+                    .iter()
+                    .try_fold(0usize, |index, unit| {
+                        index.checked_mul(10)?.checked_add(usize::from(*unit - 48))
+                    })
                     .and_then(|index| values.get(index))
             }
             _ => None,

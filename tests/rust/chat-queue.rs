@@ -563,8 +563,19 @@ async fn queue_identity_admission_and_interrupted_sqlite_recovery_match_original
                                     .read("chat-bridge/binding", Reference::Pinned(&binding))
                                     .await
                                     .map_err(|e| e.into_ivy())?;
+                                let original = doc.value.clone();
                                 update(&store, "chat-bridge/binding", doc, step.required("patch")?)
                                     .await?;
+                                // A retained original is evidence, while new
+                                // admission still checks the immutable head.
+                                assert_eq!(
+                                    store
+                                        .read("chat-bridge/binding", Reference::Pinned(&binding))
+                                        .await
+                                        .map_err(|e| e.into_ivy())?
+                                        .value,
+                                    original
+                                );
                                 Ok(Json::Null)
                             }
                             "patch-operation" => {

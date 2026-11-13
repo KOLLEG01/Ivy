@@ -1,0 +1,86 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PROTOC_VERSION: '3.25.3'
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  # The target dir is restored fresh each run (Swatinem cache), so incremental
+  # state is always cold and only bloats artifacts; worse, sccache refuses to
+  # cache incremental compilations, so leaving it on excludes the workspace
+  # crates from caching entirely.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  e2e:
+    name: E2E Tests
+    # Fork PRs get no secrets, so they can't pull the private mock-server image.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    services:
+      mock-server:
+        # Generated from .github/bartender-image.txt by
+        # scripts/ci/sync-bartender-image.sh.
+        image: ghcr.io/whiskeysockets-devtools/bartender@sha256:9f3a49dd9f944414fbda50571bba5f66f2ab6fdc48001e6803d4c09a1042c78e
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.BARTENDER_GHCR_TOKEN }}
+        ports:
+          - 8080:8080
+        env:
+          CHATSTATE_TTL_SECS: "3"
+        # Keep service-side evidence for flakes without allowing logs to consume the runner disk.
+        options: >-
+          --log-driver local
+          --log-opt max-size=10m
+          --log-opt max-file=1
+          --log-opt compress=false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-16
+      - name: Install protoc and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc@${{ env.PROTOC_VERSION }},cargo-nextest
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache the target dir too: sccache can't cache proc-macros, build scripts
+      # or bins (linker-output crate types), and those recompile every run.
+      # Swatinem restores them; sccache still fills in after a Cargo.lock change.
+      - name: Cache Rust build (registry + target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
+      - name: Wait for mock server
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sk https://localhost:8080/ > /dev/null 2>&1; then
+              echo "Mock server is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Mock server failed to become ready"
+          exit 1
+      # The `e2e` nextest profile (.config/nextest.toml) carries the hang guard.
+      # No `--nocapture`: nextest captures per test and replays the output of the
+      # failures only, so a red run is readable instead of 25 interleaved logs.
+      - name: Run E2E tests
+        env:
+          MOCK_SERVER_URL: "wss://127.0.0.1:8080/ws/chat"
+          RUST_LOG: info
+        run: cargo nextest run --profile e2e -p e2e-tests

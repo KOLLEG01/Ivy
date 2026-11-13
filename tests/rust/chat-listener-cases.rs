@@ -2,6 +2,7 @@
 mod reference_data;
 use super::snapshot;
 use ivy_chat_bridge::whatsapp::{
+    history::{HistoryFuture, HistoryPage},
     journal::{HistoryLimits, OutputState},
     journal_io::JournalIo,
     journal_owner::Journal,
@@ -20,7 +21,7 @@ use ivy_sdk::{clock::Clock, rpc::RequestFuture};
 use std::{
     collections::HashMap,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Instant,
 };
 fn f<'a>(value: &'a Json, key: &str) -> &'a Json {
@@ -60,6 +61,7 @@ struct State {
     now: i64,
     events: Vec<Json>,
     counts: HashMap<&'static str, usize>,
+    history: Vec<Weak<Json>>,
 }
 struct Probe {
     state: Mutex<State>,
@@ -164,69 +166,90 @@ impl ListenerNative for Probe {
             )]))
         })
     }
-    fn turn_page<'a>(&'a self, thread: &'a JsString, cursor: Json) -> RequestFuture<'a> {
+    fn turn_page<'a>(&'a self, thread: &'a JsString, cursor: Json) -> HistoryFuture<'a> {
         Box::pin(async move {
-            self.event(vec![
-                "turnPage".into(),
-                Json::String(thread.clone()),
-                cursor.clone(),
-            ]);
-            let (wide, tool, paged) = {
-                let mut state = self.state.lock().unwrap();
-                state.now += f(&state.current, "pageAdvance").as_f64().unwrap_or(0.0) as i64;
-                (
-                    f(&state.current, "wideHistory").as_bool().unwrap_or(false),
-                    f(&state.current, "wideTool").as_bool().unwrap_or(false),
-                    f(&state.current, "pagedTurns").as_f64().unwrap_or(0.0) as usize,
-                )
-            };
-            if wide {
-                let id = if cursor.is_null() {
-                    "0".into()
-                } else {
-                    cursor.as_str()?
+            let page: IvyResult<Json> = async move {
+                self.event(vec![
+                    "turnPage".into(),
+                    Json::String(thread.clone()),
+                    cursor.clone(),
+                ]);
+                let (wide, tool, paged) = {
+                    let mut state = self.state.lock().unwrap();
+                    state.now += f(&state.current, "pageAdvance").as_f64().unwrap_or(0.0) as i64;
+                    (
+                        f(&state.current, "wideHistory").as_bool().unwrap_or(false),
+                        f(&state.current, "wideTool").as_bool().unwrap_or(false),
+                        f(&state.current, "pagedTurns").as_f64().unwrap_or(0.0) as usize,
+                    )
                 };
-                return Ok(page(
-                    vec![turn(
-                        &format!("wide-{id}"),
-                        vec![agent("answer", &"x".repeat(17 * 1024 * 1024))],
-                    )],
-                    "next".into(),
-                ));
-            }
-            if tool {
-                let mut items = default_page().required("data")?.as_array().unwrap()[0]
-                    .required("items")?
-                    .as_array()
-                    .unwrap()
-                    .to_vec();
-                items.push(Json::object([
-                    ("id", "tool".into()),
-                    ("type", "commandExecution".into()),
-                    ("output", "x".repeat(2 * 1024 * 1024).into()),
-                ]));
-                return Ok(page(vec![turn("tool", items)], Json::Null));
-            }
-            if paged > 0 {
-                let offset = if cursor.is_null() {
-                    0
-                } else {
-                    cursor.as_str()?.parse::<usize>().unwrap()
-                };
-                let id = paged - 1 - offset;
-                return Ok(page(
-                    vec![turn(
-                        &format!("turn-{id}"),
-                        vec![agent(&format!("item-{id}"), &format!("Answer {id}"))],
-                    )],
-                    if offset + 1 < paged {
-                        (offset + 1).to_string().into()
+                if wide {
+                    let id = if cursor.is_null() {
+                        "0".into()
                     } else {
-                        Json::Null
-                    },
-                ));
+                        cursor.as_str()?
+                    };
+                    return Ok(page(
+                        vec![turn(
+                            &format!("wide-{id}"),
+                            vec![agent("answer", &"x".repeat(17 * 1024 * 1024))],
+                        )],
+                        "next".into(),
+                    ));
+                }
+                if tool {
+                    let mut items = default_page().required("data")?.as_array().unwrap()[0]
+                        .required("items")?
+                        .as_array()
+                        .unwrap()
+                        .to_vec();
+                    items.push(Json::object([
+                        ("id", "tool".into()),
+                        ("type", "commandExecution".into()),
+                        ("output", "x".repeat(2 * 1024 * 1024).into()),
+                    ]));
+                    return Ok(page(vec![turn("tool", items)], Json::Null));
+                }
+                if paged > 0 {
+                    let offset = if cursor.is_null() {
+                        0
+                    } else {
+                        cursor.as_str()?.parse::<usize>().unwrap()
+                    };
+                    let id = paged - 1 - offset;
+                    let mut items = vec![agent(&format!("item-{id}"), &format!("Answer {id}"))];
+                    if self.state.lock().unwrap().current.get("retryableHistory")
+                        == Some(&true.into())
+                    {
+                        items.insert(
+                            0,
+                            Json::object([
+                                ("id", format!("user-{id}").into()),
+                                ("type", "userMessage".into()),
+                                ("clientId", format!("client-{id}").into()),
+                                ("content", Json::Array(vec![])),
+                            ]),
+                        );
+                    }
+                    return Ok(page(
+                        vec![turn(&format!("turn-{id}"), items)],
+                        if offset + 1 < paged {
+                            (offset + 1).to_string().into()
+                        } else {
+                            Json::Null
+                        },
+                    ));
+                }
+                self.take("pages", Json::Array(vec![default_page()]))
             }
-            self.take("pages", Json::Array(vec![default_page()]))
+            .await;
+            let page = HistoryPage::from_json(&page?)?;
+            self.state
+                .lock()
+                .unwrap()
+                .history
+                .extend(page.turns.iter().map(Arc::downgrade));
+            Ok(page)
         })
     }
     fn source_name(&self, thread: JsString) -> RequestFuture<'_> {
@@ -266,7 +289,16 @@ impl ListenerMain for Probe {
     fn is_notice_input<'a>(&'a self, id: &'a JsString) -> RequestFuture<'a> {
         Box::pin(async move {
             self.event(vec!["isNoticeInput".into(), Json::String(id.clone())]);
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            let calls = state.counts.entry("noticeInput").or_default();
+            *calls += 1;
+            let at = *calls;
+            if f(&state.current, "failNoticeAt").as_f64() == Some(at as f64) {
+                return Err(IvyError::new(
+                    "fixture_notice_read",
+                    "Retry the original notice lookup.",
+                ));
+            }
             Ok(
                 (f(&state.current, "canonicalNotice").as_bool() == Some(true)
                     || f(&state.current, "noticeInputs")
@@ -514,7 +546,9 @@ fn delivery_events(events: &[Json], name_reads: &mut Vec<String>) -> Json {
 }
 #[tokio::test]
 async fn original_listener_history_notifications_and_receipts_match() {
-    let output = reference_data::read(include_bytes!("fixtures/chat-whatsapp-listener-cases.json.gz"));
+    let output = reference_data::read(include_bytes!(
+        "fixtures/chat-whatsapp-listener-cases.json.gz"
+    ));
     let oracle = parse(&String::from_utf8(output).unwrap(), usize::MAX).unwrap();
     let specs = f(&oracle, "specs").as_array().unwrap();
     let mut rows = Vec::new();
@@ -526,6 +560,7 @@ async fn original_listener_history_notifications_and_receipts_match() {
                 now: 1000,
                 events: vec![],
                 counts: HashMap::new(),
+                history: vec![],
             }),
             start: Instant::now(),
         });
@@ -605,6 +640,17 @@ async fn original_listener_history_notifications_and_receipts_match() {
                 ),
             );
             let event = f(action, "event");
+            if f(spec, "label") == &Json::from("history-buffer-limit-clears-recovery")
+                && f(f(f(&expected, "result"), "error"), "code")
+                    == &Json::from("native_history_gap")
+            {
+                // One 17 MiB ASCII body already retains over 32 MiB in UTF-16.
+                // Stop on that page rather than fetching a second oversized body.
+                let events = f(&expected, "events").as_array().unwrap();
+                assert_eq!(events.len(), 3);
+                let limited = events[..2].to_vec();
+                expected.insert("events", Json::Array(limited));
+            }
             let item = f(f(event, "params"), "item");
             if f(action, "op") == &Json::from("notification")
                 && f(event, "method") == &Json::from("item/completed")
@@ -719,4 +765,164 @@ fn native_listener_text_and_delegation_fields() {
         )]))
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn recovery_releases_processed_turns_and_retries_without_refetching_or_reordering() {
+    let journal = Journal::new(JournalIo::open(":memory:").unwrap());
+    journal.set("listener-new:binding", &true.into()).unwrap();
+    let probe = Arc::new(Probe {
+        state: Mutex::new(State {
+            current: parse(
+                r#"{"pagedTurns":48,"retryableHistory":true,"failNoticeAt":10}"#,
+                usize::MAX,
+            )
+            .unwrap(),
+            now: 1000,
+            events: vec![],
+            counts: HashMap::new(),
+            history: vec![],
+        }),
+        start: Instant::now(),
+    });
+    let listener = make(&probe, &journal);
+    assert_eq!(
+        listener.tick(true).await.unwrap_err().code,
+        "fixture_notice_read"
+    );
+    let first = journal.access(|j| j.outgoing()).unwrap();
+    assert_eq!(first.len(), 9);
+    assert_eq!(first[0].text, "Answer 0");
+    {
+        let state = probe.state.lock().unwrap();
+        assert_eq!(state.history.len(), 48);
+        assert_eq!(
+            state
+                .history
+                .iter()
+                .filter(|turn| turn.strong_count() != 0)
+                .count(),
+            39
+        );
+    }
+    let reads = probe
+        .state
+        .lock()
+        .unwrap()
+        .events
+        .iter()
+        .filter(|event| event.as_array().unwrap()[0] == Json::from("turnPage"))
+        .count();
+    assert!(!listener.tick(true).await.unwrap());
+    {
+        let state = probe.state.lock().unwrap();
+        assert!(state.history.iter().all(|turn| turn.strong_count() == 0));
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| event.as_array().unwrap()[0] == Json::from("turnPage"))
+                .count(),
+            reads
+        );
+    }
+    let rows: Vec<(String, String)> = journal
+        .access(|j| {
+            Ok(j.connection()
+                .prepare("SELECT id,text FROM outgoing ORDER BY sequence")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap())
+        })
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.1.clone()).collect::<Vec<_>>(),
+        (0..48).map(|id| format!("Answer {id}")).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        rows[..9].iter().map(|row| &row.0).collect::<Vec<_>>(),
+        first.iter().map(|row| &row.id).collect::<Vec<_>>()
+    );
+    journal.close().await.unwrap();
+}
+
+#[test]
+fn history_projection_keeps_original_receipt_and_encoded_text_without_media_or_opaque_bodies() {
+    let encoded = JsString(vec![0xd800, b'x' as u16, 0xdc00]);
+    let user = Json::object([
+        ("id", "user".into()),
+        ("type", "userMessage".into()),
+        ("clientId", "original-client".into()),
+        ("text", "x".repeat(2 * 1024 * 1024).into()),
+        (
+            "content",
+            Json::Array(vec![
+                Json::object([
+                    ("type", "image".into()),
+                    ("image_url", "x".repeat(2 * 1024 * 1024).into()),
+                ]),
+                Json::object([(
+                    "codexDelegation",
+                    Json::object([("sourceThreadId", "source".into())]),
+                )]),
+            ]),
+        ),
+    ]);
+    let mut answer = agent("answer", "");
+    answer.insert("text", Json::String(encoded.clone()));
+    answer.insert("phase", "commentary".into());
+    answer.insert("opaque", "x".repeat(2 * 1024 * 1024).into());
+    let page =
+        HistoryPage::from_json(&page(vec![turn("turn", vec![user, answer])], Json::Null)).unwrap();
+    let turn = &page.turns[0];
+    assert!(turn.retained_bytes() < 16 * 1024);
+    let items = turn.required("items").unwrap().as_array().unwrap();
+    assert_eq!(items[0].get("clientId"), Some(&"original-client".into()));
+    assert_eq!(delegation_source(&items[0]).unwrap(), Some("source".into()));
+    assert!(items[0].get("text").is_none());
+    assert_eq!(items[1].get("text"), Some(&Json::String(encoded)));
+    assert_eq!(items[1].get("phase"), Some(&"commentary".into()));
+    assert!(items[1].get("opaque").is_none());
+}
+
+#[tokio::test]
+async fn rejected_page_cursor_does_not_retain_or_publish_its_turns() {
+    let journal = Journal::new(JournalIo::open(":memory:").unwrap());
+    journal.set("listener-new:binding", &true.into()).unwrap();
+    let probe = Arc::new(Probe {
+        state: Mutex::new(State {
+            current: Json::object([(
+                "pages",
+                Json::Array(vec![
+                    page(
+                        vec![turn("turn", vec![agent("answer", "Original answer")])],
+                        7.0.into(),
+                    ),
+                    page(
+                        vec![turn("turn", vec![agent("answer", "Original answer")])],
+                        Json::Null,
+                    ),
+                ]),
+            )]),
+            now: 1000,
+            events: vec![],
+            counts: HashMap::new(),
+            history: vec![],
+        }),
+        start: Instant::now(),
+    });
+    let listener = make(&probe, &journal);
+    assert_eq!(
+        listener.tick(true).await.unwrap_err().code,
+        "native_read_failed"
+    );
+    assert_eq!(probe.state.lock().unwrap().history[0].strong_count(), 0);
+    assert!(journal.access(|j| j.outgoing()).unwrap().is_empty());
+    assert!(!listener.tick(true).await.unwrap());
+    let rows = journal.access(|j| j.outgoing()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "Original answer");
+    journal.close().await.unwrap();
 }

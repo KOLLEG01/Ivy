@@ -1,4 +1,4 @@
-//! WhatsApp journal policy over the ordered writer. Keep the legacy SQL rows,
+//! WhatsApp journal policy over the durable WAL owner. Keep the existing SQL rows,
 //! compact tombstones and ordinary JSON identities readable across rollback.
 use super::{
     identity::{identity, output_id, output_parts},

@@ -30,11 +30,37 @@ fn document(value: Document) -> IvyJson {
     ])
 }
 fn retained(before: &IvyJson, after: &IvyJson) {
-    assert_eq!(
-        before.required("schema").unwrap(),
-        after.required("schema").unwrap()
-    );
+    // Operational indexes and accounting may be added on open; they do not convert retained
+    // rows, revisions, blobs or the original source database.
+    let schema = |value: &IvyJson| {
+        IvyJson::Array(
+            value
+                .required("schema")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| {
+                    let name = row
+                        .get("name")
+                        .and_then(|v| v.as_str().ok())
+                        .unwrap_or_default();
+                    !matches!(
+                        name.as_str(),
+                        "technical_windows_due" | "technical_follow_up_busy" | "journal_usage"
+                    ) && !name.starts_with("journal_usage_")
+                })
+                .cloned()
+                .collect(),
+        )
+    };
+    assert_eq!(schema(before), schema(after));
     for table in before.required("tables").unwrap().as_array().unwrap() {
+        // Appended history changes accounting, not original retained rows.
+        // The full expected snapshot checks this derived row separately.
+        if table.get("name") == Some(&"journal_usage".into()) {
+            continue;
+        }
         let next = after
             .required("tables")
             .unwrap()
@@ -63,11 +89,7 @@ fn retained(before: &IvyJson, after: &IvyJson) {
 fn explicit_context_links_and_checkpoint_ack_pages_preserve_copied_history_on_reopen() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = reference_data::read(include_bytes!("journal-import-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 21);
     for row in rows {

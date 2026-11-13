@@ -1,0 +1,368 @@
+
+[package]
+name = "whatsapp-rust"
+version = "0.7.0"
+edition = "2024"
+rust-version.workspace = true
+authors = ["João Lucas <jlucaso@hotmail.com>"]
+license = "MIT"
+repository = "https://github.com/jlucaso1/whatsapp-rust"
+readme = "README.md"
+description = "Rust client for WhatsApp Web"
+
+[package.metadata.docs.rs]
+features = ["plugins"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[workspace]
+members = [
+    ".",
+    "examples/voip-cli",
+    "http_clients/ureq-client",
+    "plugins/metrics",
+    "storages/chat-store",
+    "storages/sqlite-storage",
+    "tests/bench-integration",
+    "tests/e2e",
+    "transports/tokio-transport",
+    "wacore",
+    "wacore/appstate",
+    "wacore/binary",
+    "wacore/derive",
+    "wacore/libsignal",
+    "wacore/noise",
+    "waproto",
+]
+default-members = [
+    ".",
+    "http_clients/ureq-client",
+    "storages/sqlite-storage",
+    "transports/tokio-transport",
+    "wacore",
+    "wacore/appstate",
+    "wacore/binary",
+    "wacore/derive",
+    "wacore/libsignal",
+    "wacore/noise",
+    "waproto",
+]
+
+# Minimum supported Rust version. Floor is the stable release CI's
+# "Test Stable (no-simd)" job pins; raise both together (that job's
+# `toolchain:` and this value) when a dependency or language feature needs it.
+[workspace.package]
+rust-version = "1.94"
+
+[workspace.lints.clippy]
+# Force the wacore::time abstraction so WASM/deterministic-test builds don't
+# regress. Exceptions carry `#[allow(clippy::disallowed_methods)]` inline.
+disallowed_methods = "deny"
+# Ban std 64-bit atomic types: absent on 32-bit targets (Xtensa/ESP32). Use
+# portable_atomic. Host-only test/bench counters carry an inline allow.
+disallowed_types = "deny"
+# Leftover debugging aids must never reach a release: `dbg!` writes to stderr
+# unconditionally and `todo!` panics at runtime.
+dbg_macro = "deny"
+todo = "deny"
+# The library routes diagnostics through `log`; a stray print bypasses the
+# consumer's logger. Tests and build scripts are exempt (see clippy.toml).
+print_stdout = "warn"
+print_stderr = "warn"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
+unused_qualifications = "warn"
+
+[workspace.dependencies]
+aes = "0.9.2"
+aes-gcm = { version = "0.11.0", default-features = false, features = ["aes", "alloc"] }
+anyhow = { version = "1.0", default-features = false }
+async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
+async-lock = { version = "3", default-features = false }
+async-trait = "0.1.91"
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+bon = { version = "3.9.3", default-features = false, features = ["std"] }
+buffa = { version = "0.9.1", default-features = false, features = ["json"] }
+buffa-build = { version = "0.9.1", default-features = false }
+buffa-descriptor = { version = "0.9.1", default-features = false }
+bytes = { version = "1.12", default-features = false }
+cbc = { version = "0.2", features = ["alloc"] }
+chrono = { version = "0.4", default-features = false }
+compact_str = { version = "0.10", default-features = false }
+ctr = { version = "0.10", default-features = false }
+diesel = { version = "2.3.11", default-features = false, features = ["sqlite", "r2d2", "32-column-tables"] }
+diesel_migrations = { version = "2.3.2", default-features = false, features = ["sqlite"] }
+divan = { package = "codspeed-divan-compat", version = "5.0.1" }
+env_logger = { version = "0.11", default-features = false }
+event-listener = { version = "5", default-features = false }
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
+futures = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
+getrandom = { version = "0.4", default-features = false }
+hashbrown = { version = "0.17.1", default-features = false }
+heck = "0.5"
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+hkdf = { version = "0.13.0", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+itoa = "1"
+log = "0.4"
+metrics = "0.24"
+portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
+rand = "0.10"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde-big-array = "0.5"
+serde_json = { version = "1.0", default-features = false }
+sha1 = { version = "0.11.0", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
+# Shared dependencies
+smallvec = "1.15"
+smoothutf8 = { version = "0.2.3", default-features = false }
+subtle = { version = "2.6", default-features = false }
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+uuid = { version = "1", default-features = false }
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+
+# Internal workspace crates
+wacore = { path = "./wacore", default-features = false, version = "0.7.0" }
+wacore-appstate = { path = "./wacore/appstate", default-features = false, version = "0.7.0" }
+wacore-binary = { path = "./wacore/binary", default-features = false, version = "0.7.0" }
+wacore-derive = { path = "./wacore/derive", version = "0.7.0" }
+wacore-libsignal = { path = "./wacore/libsignal", version = "0.7.0" }
+wacore-noise = { path = "./wacore/noise", version = "0.7.0" }
+waproto = { path = "./waproto", version = "0.7.0" }
+yoke = { version = "0.8", features = ["derive"] }
+zerocopy = { version = "0.8.55", default-features = false, features = ["derive"] }
+zlib-rs = { version = "0.6.6", default-features = false, features = ["std", "rust-allocator"] }
+
+[features]
+debug-snapshots = ["wacore/debug-snapshots"]
+# Typed interop with the decoded legacy SessionRecord v1 model, for migrating
+# externally produced auth state. Off by default so native clients carry no
+# migration surface.
+legacy-session-interop = ["wacore/legacy-session-interop"]
+# Generation-scoped extension lifecycle. Kept opt-in so ordinary clients do not
+# retain lifecycle state or branches when no extension host is present.
+client-lifecycle = []
+# Build-time native plugin host. Kept opt-in so clients that do not use plugins
+# retain the pre-host binary footprint.
+plugins = ["client-lifecycle", "dep:bon"]
+# Optional observability. Off by default: no `tracing` dep, zero overhead.
+# Emits tracing spans/events only; the application installs the subscriber
+# (and any OpenTelemetry bridge). See examples/observability.rs.
+tracing = ["dep:tracing", "wacore/tracing"]
+# Optional metrics (counters/histograms/gauges via the `metrics` facade). Off by
+# default: no dependency, zero overhead. Emits only; the application installs a
+# recorder (e.g. metrics-exporter-prometheus). See examples/metrics.rs.
+metrics = ["wacore/metrics"]
+# Render raw phone numbers in tracing fields instead of the redacted `pn#<hash>`.
+# Local debugging only; never enable in production.
+tracing-pii = ["wacore/tracing-pii", "wacore-binary/tracing-pii"]
+danger-skip-tls-verify = ["whatsapp-rust-tokio-transport?/danger-skip-tls-verify"]
+danger-skip-cert-chain-verify = ["wacore/danger-skip-cert-chain-verify"]
+default = [
+    "simd",
+    "sqlite-storage",
+    "tokio-transport",
+    "tokio-runtime",
+    "ureq-client",
+    "tokio-native",
+    "signal",
+]
+simd = ["wacore/simd"]
+ureq-client = ["dep:whatsapp-rust-ureq-http-client"]
+tokio-transport = ["dep:whatsapp-rust-tokio-transport"]
+tokio-runtime = ["dep:tokio"]
+signal = ["tokio-runtime", "tokio/signal"]
+sqlite-storage = ["whatsapp-rust-sqlite-storage"]
+tokio-native = ["tokio-runtime", "tokio/rt-multi-thread"]
+# Shared native VoIP runtime. Public profiles below select which codec implementation is linked.
+voip-runtime = [
+    "wacore/voip",
+    "tokio-runtime",
+    "tokio/net",
+    "dep:webrtc-dtls",
+    "dep:webrtc-sctp",
+    "dep:webrtc-data",
+    "dep:webrtc-util",
+    "dep:webrtc-util-011",
+    "dep:rustls",
+]
+# Backwards-compatible full profile: preserves both codec adapters from the former single feature.
+voip = ["voip-mlow", "voip-libopus"]
+# Codec-bypass profile: raw MLOW/Opus payloads supplied by the application, no codec linked.
+voip-encoded = ["voip-runtime"]
+# Explicit spelling for consumers that assemble feature sets instead of using `voip`.
+voip-mlow = ["voip-runtime", "wacore/voip-mlow"]
+# Optional PCM adapter for standard Opus, including MLOW's CELT escape. Encoded I/O needs no libopus.
+voip-libopus = ["voip-encoded", "dep:opus"]
+
+[dependencies]
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+async-lock = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bon = { workspace = true, optional = true }
+buffa = { workspace = true }
+bytes = { workspace = true }
+# `now` rather than `clock`: only `Utc::now()` is used, and `clock` exists to
+# resolve the local timezone (pulling iana-time-zone and its per-OS backends).
+chrono = { workspace = true, features = ["now"] }
+event-listener = { workspace = true }
+futures = { workspace = true, features = ["std"] }
+smallvec = { workspace = true }
+hashbrown = { workspace = true }
+hex = { workspace = true }
+itoa = { workspace = true }
+log = { workspace = true }
+opus = { version = "0.3", optional = true }
+portable-atomic = { workspace = true }
+rand = { workspace = true }
+# Only with `voip`: lets us install the `ring` rustls CryptoProvider before the DTLS handshake.
+# webrtc-dtls picks rustls' process-default provider, and the tree carries both ring and aws-lc-rs,
+# so without an explicit default the first real handshake panics.
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+scopeguard = "1.2"
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"], optional = true }
+tracing = { workspace = true, optional = true }
+wacore = { workspace = true }
+wacore-binary = { workspace = true }
+waproto = { workspace = true }
+zeroize = { workspace = true }
+webrtc-data = { version = "0.17", optional = true }
+webrtc-dtls = { version = "0.12", optional = true }
+webrtc-sctp = { version = "0.17", optional = true }
+webrtc-util = { version = "0.17", optional = true }
+webrtc-util-011 = { package = "webrtc-util", version = "0.11", optional = true }
+whatsapp-rust-sqlite-storage = { path = "./storages/sqlite-storage", version = "0.7.0", optional = true }
+whatsapp-rust-tokio-transport = { path = "./transports/tokio-transport", version = "0.7.0", optional = true }
+whatsapp-rust-ureq-http-client = { path = "./http_clients/ureq-client", version = "0.7.0", optional = true }
+
+# wasm32-unknown-unknown has no default getrandom backend, so make the browser
+# one available (the only valid choice there) to build the crate standalone:
+# CI wasm guard + downstream consumers like whatsapp-rust-bridge. Gated to the
+# unknown-unknown triple per getrandom's guidance so wasm32-wasi/emscripten keep
+# their own backends and don't pull wasm-bindgen/js-sys. Backend is still
+# selected via `--cfg getrandom_backend="wasm_js"` in RUSTFLAGS; no native effect.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+
+[dev-dependencies]
+aes = { workspace = true }
+cbc = { workspace = true, features = ["block-padding"] }
+env_logger = { workspace = true }
+# `total_listeners()` (how tests observe that a waiter parked) is std-gated.
+event-listener = { workspace = true, features = ["std"] }
+flate2 = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+# Raises real SIGINT/SIGTERM at the current process in the shutdown-signal test.
+libc = "0.2"
+metrics-exporter-prometheus = "0.18"
+sha2 = { workspace = true }
+# Parses the crate sources in tests/error_surface.rs. Text scanning silently
+# missed error enums whose doc comments carried unbalanced braces.
+syn = { version = "3.0", features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { workspace = true, features = ["v4"] }
+wacore = { workspace = true, features = ["test-util"] }
+wacore-noise = { path = "./wacore/noise", features = [
+    "test-util",
+    "danger-skip-cert-chain-verify",
+] }
+
+[lints]
+workspace = true
+
+# The demo client. Needs only the package default features, so a plain
+# `cargo build --example demo` works without `required-features`.
+[[example]]
+name = "demo"
+
+[[example]]
+name = "benchmark"
+required-features = ["danger-skip-tls-verify"]
+
+[[example]]
+name = "observability"
+required-features = ["tracing"]
+
+[[example]]
+name = "metrics"
+required-features = ["metrics"]
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false
+
+# Off-hot-path crates run per connection / sync / request, not per message,
+# so size-optimizing them shrinks the binary at no measurable throughput cost.
+# The per-message/per-frame crypto/protocol crates (libsignal, wacore-binary,
+# waproto, buffa, aes, sha2, hkdf, flate2, curve25519, wacore-noise) stay at
+# opt-level 3 — wacore-noise's NoiseCipher runs the transport AEAD per frame,
+# so despite owning the once-per-connection handshake it is not handshake-only.
+# z = persistence (Diesel/SQLite, I/O-bound), media HTTP (ureq, network-bound),
+# and TLS PKI.
+[profile.release.package.diesel]
+opt-level = "z"
+[profile.release.package.diesel_migrations]
+opt-level = "z"
+[profile.release.package.r2d2]
+opt-level = "z"
+[profile.release.package.whatsapp-rust-sqlite-storage]
+opt-level = "z"
+[profile.release.package.ureq]
+opt-level = "z"
+[profile.release.package.ureq-proto]
+opt-level = "z"
+[profile.release.package.whatsapp-rust-ureq-http-client]
+opt-level = "z"
+[profile.release.package.rustls-webpki]
+opt-level = "z"
+[profile.release.package.webpki-roots]
+opt-level = "z"
+[profile.release.package.http]
+opt-level = "z"
+# s = data-path framing kept a notch faster than z: low throughput for a chat
+# client, but still touched on every frame/record.
+[profile.release.package.rustls]
+opt-level = "s"
+[profile.release.package.tokio-websockets]
+opt-level = "s"
+[profile.release.package.whatsapp-rust-tokio-transport]
+opt-level = "s"
+[profile.release.package.wacore-appstate]
+opt-level = "s"
+[profile.release.package.chrono]
+opt-level = "s"
+[profile.release.package.serde_json]
+opt-level = "s"
+# The bundled SQLite amalgamation (sqlite3.c) — cargo exports OPT_LEVEL to the
+# build script and the cc crate maps it to -Oz. The C core was the one crate
+# the per-package sweep above missed; same I/O-bound tradeoff as diesel.
+[profile.release.package.libsqlite3-sys]
+opt-level = "z"
+
+# Benchmark profile: release-grade codegen, but thin LTO keeps bench builds
+# fast (release uses fat LTO) and debug symbols stay for local profiling.
+[profile.bench]
+inherits = "release"
+lto = "thin"
+debug = 1
+strip = false
+
+# Profiling: optimized with debug symbols for DHAT / heaptrack / perf
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

@@ -36,7 +36,11 @@ pub(super) fn snapshot(db: &Connection) -> IvyJson {
         })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        // Added predicate index changes no retained data/schema contract.
+        .filter(|row| row.1 != "technical_follow_up_item")
+        .collect::<Vec<_>>();
     let tables = schema
         .iter()
         .filter(|row| row.0 == "table")
@@ -51,9 +55,14 @@ pub(super) fn snapshot(db: &Connection) -> IvyJson {
             let projection = std::iter::once("rowid")
                 .chain(columns.iter().map(String::as_str))
                 .flat_map(|column| {
+                    // Compare every original body/history byte. Technical heads
+                    // are derived index projections, checked separately by journal tests.
+                    let expression = if row.1 == "technical_documents" && column == "value_json" {
+                        "COALESCE((SELECT r.value_json FROM technical_revisions r WHERE r.id=technical_documents.id AND r.revision=technical_documents.current_revision),technical_documents.value_json)".to_string()
+                    } else { quote(column) };
                     [
-                        format!("typeof({})", quote(column)),
-                        format!("hex(CAST({} AS BLOB))", quote(column)),
+                        format!("typeof({expression})"),
+                        format!("hex(CAST({expression} AS BLOB))"),
                     ]
                 })
                 .collect::<Vec<_>>();

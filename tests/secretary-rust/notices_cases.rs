@@ -321,7 +321,7 @@ async fn original_notice_main_voice_recovery_and_retry_boundaries() {
                 ]))
             })
             .collect();
-        let mut statement = journal.db.prepare("SELECT id,key,name,current_revision,value_json FROM technical_documents ORDER BY key,name").unwrap();
+        let mut statement = journal.db.prepare("SELECT d.id,d.key,d.name,d.current_revision,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.key,d.name").unwrap();
         let records = statement
             .query_map([], |r| {
                 Ok((

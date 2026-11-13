@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref, toRaw } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -38,37 +38,63 @@ import {
 import { CalendarClock, ChevronRight, Plus, Zap } from "@lucide/vue";
 import type {
   Assignment,
+  AssignmentSummary,
   ContactWindow,
   Document,
   EventTrigger,
   ObjectTrigger,
   RuleOverrides,
   ScheduleTrigger,
+  Pin,
 } from "./types";
 import {
-  listDocuments,
+  listSummaries,
+  summaryPageKey,
   listTopics,
   readDocument,
-  saveAssignment,
   topicChoiceKey,
   tr,
 } from "./runtime";
+import { useWrites } from "./writes";
 import type { TopicChoice } from "./runtime";
 import { usePage } from "../../../packages/ui-client/src/runtime";
 const props = defineProps<{ node: string; root: string }>();
 const assignments = usePage(
   (signal, cursor) =>
-    listDocuments("secretary/assignment", props.root, signal, 100, cursor),
+    listSummaries("secretary/assignment", props.root, signal, 100, cursor),
   15000,
-  () => "secretary-assignments:" + props.root,
+  () => summaryPageKey("secretary/assignment", props.root),
   ["objects/secretary/assignment"],
 );
-const topics = useRemote((signal) => listTopics(signal), 30000, ["services"]);
 const selected = ref<Document<Assignment> | null>(null),
   draft = ref<Assignment | null>(null),
-  busy = ref(false),
   error = ref(""),
   message = ref("");
+const topics = useRemote(
+  (signal) => listTopics(signal),
+  30000,
+  ["services"],
+  () => draft.value?.trigger.kind === "event",
+);
+const writes = useWrites(props.node, props.root);
+const preparing = ref<Record<string, boolean>>({});
+const writeKey = (id: string) => "assignment:" + id;
+const pendingSave = computed(
+  () => draft.value && writes.pending.value[writeKey(draft.value.assignmentId)],
+);
+const busy = computed(() => !!draft.value && rowBusy(draft.value.assignmentId));
+const rowBusy = (id: string) =>
+  !!(preparing.value[writeKey(id)] || writes.active.value[writeKey(id)]);
+const unresolved = computed(() =>
+  writes.unresolved.value.filter(([, write]) => write.kind === "assignment"),
+);
+const opening = ref<Pin | null>(null);
+let openingController: AbortController | null = null;
+onBeforeUnmount(() => {
+  editorGeneration++;
+  openingController?.abort();
+});
+let editorGeneration = 0;
 const schedule = computed(() =>
   draft.value?.trigger.kind === "schedule" ? draft.value.trigger : null,
 );
@@ -127,6 +153,7 @@ const selectedTopicKey = computed(() =>
 const unavailableTopic = computed(
   () =>
     !!event.value?.topic &&
+    !!topics.value.value &&
     !topics.loading.value &&
     !topics.error.value &&
     !selectedTopic.value,
@@ -140,15 +167,37 @@ const weekdays = [
   tr("Fr", "Fri"),
   tr("Sa", "Sat"),
 ];
-const choose = (row: Document<Assignment>) => {
-  selected.value = row;
-  draft.value = structuredClone(row.value);
-  draft.value.execution ??= { model: null, effort: null, reuse: "new" };
-  advancedOpen.value = Object.keys(row.value.rules).length > 0;
+const choose = async (row: Document<AssignmentSummary>) => {
+  const generation = ++editorGeneration;
+  openingController?.abort();
+  openingController = new AbortController();
+  opening.value = row.pin;
+  draft.value = null;
+  selected.value = null;
   error.value = "";
   message.value = "";
+  try {
+    const full = await readDocument(
+      "secretary/assignment",
+      row.pin,
+      props.root,
+      openingController.signal,
+    );
+    if (generation !== editorGeneration) return;
+    selected.value = full;
+    draft.value = structuredClone(full.value);
+    draft.value.execution ??= { model: null, effort: null, reuse: "new" };
+    advancedOpen.value = Object.keys(full.value.rules).length > 0;
+  } catch (cause) {
+    if (generation === editorGeneration) error.value = String(cause);
+  } finally {
+    if (generation === editorGeneration) opening.value = null;
+  }
 };
 const create = () => {
+  editorGeneration++;
+  openingController?.abort();
+  opening.value = null;
   const now = new Date().toISOString();
   selected.value = null;
   advancedOpen.value = false;
@@ -265,6 +314,9 @@ const toggleDay = (day: number) => {
 const rule = (key: "main" | "voice") => draft.value?.rules[key];
 const advancedOpen = ref(false);
 const close = () => {
+  editorGeneration++;
+  openingController?.abort();
+  opening.value = null;
   draft.value = null;
   selected.value = null;
   error.value = "";
@@ -274,28 +326,23 @@ const kinds = computed(() => [
   { value: "event", label: tr("Ereignis", "Event") },
   { value: "object-change", label: tr("Objektänderung", "Object change") },
 ]);
-const triggerSummary = (value: Assignment) => {
-  const trigger = value.trigger;
-  if (trigger.kind === "event")
-    return tr("Bei Ereignis", "On event") + " · " + trigger.topic;
-  if (trigger.kind === "object-change")
-    return (
-      tr("Bei Objektänderung", "On object change") +
-      " · " +
-      trigger.objectIds.length
-    );
-  if (trigger.cadence === "interval")
+const triggerSummary = (value: AssignmentSummary) => {
+  if (value.triggerKind === "event")
+    return tr("Bei Ereignis", "On event") + " · " + value.topic;
+  if (value.triggerKind === "object-change")
+    return tr("Bei Objektänderung", "On object change");
+  if (value.cadence === "interval")
     return tr(
-      `Alle ${trigger.intervalMinutes} Minuten`,
-      `Every ${trigger.intervalMinutes} minutes`,
+      `Alle ${value.intervalMinutes} Minuten`,
+      `Every ${value.intervalMinutes} minutes`,
     );
-  if (trigger.cadence === "weekly")
-    return (
-      trigger.weekdays.map((day) => weekdays[day]).join(", ") +
-      " · " +
-      (trigger.localTime ?? "")
-    );
-  return tr("Täglich", "Daily") + " · " + (trigger.localTime ?? "");
+  return (
+    (value.cadence === "weekly"
+      ? tr("Wöchentlich", "Weekly")
+      : tr("Täglich", "Daily")) +
+    " · " +
+    (value.localTime ?? "")
+  );
 };
 const toggleRule = (key: "main" | "voice", enabled: boolean) => {
   if (!draft.value) return;
@@ -338,9 +385,34 @@ const setWindowMode = (key: "main" | "voice", mode: string) => {
           end: "22:00",
         };
 };
+const accepted = (pin: Pin, value: Assignment, generation: number) => {
+  if (
+    generation === editorGeneration &&
+    draft.value?.assignmentId === value.assignmentId &&
+    (!selected.value || selected.value.pin.revision <= pin.revision)
+  ) {
+    const submitted = JSON.stringify(value);
+    selected.value = { pin, value: structuredClone(value), name: value.name };
+    if (JSON.stringify(draft.value) === submitted)
+      draft.value = structuredClone(value);
+    message.value = tr(
+      `Revision ${pin.revision} gespeichert.`,
+      `Saved revision ${pin.revision}.`,
+    );
+  }
+  void assignments.refresh();
+};
+async function check(key: string) {
+  const generation = editorGeneration;
+  const result = await writes.execute(key);
+  if (result)
+    accepted(result.pin, result.write.value as Assignment, generation);
+}
 async function save() {
   if (!draft.value || busy.value) return;
-  busy.value = true;
+  const generation = editorGeneration,
+    key = writeKey(draft.value.assignmentId);
+  preparing.value[key] = true;
   error.value = "";
   message.value = "";
   try {
@@ -353,39 +425,62 @@ async function save() {
       objects.value.objectIds = [...new Set(objects.value.objectIds)];
       objects.value.paths = [...new Set(objects.value.paths)];
     }
-    const pin = await saveAssignment(
-        props.node,
-        selected.value?.pin ?? null,
-        draft.value,
-      ),
-      loaded = await readDocument("secretary/assignment", pin, props.root);
-    selected.value = loaded;
-    draft.value = structuredClone(loaded.value);
-    message.value = tr(
-      `Revision ${pin.revision} gespeichert.`,
-      `Saved revision ${pin.revision}.`,
+    await writes.prepare(
+      key,
+      "assignment",
+      selected.value?.pin ? { ...selected.value.pin } : null,
+      structuredClone(toRaw(draft.value)),
     );
-    await assignments.refresh();
-  } catch (failure) {
-    error.value = failure instanceof Error ? failure.message : String(failure);
+    const result = await writes.execute(key);
+    if (result)
+      accepted(result.pin, result.write.value as Assignment, generation);
+  } catch (cause) {
+    if (generation === editorGeneration) error.value = String(cause);
   } finally {
-    busy.value = false;
+    preparing.value[key] = false;
   }
 }
-async function toggle(row: Document<Assignment>) {
-  if (busy.value) return;
-  busy.value = true;
+async function toggle(row: Document<AssignmentSummary>) {
+  const key = writeKey(row.value.assignmentId);
+  if (rowBusy(row.value.assignmentId)) return;
+  preparing.value[key] = true;
   error.value = "";
   try {
-    await saveAssignment(props.node, row.pin, {
-      ...structuredClone(row.value),
-      enabled: !row.value.enabled,
-    });
-    await assignments.refresh();
-  } catch (failure) {
-    error.value = failure instanceof Error ? failure.message : String(failure);
+    if (!writes.pending.value[key]) {
+      // The displayed revision determines both the desired state and CAS pin.
+      // Reading its body cannot silently turn a newer assignment back on/off.
+      const originalPin = { ...row.pin },
+        enabled = !row.value.enabled;
+      const full = await readDocument(
+        "secretary/assignment",
+        originalPin,
+        props.root,
+      );
+      await writes.prepare(key, "assignment", full.pin, {
+        ...full.value,
+        enabled,
+      });
+    }
+    const result = await writes.execute(key);
+    if (result) {
+      const value = result.write.value as Assignment;
+      const current = assignments.value.value?.items.find(
+        (item) => item.pin.objectId === result.pin.objectId,
+      );
+      if (current && current.pin.revision <= result.pin.revision) {
+        current.pin = result.pin;
+        current.value = {
+          ...current.value,
+          enabled: value.enabled,
+          name: value.name,
+        };
+      }
+      void assignments.refresh();
+    }
+  } catch (cause) {
+    error.value = String(cause);
   } finally {
-    busy.value = false;
+    preparing.value[key] = false;
   }
 }
 </script>
@@ -482,9 +577,28 @@ async function toggle(row: Document<Assignment>) {
       "
       @retry="assignments.refresh"
     />
-    <Alert v-if="error && !draft" variant="destructive"
-      ><AlertDescription>{{ error }}</AlertDescription></Alert
+    <Alert v-if="(error || writes.error.value) && !draft" variant="destructive"
+      ><AlertDescription>{{
+        error || writes.error.value
+      }}</AlertDescription></Alert
     >
+    <Alert v-for="[key, write] in unresolved" :key="key">
+      <AlertDescription class="flex flex-wrap items-center gap-2">
+        <span
+          >{{ (write.value as Assignment).name }} ·
+          {{
+            tr("Änderung noch nicht bestätigt.", "Change not confirmed yet.")
+          }}</span
+        >
+        <Button
+          size="sm"
+          variant="outline"
+          :disabled="rowBusy((write.value as Assignment).assignmentId)"
+          @click="check(key)"
+          >{{ tr("Erneut prüfen", "Check again") }}</Button
+        >
+      </AlertDescription>
+    </Alert>
     <ul
       v-if="assignments.value.value?.items.length"
       class="divide-y overflow-hidden rounded-lg border bg-card"
@@ -496,7 +610,7 @@ async function toggle(row: Document<Assignment>) {
         :class="{ 'bg-muted/50': selected?.pin.objectId === row.pin.objectId }"
       >
         <component
-          :is="row.value.trigger.kind === 'schedule' ? CalendarClock : Zap"
+          :is="row.value.triggerKind === 'schedule' ? CalendarClock : Zap"
           class="size-4 shrink-0 text-muted-foreground"
           aria-hidden="true"
         />
@@ -514,7 +628,7 @@ async function toggle(row: Document<Assignment>) {
         </Button>
         <Switch
           :model-value="row.value.enabled"
-          :disabled="busy"
+          :disabled="rowBusy(row.value.assignmentId)"
           :aria-label="row.value.name"
           @update:model-value="toggle(row)"
         />
@@ -531,7 +645,7 @@ async function toggle(row: Document<Assignment>) {
     />
   </section>
 
-  <Sheet :open="!!draft" @update:open="!$event && close()">
+  <Sheet :open="!!draft || !!opening" @update:open="!$event && close()">
     <SheetContent class="w-full gap-0 overflow-y-auto p-0 sm:max-w-xl">
       <SheetHeader class="border-b">
         <SheetTitle>{{
@@ -546,6 +660,13 @@ async function toggle(row: Document<Assignment>) {
           )
         }}</SheetDescription>
       </SheetHeader>
+      <RemoteState
+        v-if="opening"
+        class="p-4"
+        :loading="true"
+        :error="null"
+        :has-data="false"
+      />
       <form v-if="draft" class="flex flex-1 flex-col" @submit.prevent="save">
         <div class="flex-1 space-y-8 p-4">
           <FieldGroup>
@@ -1165,8 +1286,10 @@ async function toggle(row: Document<Assignment>) {
               </FieldSet>
             </CollapsibleContent>
           </Collapsible>
-          <Alert v-if="error" variant="destructive"
-            ><AlertDescription>{{ error }}</AlertDescription></Alert
+          <Alert v-if="error || writes.error.value" variant="destructive"
+            ><AlertDescription>{{
+              error || writes.error.value
+            }}</AlertDescription></Alert
           >
         </div>
         <div
@@ -1186,7 +1309,9 @@ async function toggle(row: Document<Assignment>) {
           <Button type="submit" :disabled="busy">{{
             busy
               ? tr("Speichert…", "Saving…")
-              : tr("Auftrag speichern", "Save assignment")
+              : pendingSave
+                ? tr("Erneut prüfen", "Check again")
+                : tr("Auftrag speichern", "Save assignment")
           }}</Button>
         </div>
       </form>

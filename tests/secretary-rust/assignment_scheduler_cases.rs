@@ -19,6 +19,31 @@ impl Clock for SchedulerClock {
     }
 }
 #[tokio::test]
+async fn automatic_target_does_not_guess_between_accounts() {
+    let bytes = reference_data::read(include_bytes!("assignment-scheduler-cases.json.gz"));
+    let corpus = parse(std::str::from_utf8(&bytes).unwrap(), 32 * 1024 * 1024).unwrap();
+    let input = corpus.required("rows").unwrap().as_array().unwrap()[0].required("input").unwrap();
+    for count in [0, 1, 2] {
+        let steps = input.required("steps").unwrap().as_array().unwrap();
+        let mut discovery = steps[2].clone();
+        let owner = discovery.required("value").unwrap().required("backends").unwrap().as_array().unwrap()[0].clone();
+        let mut owners = vec![owner; count];
+        if count == 2 {
+            let mut backend = owners[1].required("backend").unwrap().clone();
+            backend.insert("backendId", "personal".into());
+            backend.insert("accountId", "personal".into());
+            owners[1].insert("backend", backend);
+        }
+        discovery.insert("value", IvyJson::object([("backends", IvyJson::Array(owners))]));
+        let client = Arc::new(Scripted { steps: Mutex::new(vec![steps[1].clone(), discovery].into()), trace: Mutex::new(Vec::new()) });
+        let tools = ToolClients::new(client.clone());
+        let selected = ivy_secretary::agent_target::AgentSelection::discover(&tools, "fixture.agent".into(), &"fixture-host".into()).await.unwrap();
+        assert_eq!(selected.is_some(), count == 1);
+        if let Some(selected) = selected { assert_eq!(selected.backend.unwrap().account_id(), "work"); }
+        assert!(client.steps.lock().unwrap().is_empty());
+    }
+}
+#[tokio::test]
 async fn original_scheduler_target_configuration_and_execution_admission() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = reference_data::read(include_bytes!("assignment-scheduler-cases.json.gz"));

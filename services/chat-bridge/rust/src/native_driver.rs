@@ -13,7 +13,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, agent_schema::validate_agent,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -774,7 +774,7 @@ fn immutable(value: &Json) -> Json {
     result
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {

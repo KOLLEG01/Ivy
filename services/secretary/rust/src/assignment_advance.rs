@@ -4,7 +4,7 @@ use crate::{
     assignment_driver::{CollectedPreflight, PreflightWork},
     assignment_execution::AssignmentExecution,
     assignment_message::{message_batch, message_conversation_unread},
-    assignment_runner::release_calls,
+    assignment_runner::{ExecutionPhase, release_calls},
     inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
@@ -12,8 +12,8 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::clock::parse_date;
 use std::collections::HashSet;
 
-fn phase(current: &IvyJson, expected: &str) -> bool {
-    current.get("value").and_then(|v| v.get("phase")) == Some(&expected.into())
+fn phase(current: &IvyJson, expected: ExecutionPhase) -> bool {
+    ExecutionPhase::read(current.get("value").and_then(|v| v.get("phase"))) == Some(expected)
 }
 fn unknown(current: &IvyJson) -> bool {
     current
@@ -55,6 +55,9 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
         issues: &dyn RecoveryIssues,
     ) -> IvyResult<()> {
         let execution = self.execution;
+        if crate::assignment_cleanup::blocked(current.required("value")?) {
+            return Ok(());
+        }
         let evidence = execution.native.evidence;
         let store = evidence.store;
         let tools = execution.native.tools.as_ref();
@@ -65,17 +68,17 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             minimum_notification_age_minutes: self.minimum_notification_age_minutes,
         };
         let mut current = current.clone();
+        let mut decision = None;
         release_calls(store.journal, current.required("value")?)?;
-        if ["settled", "deleted", "failed"]
-            .iter()
-            .any(|p| phase(&current, p))
+        if ExecutionPhase::read(current.required("value")?.get("phase"))
+            .is_some_and(ExecutionPhase::terminal)
         {
-            if phase(&current, "settled") && unknown(&current) {
+            if phase(&current, ExecutionPhase::Settled) && unknown(&current) {
                 delivery.step_with_issues(&current, issues).await?;
             }
             return Ok(());
         }
-        if phase(&current, "queued") {
+        if phase(&current, ExecutionPhase::Queued) {
             let value = current.required("value")?;
             let payload = value.required("trigger")?.required("payload")?;
             let batch = message_batch(payload);
@@ -98,7 +101,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                 {
                     let now = execution.now()?;
                     let mut next = value.clone();
-                    next.insert("phase", "settled".into());
+                    next.insert("phase", ExecutionPhase::Settled.json());
                     next.insert("result", "{\"schemaVersion\":1,\"urgency\":\"low\",\"notification\":\"none\",\"text\":\"\",\"reason\":\"Conversation was read before the review.\"}".into());
                     next.insert("completedAt", IvyJson::String(now.clone()));
                     next.insert("updatedAt", IvyJson::String(now));
@@ -114,13 +117,18 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                 .is_some_and(|v| !v.is_null());
             next.insert(
                 "phase",
-                if command { "preflight" } else { "starting" }.into(),
+                if command {
+                    ExecutionPhase::Preflight
+                } else {
+                    ExecutionPhase::Starting
+                }
+                .json(),
             );
             next.insert("startedAt", IvyJson::String(now.clone()));
             next.insert("updatedAt", IvyJson::String(now));
             current = execution.update(&current, &next).await?;
         }
-        if phase(&current, "preflight") {
+        if phase(&current, ExecutionPhase::Preflight) {
             let id = current
                 .required("value")?
                 .required("executionId")?
@@ -136,7 +144,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                     current.required("pin")?.required("objectId")?,
                 )
                 .await?;
-            if !phase(&current, "preflight") {
+            if !phase(&current, ExecutionPhase::Preflight) {
                 return Ok(());
             }
             let value = current.required("value")?;
@@ -153,7 +161,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             let mut next = value.clone();
             if target.get("hostId") != evidence.settings.required("identity")?.get("hostId") {
                 let now = execution.now()?;
-                next.insert("phase", "failed".into());
+                next.insert("phase", ExecutionPhase::Failed.json());
                 next.insert("errorCode", "secretary_preflight_host_mismatch".into());
                 next.insert("completedAt", IvyJson::String(now.clone()));
                 next.insert("updatedAt", IvyJson::String(now));
@@ -167,13 +175,19 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             preflight.admit(id, current).await;
             return Ok(());
         }
-        if phase(&current, "starting") {
+        if phase(&current, ExecutionPhase::Starting) {
             current = execution.start(&current).await?;
         }
-        if phase(&current, "running") {
-            current = execution.run(&current).await?;
+        if phase(&current, ExecutionPhase::Running) {
+            let progress = execution.run(&current).await?;
+            current = progress.document;
+            decision = progress.decision;
         }
-        if phase(&current, "completed") && delivery.step_with_issues(&current, issues).await? {
+        if phase(&current, ExecutionPhase::Completed)
+            && delivery
+                .step_with_decision(&current, decision.as_ref(), issues)
+                .await?
+        {
             current = store
                 .read(
                     Record::Execution,
@@ -184,22 +198,22 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             next.insert(
                 "phase",
                 if reused(&next) {
-                    "settled"
+                    ExecutionPhase::Settled
                 } else {
-                    "archiving"
+                    ExecutionPhase::Archiving
                 }
-                .into(),
+                .json(),
             );
             next.insert("updatedAt", IvyJson::String(execution.now()?));
             current = execution.update(&current, &next).await?;
         }
-        if phase(&current, "archived") && unknown(&current) {
+        if phase(&current, ExecutionPhase::Archived) && unknown(&current) {
             delivery.step_with_issues(&current, issues).await?;
         }
-        if phase(&current, "archiving") {
+        if phase(&current, ExecutionPhase::Archiving) {
             current = execution.archive(&current).await?;
         }
-        if phase(&current, "archived") {
+        if phase(&current, ExecutionPhase::Archived) {
             if let Some(due) = current
                 .required("value")?
                 .get("deleteAfter")
@@ -208,13 +222,13 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             {
                 if parse_date(due) <= execution.clock.utc_millis() as f64 {
                     let mut next = current.required("value")?.clone();
-                    next.insert("phase", "deleting".into());
+                    next.insert("phase", ExecutionPhase::Deleting.json());
                     next.insert("updatedAt", IvyJson::String(execution.now()?));
                     current = execution.update(&current, &next).await?;
                 }
             }
         }
-        if phase(&current, "deleting") {
+        if phase(&current, ExecutionPhase::Deleting) {
             execution.remove(&current).await?;
         }
         Ok(())

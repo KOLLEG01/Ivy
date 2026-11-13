@@ -1,7 +1,10 @@
+#[path = "fixtures/chat-signal-session.rs"]
+mod signal_fixture;
 use ivy_chat_bridge::whatsapp::{
     auth::{AuthAccount, AuthStore},
     auth_backend::NativeAuthStore,
     identity::identity,
+    journal::OutputState,
     journal_io::JournalIo,
     journal_owner::Journal,
     message_wire::message_json,
@@ -13,7 +16,7 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use ivy_sdk::clock::Clock;
-use base64::{Engine, engine::general_purpose::STANDARD};
+use signal_fixture::native_session_with_long_current_chain;
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -174,11 +177,18 @@ async fn socket(
     let wakes = Arc::new(AtomicUsize::new(0));
     let count = wakes.clone();
     socket.bind(RuntimeCallbacks {
-        wake: Arc::new(move || {
+        wake: Arc::new(move |_| {
             count.fetch_add(1, Ordering::SeqCst);
         }),
         automatic_notifications: Arc::new(|| Box::pin(async { Ok(false) })),
-        file_workspace: Arc::new(|_| Box::pin(async { Err(ivy_contracts::IvyError::new("service_not_ready", "No Main in this socket fixture.")) })),
+        file_workspace: Arc::new(|_| {
+            Box::pin(async {
+                Err(ivy_contracts::IvyError::new(
+                    "service_not_ready",
+                    "No Main in this socket fixture.",
+                ))
+            })
+        }),
     });
     (socket, journal, backend, clock, network, wakes)
 }
@@ -216,7 +226,7 @@ fn file_workspace() -> Json {
 }
 fn bind_files(socket: &WhatsAppSocket, workspace: Json) {
     socket.bind(RuntimeCallbacks {
-        wake: Arc::new(|| {}),
+        wake: Arc::new(|_| {}),
         automatic_notifications: Arc::new(|| Box::pin(async { Ok(false) })),
         file_workspace: Arc::new(move |caller| {
             assert_eq!(caller, JsString::from("synthetic-principal"));
@@ -228,32 +238,96 @@ fn bind_files(socket: &WhatsAppSocket, workspace: Json) {
 fn queue_file(journal: &Journal, operation: &str, now: i64) -> String {
     use ivy_contracts::hash::{digest, hash_json};
     let caller: Json = "synthetic-principal".into();
-    let key = format!("file:{}", identity(&[caller.clone(), operation.into()]).unwrap());
-    let id = identity(&["file".into(), caller.clone(), operation.into()]).unwrap()[..32].to_ascii_uppercase();
+    let key = format!(
+        "file:{}",
+        identity(&[caller.clone(), operation.into()]).unwrap()
+    );
+    let id = identity(&["file".into(), caller.clone(), operation.into()]).unwrap()[..32]
+        .to_ascii_uppercase();
     let cfg = config();
     let workspace = file_workspace();
     let saved = Json::object([
-        ("caller", caller), ("expectedBridge", workspace.required("expectedBridge").unwrap().clone()),
+        ("caller", caller),
+        (
+            "expectedBridge",
+            workspace.required("expectedBridge").unwrap().clone(),
+        ),
         ("requestHash", digest(b"request").into()),
-        ("transportHash", hash_json(&Json::object([
-            ("account", cfg.required("accountId").unwrap().clone()),
-            ("bot", cfg.required("botPhoneNumber").unwrap().clone()),
-            ("sender", cfg.required("senders").unwrap().as_array().unwrap()[0].clone())
-        ])).unwrap().into()),
-        ("bytesBase64", STANDARD.encode(b"original bytes").into()), ("caption", Json::Null),
-        ("delivery", Json::object([
-            ("operationId", operation.into()), ("binding", workspace.required("binding").unwrap().required("object").unwrap().clone()),
-            ("channel", workspace.required("channels").unwrap().as_array().unwrap()[0].required("channel").unwrap().clone()),
-            ("file", Json::object([("filename", "note.txt".into()), ("mediaType", "text/plain".into()), ("byteLength", 14.0.into()), ("contentHash", digest(b"original bytes").into())])),
-            ("kind", "document".into()), ("messageId", id.as_str().into()), ("state", "queued".into()), ("errorCode", Json::Null),
-            ("createdAt", ivy_sdk::clock::date_to_iso(now as f64).unwrap().into()), ("updatedAt", ivy_sdk::clock::date_to_iso(now as f64).unwrap().into())
-        ]))
+        (
+            "transportHash",
+            hash_json(&Json::object([
+                ("account", cfg.required("accountId").unwrap().clone()),
+                ("bot", cfg.required("botPhoneNumber").unwrap().clone()),
+                (
+                    "sender",
+                    cfg.required("senders").unwrap().as_array().unwrap()[0].clone(),
+                ),
+            ]))
+            .unwrap()
+            .into(),
+        ),
+        ("caption", Json::Null),
+        (
+            "delivery",
+            Json::object([
+                ("operationId", operation.into()),
+                (
+                    "binding",
+                    workspace
+                        .required("binding")
+                        .unwrap()
+                        .required("object")
+                        .unwrap()
+                        .clone(),
+                ),
+                (
+                    "channel",
+                    workspace.required("channels").unwrap().as_array().unwrap()[0]
+                        .required("channel")
+                        .unwrap()
+                        .clone(),
+                ),
+                (
+                    "file",
+                    Json::object([
+                        ("filename", "note.txt".into()),
+                        ("mediaType", "text/plain".into()),
+                        ("byteLength", 14.0.into()),
+                        ("contentHash", digest(b"original bytes").into()),
+                    ]),
+                ),
+                ("kind", "document".into()),
+                ("messageId", id.as_str().into()),
+                ("state", "queued".into()),
+                ("errorCode", Json::Null),
+                (
+                    "createdAt",
+                    ivy_sdk::clock::date_to_iso(now as f64).unwrap().into(),
+                ),
+                (
+                    "updatedAt",
+                    ivy_sdk::clock::date_to_iso(now as f64).unwrap().into(),
+                ),
+            ]),
+        ),
     ]);
-    journal.access(|j| {
-        j.enqueue_attachment(&id, "15555550101@s.whatsapp.net", "", now)?;
-        j.set(&key, &saved)?;
-        j.set(&format!("out-file:{id}"), &key.into())
-    }).unwrap();
+    journal
+        .access(|j| {
+            j.try_transaction(|j| -> ivy_contracts::IvyResult<()> {
+                j.enqueue_attachment(&id, "15555550101@s.whatsapp.net", "", now)?;
+                j.write(
+                    "INSERT INTO file_bytes(id,byte_length,content) VALUES(?,?,?)",
+                    vec![
+                        rusqlite::types::Value::Text(id.clone()),
+                        rusqlite::types::Value::Integer(14),
+                        rusqlite::types::Value::Blob(b"original bytes".to_vec()),
+                    ],
+                )?;
+                j.set(&key, &saved)?;
+                j.set(&format!("out-file:{id}"), &key.into())
+            })
+        })
+        .unwrap();
     id
 }
 
@@ -266,20 +340,56 @@ async fn file_dispatch_survives_cancel_without_resubmission_and_reconciles_recip
     let id = queue_file(&journal, "file-original", clock.utc_millis());
     let files = ChatFiles::with_clock(journal.clone(), config(), clock.clone());
     assert_eq!(files.payload(&id).unwrap().bytes, b"original bytes");
-    socket.observe(&Event::Connected(Connected::builder().build())).await.unwrap();
-    if let Ok(result) = tokio::time::timeout(Duration::from_millis(50), socket.flush()).await { result.unwrap(); }
+    socket
+        .observe(&Event::Connected(Connected::builder().build()))
+        .await
+        .unwrap();
+    if let Ok(result) = tokio::time::timeout(Duration::from_millis(50), socket.flush()).await {
+        result.unwrap();
+    }
     let caller: JsString = "synthetic-principal".into();
     let operation: JsString = "file-original".into();
     let receipt = || files.read_operation(&caller, &operation);
     // A cancelled upload is uncertain. Repeated flushes must never upload again.
-    for _ in 0..2 { socket.flush().await.unwrap(); }
-    assert_eq!(receipt().await.unwrap().required("state").unwrap(), &Json::from("outcome_unknown"));
+    for _ in 0..2 {
+        socket.flush().await.unwrap();
+    }
+    assert_eq!(
+        receipt().await.unwrap().required("state").unwrap(),
+        &Json::from("outcome_unknown")
+    );
     let calls = network.calls.load(Ordering::SeqCst);
-    socket.observe(&Event::ServerAck(ServerAck::builder().id(id.clone()).class("message".into()).from("15555550109@s.whatsapp.net".parse().unwrap()).build())).await.unwrap();
-    assert_eq!(receipt().await.unwrap().required("state").unwrap(), &Json::from("outcome_unknown"));
-    socket.observe(&Event::ServerAck(ServerAck::builder().id(id.clone()).class("message".into()).from("15555550101:8@s.whatsapp.net".parse().unwrap()).build())).await.unwrap();
-    files.mark(&id, OutputState::Unknown, Some("late_observer")).unwrap();
-    assert_eq!(receipt().await.unwrap().required("state").unwrap(), &Json::from("sent"));
+    socket
+        .observe(&Event::ServerAck(
+            ServerAck::builder()
+                .id(id.clone())
+                .class("message".into())
+                .from("15555550109@s.whatsapp.net".parse().unwrap())
+                .build(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt().await.unwrap().required("state").unwrap(),
+        &Json::from("outcome_unknown")
+    );
+    socket
+        .observe(&Event::ServerAck(
+            ServerAck::builder()
+                .id(id.clone())
+                .class("message".into())
+                .from("15555550101:8@s.whatsapp.net".parse().unwrap())
+                .build(),
+        ))
+        .await
+        .unwrap();
+    files
+        .mark(&id, OutputState::Unknown, Some("late_observer"))
+        .unwrap();
+    assert_eq!(
+        receipt().await.unwrap().required("state").unwrap(),
+        &Json::from("sent")
+    );
     assert!(files.payload(&id).is_err());
     assert_eq!(network.calls.load(Ordering::SeqCst), calls);
     socket.close().await.unwrap();
@@ -292,22 +402,54 @@ async fn file_dispatch_refuses_changed_binding_and_corrupt_bytes_before_network(
     let (socket, journal, _, clock, network, _) = socket(&fixture.0).await;
     let changed = queue_file(&journal, "changed", clock.utc_millis());
     let mut workspace = file_workspace();
-    workspace.insert("binding", parse(r#"{"object":{"objectId":"binding","revision":2}}"#, usize::MAX).unwrap());
+    workspace.insert(
+        "binding",
+        parse(
+            r#"{"object":{"objectId":"binding","revision":2}}"#,
+            usize::MAX,
+        )
+        .unwrap(),
+    );
     bind_files(&socket, workspace);
-    socket.observe(&Event::Connected(Connected::builder().build())).await.unwrap();
+    socket
+        .observe(&Event::Connected(Connected::builder().build()))
+        .await
+        .unwrap();
     socket.flush().await.unwrap();
-    let files = ivy_chat_bridge::files::ChatFiles::with_clock(journal.clone(), config(), clock.clone());
-    let receipt = files.read_operation(&"synthetic-principal".into(), &"changed".into()).await.unwrap();
+    let files =
+        ivy_chat_bridge::files::ChatFiles::with_clock(journal.clone(), config(), clock.clone());
+    let receipt = files
+        .read_operation(&"synthetic-principal".into(), &"changed".into())
+        .await
+        .unwrap();
     assert_eq!(receipt.required("state").unwrap(), &Json::from("failed"));
-    assert_eq!(receipt.required("errorCode").unwrap(), &Json::from("chat_file_target_changed"));
+    assert_eq!(
+        receipt.required("errorCode").unwrap(),
+        &Json::from("chat_file_target_changed")
+    );
     assert!(files.payload(&changed).is_err());
     bind_files(&socket, file_workspace());
     let corrupt = queue_file(&journal, "corrupt", clock.utc_millis());
-    let key = journal.get(&format!("out-file:{corrupt}")).unwrap().as_str().unwrap();
-    let mut saved = journal.get(&key).unwrap(); saved.insert("bytesBase64", "Y29ycnVwdA==".into()); journal.set(&key, &saved).unwrap();
+    journal
+        .access(|j| {
+            Ok(j.write(
+                "UPDATE file_bytes SET byte_length=7,content=? WHERE id=?",
+                vec![
+                    rusqlite::types::Value::Blob(b"corrupt".to_vec()),
+                    rusqlite::types::Value::Text(corrupt.clone()),
+                ],
+            )?)
+        })
+        .unwrap();
     socket.flush().await.unwrap();
-    let receipt = files.read_operation(&"synthetic-principal".into(), &"corrupt".into()).await.unwrap();
-    assert_eq!(receipt.required("errorCode").unwrap(), &Json::from("chat_file_integrity"));
+    let receipt = files
+        .read_operation(&"synthetic-principal".into(), &"corrupt".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.required("errorCode").unwrap(),
+        &Json::from("chat_file_integrity")
+    );
     assert_eq!(network.calls.load(Ordering::SeqCst), 0);
     socket.close().await.unwrap();
     journal.close().await.unwrap();
@@ -489,7 +631,7 @@ async fn native_socket_retains_cancelled_attempts_until_a_correlated_receipt_and
         .await
         .unwrap();
     // An unconnected native client waits for login. Cancelling the observer
-    // must retain the exact attempt and message ID for the next retry.
+    // must retain the exact attempt and message ID until a matching receipt.
     if let Ok(result) = tokio::time::timeout(Duration::from_millis(50), socket.flush()).await {
         result.unwrap();
     }
@@ -535,7 +677,7 @@ async fn native_socket_retains_cancelled_attempts_until_a_correlated_receipt_and
             .required("count")
             .unwrap()
             .as_f64(),
-        Some(3.0)
+        Some(1.0)
     );
     let wrong = ServerAck::builder()
         .id(first.clone())
@@ -698,6 +840,82 @@ async fn native_socket_refuses_failed_inbound_commits_before_waking_main() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn unknown_original_survives_restart_and_reports_its_status_without_resubmission() {
+    let fixture = Fixture::new();
+    let (first, journal, _, clock, _, _) = socket(&fixture.0).await;
+    let id = journal
+        .access(|j| {
+            Ok(j.enqueue(
+                &"original-unknown".into(),
+                "15555550101@s.whatsapp.net",
+                &"Original 😀".into(),
+                false,
+                clock.utc_millis(),
+            )?[0]
+                .clone())
+        })
+        .unwrap();
+    let attempt = Json::object([
+        ("count", Json::Number(3.0)),
+        ("at", Json::Number(clock.utc_millis() as f64)),
+    ]);
+    journal
+        .access(|j| {
+            j.try_transaction(|j| {
+                j.mark(&id, OutputState::Unknown)?;
+                j.set(&format!("send-attempt:{id}"), &attempt)
+            })
+        })
+        .unwrap();
+    journal.flush().await.unwrap();
+    first.close().await.unwrap();
+    journal.close().await.unwrap();
+    let (restarted, journal, _, _, network, _) = socket(&fixture.0).await;
+    restarted
+        .observe(&Event::Connected(Connected::builder().build()))
+        .await
+        .unwrap();
+    restarted.flush().await.unwrap();
+    assert_eq!(
+        restarted.status().get("errorCode"),
+        Some(&Json::from("whatsapp_delivery_unknown"))
+    );
+    assert!(!restarted.needs_output());
+    assert_eq!(journal.get(&format!("send-attempt:{id}")).unwrap(), attempt);
+    let original: (String, String, String) = journal
+        .access(|j| {
+            Ok(j.connection()
+                .query_row(
+                    "SELECT jid,text,state FROM outgoing WHERE id=?",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap())
+        })
+        .unwrap();
+    assert_eq!(
+        original,
+        (
+            "15555550101@s.whatsapp.net".into(),
+            "Original 😀".into(),
+            "unknown".into()
+        )
+    );
+    let correct = ServerAck::builder()
+        .id(id.clone())
+        .class("message".into())
+        .from("15555550101:8@s.whatsapp.net".parse().unwrap())
+        .build();
+    restarted.observe(&Event::ServerAck(correct)).await.unwrap();
+    restarted.flush().await.unwrap();
+    assert!(journal.access(|j| j.sent(&[id])).unwrap());
+    assert!(restarted.status().get("errorCode").unwrap().is_null());
+    assert_eq!(network.calls.load(Ordering::SeqCst), 0);
+    restarted.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn native_socket_refuses_a_different_persisted_account_before_constructing_the_client() {
     let fixture = Fixture::new();
     let backend = backend(&fixture.0, "15555550999").await;
@@ -728,4 +946,180 @@ async fn native_socket_refuses_a_different_persisted_account_before_constructing
     );
     backend.close().unwrap();
     journal.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_signal_durability_preserves_unprojectable_archives_and_original_json_across_restart()
+ {
+    use ivy_chat_bridge::whatsapp::auth_signal;
+    use wacore::{libsignal::protocol::SessionRecord, store::traits::SignalStore};
+    let fixture = Fixture::new();
+    let backend = backend(&fixture.0, "15555550102").await;
+    let device = backend.load().await.unwrap().unwrap();
+    let mut record = native_session_with_long_current_chain(&device);
+    let baseline = record.serialize().unwrap();
+    let mut original =
+        auth_signal::encode(SessionRecord::deserialize(&baseline).unwrap(), None, 1000).unwrap();
+    original.insert("opaque", "Original extension 😀".into());
+    let raw = format!(" \n{}\n", stringify(&original, usize::MAX).unwrap());
+    let store = AuthStore::open(fixture.0.join("auth.sqlite")).unwrap();
+    store.set("session", "9001002_1.0", Some(&raw)).unwrap();
+    record.reserve_sender_chain_counters(2501);
+    let ceiling = record.reserved_sender_chain_index();
+    let bytes = record.serialize().unwrap();
+    assert!(
+        SessionRecord::deserialize(&bytes)
+            .unwrap()
+            .into_legacy_session_v1_operational()
+            .is_err(),
+        "A valid native archive cannot always be represented in v1 JSON"
+    );
+    backend.put_session("9001002@lid.0", &bytes).await.unwrap();
+    assert_eq!(
+        backend
+            .get_session("9001002@lid.0")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        bytes
+    );
+    assert!(
+        backend
+            .get_session("9001002@s.whatsapp.net.0")
+            .await
+            .unwrap()
+            .is_none(),
+        "Signal namespaces must stay distinct"
+    );
+    assert_eq!(
+        store.get("session", "9001002_1.0").unwrap().as_deref(),
+        Some(raw.as_str())
+    );
+    backend.close().unwrap();
+
+    let reopened = Arc::new(NativeAuthStore::new(
+        AuthAccount::acquire(&fixture.0.join("auth.sqlite"), &fixture.0.join("owner")).unwrap(),
+    ));
+    let recovered = reopened
+        .get_session("9001002@lid.0")
+        .await
+        .unwrap()
+        .unwrap();
+    let recovered = SessionRecord::deserialize(&recovered).unwrap();
+    assert_eq!(recovered.previous_session_count(), 1);
+    assert_eq!(
+        recovered
+            .session_state()
+            .unwrap()
+            .get_sender_chain_key()
+            .unwrap()
+            .index(),
+        ceiling
+    );
+    let network = OfflineNetwork::default();
+    let bot = whatsapp_rust::bot::Bot::builder()
+        .with_backend_arc(reopened.clone())
+        .with_transport_factory(network.clone())
+        .with_http_client(network.clone())
+        .skip_history_sync()
+        .build()
+        .await
+        .unwrap();
+    let client = bot.client();
+    let (_, ciphertext) = client
+        .signal()
+        .encrypt_message(&"9001002@lid".parse().unwrap(), b"offline original state")
+        .await
+        .unwrap();
+    assert!(!ciphertext.is_empty());
+    assert_eq!(network.calls.load(Ordering::SeqCst), 0);
+    let advanced = reopened
+        .get_session("9001002@lid.0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(advanced.as_ref(), bytes);
+    let advanced_ceiling = SessionRecord::deserialize(&advanced)
+        .unwrap()
+        .reserved_sender_chain_index();
+    assert!(advanced_ceiling > ceiling);
+    assert_eq!(
+        store.get("session", "9001002_1.0").unwrap().as_deref(),
+        Some(raw.as_str())
+    );
+    drop(client);
+    drop(bot);
+    reopened.close().unwrap();
+    let restarted = NativeAuthStore::new(
+        AuthAccount::acquire(&fixture.0.join("auth.sqlite"), &fixture.0.join("owner")).unwrap(),
+    );
+    assert_eq!(
+        restarted
+            .get_session("9001002@lid.0")
+            .await
+            .unwrap()
+            .unwrap(),
+        advanced
+    );
+    restarted.close().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_signal_batch_rolls_back_invalid_records_and_refuses_changed_origins() {
+    use bytes::Bytes;
+    use wacore::store::traits::SignalStore;
+    let fixture = Fixture::new();
+    let backend = backend(&fixture.0, "15555550102").await;
+    let mut record =
+        native_session_with_long_current_chain(&backend.load().await.unwrap().unwrap());
+    let original = record.serialize().unwrap();
+    backend
+        .put_session("9001002@lid.0", &original)
+        .await
+        .unwrap();
+    let store = AuthStore::open(fixture.0.join("auth.sqlite")).unwrap();
+    let before = store.get("native-session", "9001002_1.0").unwrap();
+    assert!(store.get("session", "9001002_1.0").unwrap().is_none());
+    record.reserve_sender_chain_counters(2501);
+    let advanced = record.serialize().unwrap();
+    assert!(
+        backend
+            .put_sessions_batch(&[
+                (Arc::from("9001002@lid.0"), Bytes::from(advanced.clone())),
+                (Arc::from("9001003@lid.0"), Bytes::from_static(&[0xff])),
+            ])
+            .await
+            .is_err()
+    );
+    assert_eq!(store.get("native-session", "9001002_1.0").unwrap(), before);
+    assert!(
+        store
+            .get("native-session", "9001003_1.0")
+            .unwrap()
+            .is_none()
+    );
+    store.set("session", "9001002_1.0", Some("{}")).unwrap();
+    assert!(
+        backend.get_session("9001002@lid.0").await.is_err(),
+        "An origin change must not reopen an older ratchet"
+    );
+    assert!(
+        backend
+            .put_session("9001002@lid.0", &advanced)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.get("native-session", "9001002_1.0").unwrap(), before);
+    store.set("session", "9001002_1.0", None).unwrap();
+    assert_eq!(
+        backend
+            .get_session("9001002@lid.0")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        original
+    );
+    backend.close().unwrap();
 }

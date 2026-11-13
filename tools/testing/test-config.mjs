@@ -134,6 +134,35 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/secretary-rust/assignment_voice_engine_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_voice_engine_cases::" },
+  "tests/secretary-rust/store_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "store_cases::" },
+  "tests/secretary-rust/engine_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "engine_cases::" },
+  "tests/secretary-rust/inbox_recovery_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "inbox_recovery_cases::" },
+  "tests/secretary-rust/assignment_event_stream_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_event_stream_cases::" },
+  "tests/secretary-rust/assignment_events_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_events_cases::" },
+  "tests/secretary-rust/assignment_progress_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_progress_cases::" },
+  "tests/secretary-rust/assignment_windows_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_windows_cases::" },
+  "tests/secretary-rust/assignment_tick_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_tick_cases::" },
+  "tests/secretary-rust/assignment_execution_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_execution_cases::" },
+  "tests/secretary-rust/assignment_result_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_result_cases::" },
+  "tests/rust/chat-wa-runtime-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "wa_runtime::" },
+  "tests/rust/chat-native-events.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "native_events::" },
+  "tests/rust/chat-session-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "session::" },
+  "tests/rust/chat-listener-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "listener::" },
+  "tests/rust/chat-collector-cases.rs": { package: "ivy-chat-bridge", test: "chat-evidence-bytes", filter: "native_evidence::collector::original_collector_replay_retry_results_and_publication" },
+  "tests/rust/chat-store-cases.rs": { package: "ivy-chat-bridge", test: "chat-storage", filter: "chat_store" },
+  "tests/rust/chat-local-metadata.rs": { package: "ivy-chat-bridge", lib: true, filter: "store::local::metadata::tests::" },
+  "tests/secretary-rust/assignment_scheduler_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_scheduler_cases::" },
+  "tests/secretary-rust/follow_up_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "follow_up_cases::" },
+  "tests/secretary-rust/follow-up-release.rs": { package: "ivy-secretary", lib: true, filter: "follow_up::release::tests::" },
+  "tests/secretary-rust/assignment_voice_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_voice_cases::" },
+  "tests/secretary-rust/config_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "config_cases::" },
+  "tests/secretary-rust/journal_import_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "journal_import_cases::" },
+  "tests/secretary-rust/execution_import_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "execution_import_cases::" },
+  "tests/secretary-rust/assignment_import_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_import_cases::" },
+  "tests/secretary-rust/engine_inbox_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "engine_inbox_cases::" },
+  "tests/secretary-rust/registry_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "registry_cases::" },
+  "tests/secretary-rust/assignment_runner_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_runner_cases::" },
   "tests/rust/hive-host-configuration-revisions.rs": {
     package: "ivy-hive", lib: true, filter: "kernel::catalogs::configuration_revision_tests::",
   },
@@ -224,6 +253,17 @@ export const rustTests = {
     "package": "ivy-chat-bridge",
     "test": "chat-journal",
     "filter": "wa_socket::"
+  },
+  "tests/rust/chat-text-receipts.rs": {
+    "package": "ivy-chat-bridge",
+    "lib": true,
+    "filter": "whatsapp::socket::receipt_tests::"
+  },
+  "tests/rust/chat-lid-cache.rs": {
+    "package": "ivy-chat-bridge",
+    "lib": true,
+    "filter": "whatsapp::lid_cache::tests::",
+    "testThreads": 1
   },
   "tests/rust/phone_voice_notices.rs": {
     "package": "ivy-phone-bridge",
@@ -399,16 +439,6 @@ export const rustTests = {
   "tests/secretary-rust/error-outcome.rs": {
     "package": "ivy-secretary",
     "test": "error-outcome"
-  },
-  "tests/secretary-rust/triage_workflow_cases.rs": {
-    "package": "ivy-secretary",
-    "test": "delivery",
-    "filter": "triage_workflow_cases::"
-  },
-  "tests/secretary-rust/triage_prompt_cases.rs": {
-    "package": "ivy-secretary",
-    "test": "delivery",
-    "filter": "triage_prompt_cases::"
   },
   "tests/secretary-rust/native-service.rs": {
     "package": "ivy-secretary",

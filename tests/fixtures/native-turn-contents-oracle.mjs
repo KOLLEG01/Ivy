@@ -62,6 +62,6 @@ const mutations={
 };
 for(const [name,mutate]of Object.entries(mutations)){const f=fixture();mutate(f);await run(name,{kind:'verify',value:f.value});}
 for(const [name,mutate] of Object.entries(mutations).filter(([n])=>['cursorRepeat','cursorCycle','emptyCursor','numberCursor','missingCursor','prematureEnd','unfinished','emptyIntermediate','oversize','foreignTurn','duplicate','epoch','params'].includes(n))){const f=fixture();mutate(f);await run('read-'+name,{kind:'read',snapshot:f.snapshot,responses:f.pages});}
-for(const fault of ['duplicate','empty','null','array','number']){const f=fixture();const items=f.full.reply.result.data[0].items;if(fault==='duplicate')items[1].id=items[0].id;else if(fault==='empty')items[0].id='';else items[0]=fault==='null'?null:fault==='array'?[]:1;await run('full-'+fault,{kind:'verify',value:f.full});}
+for(const fault of ['duplicate','empty','null','array','number']){const f=fixture();const items=f.full.reply.result.data[0].items;if(fault==='duplicate')items[1].id=items[0].id;else if(fault==='empty')items[0].id='';else items[0]=fault==='null'?null:fault==='array'?[]:1;await run('full-'+fault,{kind:'verify',value:f.full});f.pages[0].reply={error:{code:-32601,message:'Unsupported'}};await run('read-full-'+fault,{kind:'read',snapshot:f.snapshot,responses:[f.pages[0],f.full]});}
 {const f=fixture();f.snapshot.nativeVersion='unknown';await run('contract-error',{kind:'verify',value:f.value,contractError:true});}
 process.stdout.write(JSON.stringify(rows));

@@ -2,7 +2,8 @@
 //! live queue ownership stay with the runtime; retained evidence drives Results.
 use crate::{
     collection_reads::{ChatCollectionReads, Phase},
-    limits::{COLLECTION_BYTES, COLLECTION_READS, EVIDENCE_CHUNK_BYTES, MAXIMUM_EVIDENCE_BYTES},
+    evidence_bytes::EncodedEvidence,
+    limits::{COLLECTION_BYTES, COLLECTION_READS, EVIDENCE_CHUNK_BYTES},
     main_context::object_options,
     native_evidence::ChatNativeEvidence,
     operations::{ChatOperations, contention},
@@ -14,15 +15,12 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
     hash::{digest, hash_json},
-    json::canonical,
+    json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
     operation::derive_operation_id_js,
 };
 use ivy_sdk::{clock::parse_date, operation_ids::scoped_operation_id, rpc::RequestOptions};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashSet, sync::Mutex};
 
 const NAME: &str = "Chat original turn collection";
 pub struct CollectionHead {
@@ -68,7 +66,7 @@ fn pin(v: &Json) -> IvyResult<Pin> {
     })
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn failure(error: &IvyError) -> Json {
     Json::object([
@@ -80,21 +78,13 @@ fn failure(error: &IvyError) -> Json {
         ),
     ])
 }
-fn joined(state: &ChatCollectionReads) -> IvyResult<String> {
-    Ok(state
-        .texts
-        .iter()
-        .map(JsString::to_utf8)
-        .collect::<IvyResult<Vec<_>>>()?
-        .join("\n\n"))
-}
 struct Source {
     selected: CollectionHead,
     call: Document,
 }
 struct Cached {
     pin: Pin,
-    state: Arc<ChatCollectionReads>,
+    state: ChatCollectionReads,
 }
 pub struct ChatCollector<'a> {
     pub operations: &'a ChatOperations<'a>,
@@ -126,7 +116,7 @@ impl<'a> ChatCollector<'a> {
     pub(crate) fn fresh(&self) -> Self {
         Self::new(self.operations, self.evidence, self.runtime, self.catalogs)
     }
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         *self.cache.lock().unwrap() = None;
     }
     pub async fn find(&self, input_id: &str) -> IvyResult<Option<Document>> {
@@ -295,10 +285,14 @@ impl<'a> ChatCollector<'a> {
         &self,
         collection: &Document,
         thread_id: &JsString,
-    ) -> IvyResult<Arc<ChatCollectionReads>> {
-        if let Some(cached) = &*self.cache.lock().unwrap() {
-            if cached.pin == collection.pin {
-                return Ok(cached.state.clone());
+    ) -> IvyResult<ChatCollectionReads> {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if cache
+                .as_ref()
+                .is_some_and(|cached| cached.pin == collection.pin)
+            {
+                return Ok(cache.take().unwrap().state);
             }
         }
         let mut state = ChatCollectionReads::new(
@@ -337,11 +331,6 @@ impl<'a> ChatCollector<'a> {
             "chat_collection_gap",
             "The saved collection state and byte total must agree with its full original evidence.",
         )?;
-        let state = Arc::new(state);
-        *self.cache.lock().unwrap() = Some(Cached {
-            pin: collection.pin.clone(),
-            state: state.clone(),
-        });
         Ok(state)
     }
     async fn update(&self, current: &Document, next: &Json) -> IvyResult<Document> {
@@ -493,13 +482,16 @@ impl<'a> ChatCollector<'a> {
                     && same(&retained, &metadata)?
                     && read_chat_result_text(self.store(), &parent.clone().into(), &result.value)
                         .await?
-                        == JsString::from(joined(state)?),
+                        .0
+                        .iter()
+                        .copied()
+                        .eq(state.text.encode_utf16()),
                 "chat_evidence_mismatch",
                 "The completed collection must retain its exact original Result and complete text.",
             )?;
             return Ok(current);
         }
-        let bytes = joined(state)?.into_bytes();
+        let bytes = state.text.as_bytes();
         require(
             bytes.len() == state.text_bytes && bytes.len() <= COLLECTION_BYTES,
             "chat_collection_limit",
@@ -555,7 +547,7 @@ impl<'a> ChatCollector<'a> {
                                 ("encoding", "text".into()),
                                 (
                                     "value",
-                                    String::from_utf8(part.to_vec())
+                                    std::str::from_utf8(part)
                                         .map_err(|_| IvyError::internal())?
                                         .into(),
                                 ),
@@ -680,6 +672,7 @@ impl<'a> ChatCollector<'a> {
                     .any(|s| selected.value.get("state") == Some(&Json::from(*s)))
                 {
                     let state = self.replay(selected, thread).await?;
+                    let checkpoint = selected.pin.clone();
                     // Keep the checkpoint available to the error handler if publication fails.
                     let result = self
                         .publish(
@@ -694,6 +687,10 @@ impl<'a> ChatCollector<'a> {
                             &state,
                         )
                         .await?;
+                    *self.cache.lock().unwrap() = Some(Cached {
+                        pin: checkpoint,
+                        state,
+                    });
                     return Ok(Some(result));
                 }
             }
@@ -773,7 +770,7 @@ impl<'a> ChatCollector<'a> {
                 self.clear();
             }
             let selected = current.as_ref().unwrap();
-            let mut state = self.replay(selected, thread).await?.fork();
+            let mut state = self.replay(selected, thread).await?;
             require(
                 state.count < COLLECTION_READS,
                 "chat_collection_limit",
@@ -792,30 +789,37 @@ impl<'a> ChatCollector<'a> {
                 )?)
                 .await?;
             self.evidence.verify_read(&observation, &expected)?;
-            let bytes = canonical(&observation, MAXIMUM_EVIDENCE_BYTES)?.len();
+            let encoded = EncodedEvidence::new(&observation)?;
+            let bytes = encoded.len();
             require(
                 number(&selected.value, "nativeBytes")? + bytes as f64 <= COLLECTION_BYTES as f64,
                 "chat_collection_limit",
                 "Native collection exhausted its complete byte bound.",
             )?;
-            self.clear();
-            let error = match state.append(&observation, self.catalogs) {
+            let error = match state.append_sized(&observation, bytes, self.catalogs) {
                 Ok(false) => return Ok(current.take()),
                 Ok(true) => None,
                 Err(error) => Some(error),
             };
             let evidence = self
                 .evidence
-                .save_read(input_id, &expected, &observation)
+                .save_encoded_read(input_id, &expected, encoded)
                 .await?;
-            let mut reads = array(&selected.value, "reads")?.to_vec();
-            reads.push(evidence.json());
+            let total_bytes = number(&selected.value, "nativeBytes")? + bytes as f64;
+            let updated_at = field(&observation, "observedAt")?.clone();
+            let selected = current.as_mut().unwrap();
+            // Move the growing immutable pin list; keep the original checkpoint
+            // available to the error handler until its successor is committed.
+            let mut reads = selected
+                .value
+                .remove("reads")
+                .unwrap()
+                .into_array()
+                .unwrap();
             let mut next = selected.value.clone();
+            reads.push(evidence.json());
             next.insert("reads", Json::Array(reads));
-            next.insert(
-                "nativeBytes",
-                Json::Number(number(&selected.value, "nativeBytes")? + bytes as f64),
-            );
+            next.insert("nativeBytes", Json::Number(total_bytes));
             next.insert(
                 "state",
                 if error.is_some() {
@@ -828,12 +832,16 @@ impl<'a> ChatCollector<'a> {
                 .into(),
             );
             next.insert("error", error.as_ref().map(failure).unwrap_or(Json::Null));
-            next.insert("updatedAt", field(&observation, "observedAt")?.clone());
-            current = Some(self.update(selected, &next).await?);
+            next.insert("updatedAt", updated_at);
+            let updated = self.update(selected, &next).await;
+            let mut original_reads = next.remove("reads").unwrap().into_array().unwrap();
+            original_reads.pop();
+            selected.value.insert("reads", Json::Array(original_reads));
+            current = Some(updated?);
             if error.is_none() {
                 *self.cache.lock().unwrap() = Some(Cached {
                     pin: current.as_ref().unwrap().pin.clone(),
-                    state: Arc::new(state),
+                    state,
                 });
             }
             // On exposure failure, the new durable collection remains the checkpoint.

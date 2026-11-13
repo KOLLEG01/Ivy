@@ -1,6 +1,7 @@
 //! Reconcile the Voice admission attached to a confirmed inbox notice.
 use crate::{
-    assignment_voice::{ForwardedVoiceOutcome, forwarded_voice_outcome, voice_prompt},
+    assignment_voice::{forwarded_voice_outcome, voice_prompt},
+    delivery_outcome::DeliveryOutcome,
     notices::{SecretaryNotices, changed, field, is, need, text},
 };
 use ivy_contracts::{IvyJson, IvyResult};
@@ -208,7 +209,7 @@ impl SecretaryNotices<'_, '_, '_> {
                 &call_id,
                 voice.required("operationId")?,
                 &prompt,
-            )? == ForwardedVoiceOutcome::Pending
+            )? == DeliveryOutcome::Pending
             {
                 return Ok(());
             }
@@ -221,14 +222,11 @@ impl SecretaryNotices<'_, '_, '_> {
                 ToolCallOptions::default(),
             )
             .await?;
-            if (&dial).is_null() || is(&dial, "phase", "submitted") {
+            if DeliveryOutcome::phone_receipt(&dial, "connected") == DeliveryOutcome::Pending {
                 return Ok(());
             }
-            let receipt = field(&dial, "receipt");
             need(
-                !is(&dial, "phase", "outcome_unknown")
-                    && field(receipt, "ok") == &IvyJson::Bool(true)
-                    && is(field(receipt, "result"), "state", "connected"),
+                DeliveryOutcome::phone_receipt(&dial, "connected") == DeliveryOutcome::Confirmed,
                 "secretary_voice_not_connected",
                 "The original Phone call did not connect.",
             )?;
@@ -244,14 +242,11 @@ impl SecretaryNotices<'_, '_, '_> {
                 ToolCallOptions::default(),
             )
             .await?;
-            if (&prompted).is_null() || is(&prompted, "phase", "submitted") {
+            if DeliveryOutcome::phone_receipt(&prompted, "sent") == DeliveryOutcome::Pending {
                 return Ok(());
             }
-            let receipt = field(&prompted, "receipt");
             need(
-                !is(&prompted, "phase", "outcome_unknown")
-                    && field(receipt, "ok") == &IvyJson::Bool(true)
-                    && is(field(receipt, "result"), "state", "sent"),
+                DeliveryOutcome::phone_receipt(&prompted, "sent") == DeliveryOutcome::Confirmed,
                 "secretary_voice_prompt_unresolved",
                 "The connected Voice prompt was not confirmed.",
             )?;

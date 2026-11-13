@@ -28,9 +28,13 @@ Contracts: [inbox](schemas/secretary.schema.json), [triage](schemas/secretary-tr
   a duplicate task after restart.
 - A Hive-backed schedule cursor replays every missed occurrence in bounded pages. Assignment
   revisions are retained so an edit does not reinterpret or discard older due occurrences.
-  Each assignment reads the existing Hive event journal through one stable, retention-protected
-  subscription. Its durable progress records assignment revisions at their change events; a
-  batch is acknowledged only after matching executions and any revision transition are saved.
+  Each assignment reads the existing Hive event journal through a retention-protected stream
+  filtered by topic and, where applicable, Object IDs. Its own assignment changes remain visible
+  from every authorized writer. Durable progress records the effective assignment revision and
+  stream boundary. A filter change stops at its change sequence and saves one original retirement
+  request; the replacement subscribes from that boundary before releasing the previous stream.
+  A batch is acknowledged only after matching effects and revision transitions are saved.
+  After a gap, the first global event selects the historical revision before filtering resumes.
   Historical journal gaps are exposed as recovery issues. Secretary's own Hive Object changes
   never trigger an Object-change assignment, preventing an execution from retriggering itself. Internal execution and progress writes do not produce Object-change events.
 - After retained events are consumed, schedule gaps settle only when the schedule cursor has
@@ -46,13 +50,26 @@ Contracts: [inbox](schemas/secretary.schema.json), [triage](schemas/secretary-tr
   bounded output becomes labelled, untrusted prompt context.
 - The global configuration prefers a ready AgentManager on the Secretary host and a stable
   AgentManager-owned internal project. An explicit saved target remains authoritative.
+  Absolute working directories follow the selected AgentManager host's path syntax.
 - A successful or failed terminal turn in a dedicated task is archived automatically. Reused tasks
   remain available for subsequent executions. Archived Secretary tasks are
   deleted after seven days using their original retained native operation identities. The execution
   journal remains queryable independently of native task deletion and records preparation, running,
   completion, delivery, archive and deletion evidence. Execution objects and their revisions are retained so pending work and original delivery pins cannot expire during a backlog. Reused tasks finish in a settled state and are excluded from active scans. Delayed notification delivery must not delay active executions.
 - New installations contain no assignments. UI examples open editable disabled drafts; only an explicit save creates an assignment. Initialization preserves existing assignment revisions.
+- UI writes retain their original caller, workspace, operation, revision and payload across reload.
+  Reconcile uncertain originals before retrying; independent assignments remain usable. Keep
+  changed drafts when replies arrive late and separate accepted writes from refresh failures.
+  Lists project displayed scalars; load revision-pinned editors, execution details and event
+  topics on demand. Bound outstanding browser requests by count and bytes without eviction.
+- Technical journal heads contain only predicate inputs. Retention and sealed imports read
+  exact revision bodies; rebuilding derived heads preserves original bytes, hashes, history
+  and quota reservations. Keep self-contained assignment snapshots while local windows lack
+  a guaranteed retained, readable external revision.
 - Every assignment returns the same structured notification decision. No source name or provenance marker changes execution or delivery behavior. Minimum Main notification age is an explicit assignment setting.
+  Parse the decision once at completion and bind it to the exact saved execution revision for
+  immediate delivery. Retries parse their fresh retained revision; the original result is the
+  sole persisted decision source. Main and Voice reuse its canonical hash.
 - The existing **hive_event_topics** command discovers registered triggers across providers, including event kinds and payload schemas.
 - The former automatic shared triage thread is not an execution path. It may only be retained to
   complete exact historical follow-ups created before this assignment engine.
@@ -85,6 +102,10 @@ Sources: [assignment contracts](../services/secretary/rust/src/assignment_schema
 - Every action names the exact scope and caller-stable operation. Only a source's admitted
   producers may capture, attach media or advance its checkpoint; authenticated callers may
   read and assess within the checked scope.
+  Internal mutations receive their original operation parent explicitly; user payloads cannot
+  select it. Validate and hash at trust and persistence boundaries without repeating the same
+  checks within one write. Admission counts canonical bytes without retaining an encoding and
+  transfers the checked original body into its result without cloning it.
 - Source identity fixes source/account/provider. Policy changes preserve its cursor and
   historical source revisions. Removing configuration stops new collection without rewriting
   old evidence.
@@ -93,15 +114,19 @@ Sources: [assignment contracts](../services/secretary/rust/src/assignment_schema
   before inbox-content persistence; ignored operations retain only recovery metadata.
 - Checkpoints name confirmed captures and compare the previous cursor. Empty observations
   may checkpoint zero captures; incomplete capture cannot advance source progress.
+- Local journal quotas count retained revisions, blobs and pending-operation reservations.
+  One fixed-size accounting row follows their writes and rollbacks transactionally; opening
+  older retained data initializes it without rewriting original records or revision history.
+  Known records supply their local reference fields explicitly. Opaque cursors, questions,
+  answers and user payloads do not select cleanup groups; checkpoint capture pins remain live
+  until their owning workflow releases them. Preserved unknown structured records keep their
+  reference graph for explicit import and archival.
 - The service accepts producer pushes through its registered capture/attach/checkpoint API. Producers own account integration, observation completeness and their collection timing. A captured preview does not assert full body or media coverage.
-- Standalone Microsoft reader modules retain their own bounded account, pagination and
-  recovery contracts; they are not wired into the current service worker loop. Native Teams
-  configuration admission rejects nonempty collectors.
+- Account readers and media acquisition belong to admitted producers. Secretary does not
+  start standalone Microsoft readers or the former automatic shared triage worker.
 
 Sources: [engine](../services/secretary/rust/src/engine.rs),
-[active composition](../services/secretary/rust/src/main.rs),
-[Microsoft adapters](../services/secretary/rust/src/outlook_source.rs),
-[Teams admission](../services/secretary/rust/src).
+[active composition](../services/secretary/rust/src/reconcile.rs).
 
 ## Assessment and contact
 
@@ -109,9 +134,12 @@ Sources: [engine](../services/secretary/rust/src/engine.rs),
   The assessment may reference an existing TaskBoard task; it cannot invent or create one.
 - Historical triage evidence retains the exact task and turn that produced it, but new automatic
   assessment is admitted only as an assignment execution with its own task.
-- Use the [configured assessment policy](../services/secretary/rust/src/triage_prompt.rs):
+- Use the [configured assessment policy](../services/secretary/rust/src/assignment_prompt.rs):
   bounded read-only research may inform decisions, while source content grants no authority
   for external mutation. Completion must belong to the selected turn and validate before item CAS.
+- The shared native contents reader verifies complete original item pages once and returns
+  immutable views of the turn and its single final answer. Preserve the admitted observations;
+  the 64-MiB budget measures serialized evidence, not resident memory.
 - `none` suppresses contact, `main` requests an asynchronous notice, and `needs_attention`
   records uncertainty. Voice requires the configured exceptional urgency threshold and target.
   Exact suppression and quiet-time rules live in [policy](../services/secretary/rust/src/policy.rs).
@@ -126,10 +154,16 @@ Sources: [engine](../services/secretary/rust/src/engine.rs),
   destination. Offered replies keep their original operation and are polled until WhatsApp
   confirms delivery. Voice escalation retains its original
   Phone operation. Admission/receipt states do not prove that the user heard or read a notice.
+  Inbox and assignment delivery share transport outcomes while retaining their contact and
+  fallback policies. Pure wake notifications coalesce; accepted work and event data remain queued.
 - Follow-up accepts an item or execution reference and returns an asynchronous caller-owned operation. A separate read-only task receives the retained source snapshot; it cannot interfere with an active assignment task. Retain the original request, context and calls before dispatch; questions sharing a task wait for unresolved earlier questions. Poll the original operation for its answer and never recursively invoke follow-up within that task.
+  After persisting an answer, release only a proven Secretary-created, resumable context through
+  the shared managed caller-release operation. Fence its original owner, account, epoch and last
+  operation against new accepted questions. Preserve uncertain release identities across restart
+  and protect their records from cleanup; release failures never replace the answer.
 
-Sources: [triage](../services/secretary/rust/src/triage.rs),
-[native ownership](../services/secretary/rust/src/triage_native.rs),
+Sources: [assessment](../services/secretary/rust/src/engine_inbox.rs),
+[native ownership](../services/secretary/rust/src/assignment_native.rs),
 [notices](../services/secretary/rust/src/notices.rs), [follow-up](../services/secretary/rust/src/follow_up.rs).
 
 ## Media
@@ -144,12 +178,12 @@ Sources: [triage](../services/secretary/rust/src/triage.rs),
   claim of complete interpretation.
 - Document parsing is inert and bounded; video uses explicitly configured pinned decoders,
   local protocols and deadlines. Attachment content cannot enable tools or external access.
-- The retained Outlook media adapter quarantines signed materializations and downloaded
-  payloads until source/account admission succeeds. Interrupted acquisition does not silently
-  redownload. Complete spool archives remain required recovery data.
+- The explicit document worker and bounded media projections operate independently of
+  account readers. Complete spool archives and the sealed journal import remain required
+  recovery data; removing a reader does not rewrite or discard those originals.
 
 Sources: [document projection](../services/secretary/rust/src/media_document.rs),
 [video](../services/secretary/rust/src/media_video.rs), [media spool](../services/secretary/rust/src/media_spool.rs).
 Exact media shapes are in [schemas](schemas); focused checks cover
-[inbox](../tests/secretary-rust/engine_inbox_cases.rs), [triage](../tests/secretary-rust/triage_workflow_cases.rs),
+[inbox](../tests/secretary-rust/engine_inbox_cases.rs), [follow-up](../tests/secretary-rust/follow_up_cases.rs),
 [media](../tests/secretary-rust/media-input.rs) and [video](../tests/secretary-rust/video_cases.rs).

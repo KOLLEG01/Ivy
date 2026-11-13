@@ -22,7 +22,7 @@ impl Clock for EventClock {
     }
 }
 fn technical(journal: &Journal) -> IvyJson {
-    let mut statement = journal.db.prepare("SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name").unwrap();
+    let mut statement = journal.db.prepare("SELECT d.key,d.name,d.current_revision,r.value_json FROM technical_documents d LEFT JOIN technical_revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.key,d.name").unwrap();
     let rows = statement
         .query_map([], |r| {
             Ok((
@@ -47,16 +47,12 @@ fn technical(journal: &Journal) -> IvyJson {
     )
 }
 #[tokio::test]
-async fn original_event_matching_revision_rebase_and_durable_ack_order() {
+async fn original_event_matching_historical_revisions_and_cursor_guards() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = reference_data::read(include_bytes!("assignment-events-progress-cases.json.gz"));
-    let corpus = parse(
-        std::str::from_utf8(&output).unwrap(),
-        32 * 1024 * 1024,
-    )
-    .unwrap();
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 32 * 1024 * 1024).unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 66);
+    assert_eq!(rows.len(), 23);
     for (i, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();

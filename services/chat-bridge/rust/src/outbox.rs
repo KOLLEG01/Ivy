@@ -6,8 +6,11 @@ use crate::{
     store::{Destination, Document, Pin, Reference, mutation},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
-    hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
+    chat_schema::validate_chat,
+    hash::hash_json,
+    json::{canonical, canonical_equal},
+    limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_host_runtime::concurrency::map_concurrent;
 use ivy_sdk::rpc::RequestOptions;
@@ -46,7 +49,7 @@ fn pin(value: &Json) -> IvyResult<Pin> {
     })
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn bytes(value: &Json) -> IvyResult<usize> {
     Ok(canonical(value, MANAGEMENT_FRAME_BYTES)?.len())

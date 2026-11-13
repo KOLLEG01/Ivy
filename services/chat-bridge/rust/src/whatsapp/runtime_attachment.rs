@@ -7,6 +7,7 @@ use super::{
     listener::WhatsAppListener,
     messages::Translator,
     native::WhatsAppNative,
+    native_event::NativeEvent,
     runtime::RuntimeMedia,
 };
 use crate::{
@@ -25,7 +26,12 @@ use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 pub type BoolFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<bool>> + Send + 'a>>;
 pub trait RuntimeAttached: Send + Sync {
     fn file_workspace<'a>(&'a self, _caller: &'a JsString) -> RequestFuture<'a> {
-        Box::pin(async { Err(IvyError::new("service_not_ready", "The Main file transport is not attached.")) })
+        Box::pin(async {
+            Err(IvyError::new(
+                "service_not_ready",
+                "The Main file transport is not attached.",
+            ))
+        })
     }
     fn definition(&self) -> &Json;
     fn expected(&self, sender: &JsString) -> Json;
@@ -45,7 +51,7 @@ pub trait RuntimeAttached: Send + Sync {
     fn payload<'a>(&'a self, row: &'a Inbox, same_host: bool) -> RequestFuture<'a>;
     fn tick(&self, commentary: bool) -> BoolFuture<'_>;
     fn needs_recovery(&self) -> bool;
-    fn notification<'a>(&'a self, event: &'a Json, commentary: bool) -> RequestFuture<'a>;
+    fn notification<'a>(&'a self, event: &'a NativeEvent, commentary: bool) -> RequestFuture<'a>;
     fn notices(&self) -> RequestFuture<'_>;
     fn outbox(&self) -> RequestFuture<'_>;
     fn automatic_notifications(&self, now: i64) -> BoolFuture<'_>;
@@ -129,7 +135,9 @@ impl Attached {
     }
 }
 impl RuntimeAttached for Attached {
-    fn file_workspace<'a>(&'a self, caller: &'a JsString) -> RequestFuture<'a> { Box::pin(self.lease.workspace(caller)) }
+    fn file_workspace<'a>(&'a self, caller: &'a JsString) -> RequestFuture<'a> {
+        Box::pin(self.lease.workspace(caller))
+    }
     fn definition(&self) -> &Json {
         self.lease.config().admission.definition()
     }
@@ -215,8 +223,8 @@ impl RuntimeAttached for Attached {
     fn needs_recovery(&self) -> bool {
         self.listener.needs_recovery()
     }
-    fn notification<'a>(&'a self, event: &'a Json, commentary: bool) -> RequestFuture<'a> {
-        Box::pin(self.listener.notification(event, commentary))
+    fn notification<'a>(&'a self, event: &'a NativeEvent, commentary: bool) -> RequestFuture<'a> {
+        Box::pin(self.listener.native_notification(event, commentary))
     }
     fn notices(&self) -> RequestFuture<'_> {
         Box::pin(async {
