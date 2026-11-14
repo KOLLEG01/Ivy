@@ -69,6 +69,7 @@ struct World {
     enabled: Cell<bool>,
     missing: Cell<bool>,
     archived: Cell<bool>,
+    executor_idle: Cell<bool>,
     rate: RefCell<Option<JsString>>,
     allocation_error: RefCell<Option<IvyError>>,
     dispatch_error: Cell<bool>,
@@ -89,6 +90,7 @@ impl World {
             enabled: Cell::new(true),
             missing: Cell::new(false),
             archived: Cell::new(false),
+            executor_idle: Cell::new(false),
             rate: RefCell::default(),
             allocation_error: RefCell::default(),
             dispatch_error: Cell::new(false),
@@ -368,6 +370,10 @@ impl SchedulerPolicies for World {
     async fn failed_rate_limit_retry_at(&self, _: &Document) -> IvyResult<Option<JsString>> {
         Ok(self.rate.borrow().clone())
     }
+    async fn executor_conflict_ready(&self, _: &Document) -> IvyResult<bool> {
+        self.event("executor-check", self.executor_idle.get().into());
+        Ok(self.executor_idle.get())
+    }
     async fn schedule(&self, request: &Json) -> IvyResult<Json> {
         self.event("dispatch", request.clone());
         let operations = Operations {
@@ -433,6 +439,80 @@ impl SchedulerAllocation for World {
             ("intent", pin("plan", 1.0)),
         ]))
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn executor_conflict_recovers_saved_tickets_and_persists_bounded_reconciliation() {
+    let mut value = task();
+    value.insert(
+        "primaryResourceRef",
+        Json::object([("nativeId", "saved-thread".into())]),
+    );
+    value.insert(
+        "completionIssue",
+        Json::object([
+            ("code", "executor_already_running".into()),
+            ("retryAt", Json::Null),
+        ]),
+    );
+    value.insert(
+        "comments",
+        Json::Array(vec![Json::object([
+            ("commentId", "new-input".into()),
+            ("authorKind", "user".into()),
+        ])]),
+    );
+    value.insert(
+        "commentDeliveries",
+        Json::Array(vec![Json::object([
+            ("commentId", "new-input".into()),
+            ("state", "queued".into()),
+        ])]),
+    );
+    for expected_delay in [30, 60, 120, 240, 300, 300] {
+        // Rebind every pass from its persisted Task, as after a service restart.
+        let world = World::new(value.clone());
+        if let Some(retry) = f(f(&value, "runtimeWait"), "retryAt").as_js_string() {
+            assert!(world.run().await.unwrap().is_null());
+            assert_eq!(world.count("executor-check"), 0);
+            *world.now.borrow_mut() = retry.to_utf8().unwrap();
+        }
+        let deferred = world.run().await.unwrap();
+        assert_eq!(f(&deferred, "action"), &Json::from("defer"));
+        assert_eq!(world.count("executor-check"), 1);
+        assert_eq!(world.count("allocate"), 0);
+        let wait = f(&deferred, "runtimeWait");
+        let retry = ivy_sdk::clock::parse_date(&s(wait, "retryAt"));
+        let now = ivy_sdk::clock::parse_date(&world.now());
+        assert_eq!(retry - now, f64::from(expected_delay * 1000));
+        value.insert("runtimeWait", wait.clone());
+        value.insert("updatedAt", world.now().into());
+        let ready = World::new(value.clone());
+        ready.executor_idle.set(true);
+        *ready.now.borrow_mut() = s(wait, "retryAt").to_utf8().unwrap();
+        let request = ready.run().await.unwrap();
+        assert_eq!(f(&request, "action"), &Json::from("continue"));
+        assert_eq!(
+            f(&request, "commentIds"),
+            &Json::Array(vec!["new-input".into()])
+        );
+        assert_eq!(ready.values("allocate"), vec![Json::Bool(true)]);
+        // A lost acknowledgment recovers its original accepted Operation.
+        assert!(ready.run().await.unwrap().get("recovered").is_some());
+        assert_eq!(ready.count("allocate"), 1);
+    }
+    let world = World::new({
+        value.insert(
+            "completionIssue",
+            Json::object([("code", "command_failed".into())]),
+        );
+        value.insert("runtimeWait", Json::Null);
+        value.insert("comments", Json::Array(vec![]));
+        value.insert("commentDeliveries", Json::Array(vec![]));
+        value
+    });
+    assert!(world.run().await.unwrap().is_null());
+    assert_eq!(world.count("executor-check"), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]

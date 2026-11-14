@@ -231,6 +231,63 @@ fn archived_message(reply: &Json, thread_id: &JsString) -> IvyResult<bool> {
 impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
     ContextRecovery<'_, S, Q>
 {
+    /// Recover only a conclusively unstarted preparation. Terminal Runs may have
+    /// cleared their call slots, so follow the original Result's saved Run.
+    pub async fn unstarted_executor_conflict(&self, task: &Document) -> IvyResult<Option<Json>> {
+        let primary = field(&task.value, "primaryResourceRef");
+        if (!primary.is_null() && self::primary(&task.value).is_none())
+            || (primary.is_null() && !field(&task.value, "primaryBackend").is_null())
+        {
+            return Ok(None);
+        }
+        let issue = field(&task.value, "completionIssue");
+        if !field(issue, "code").is_str("executor_already_running") {
+            return Ok(None);
+        }
+        let run = Store::read(
+            self.store,
+            "task-board/run",
+            task.value.required("lastRun")?,
+            true,
+        )
+        .await?;
+        if field(field(issue, "run"), "objectId") != &Json::String(run.pin.object_id.clone())
+            || !field(field(&run.value, "externalOutcome"), "code")
+                .is_str("executor_already_running")
+            || (!primary.is_null()
+                && !crate::native_plan::matches_task_primary(
+                    run.value.required("target")?,
+                    &task.value,
+                )?)
+            || (primary.is_null() && !field(&run.value, "nativeEpoch").is_null())
+        {
+            return Ok(None);
+        }
+        let Some(proof) = self
+            .unstarted_attempt(&task.pin.object_id, primary, &run)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let call = field(field(&proof.saved.value, "calls"), "thread");
+        if call.is_null() {
+            return Ok(None);
+        }
+        let Some(observed) = self.observed(&proof, call, primary).await? else {
+            return Ok(None);
+        };
+        Ok((field(&observed, "method").is_str(if primary.is_null() {
+            "thread/start"
+        } else {
+            "thread/resume"
+        }) && field(&observed, "phase").is_str("failed")
+            && field(&observed, "code").is_str("executor_already_running")
+            && field(&observed, "requestId").is_null()
+            && field(&observed, "epoch").is_null()
+            && field(&observed, "reply").is_null())
+        .then(|| proof.saved.pin.to_json()))
+    }
+
     async fn unanswered(&self, task: &Document) -> IvyResult<bool> {
         let run = string(task.value.required("lastRun")?, "objectId")?;
         if field(&task.value, "comments")
@@ -343,7 +400,8 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         let value = &run.value;
         if value.get("taskId").and_then(Json::as_js_string) != Some(task_id)
             || !same(value.get("primaryResourceRef"), primary)?
-            || !crate::native_plan::matches_primary(value.required("target")?, primary)?
+            || (!primary.is_null()
+                && !crate::native_plan::matches_primary(value.required("target")?, primary)?)
             || field(value, "phase") != &Json::from("failed")
             || field(value, "externalOutcome").get("state") != Some(&Json::from("failed"))
             || !field(value, "turnId").is_null()
@@ -374,6 +432,15 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         )?;
         let saved = Store::read(self.store, "task-board/run", result_run, true).await?;
         let calls = field(&saved.value, "calls");
+        if primary.is_null()
+            && (!field(&saved.value, "primaryResourceRef").is_null()
+                || !field(&saved.value, "nativeEpoch").is_null()
+                || saved.value.get("taskId").and_then(Json::as_js_string) != Some(task_id)
+                || !same(saved.value.get("target"), value.required("target")?)?
+                || !field(calls, "turn").is_null())
+        {
+            return Ok(None);
+        }
         if !field(&saved.value, "turnId").is_null()
             || !field(calls, "steer").is_null()
             || !field(calls, "interrupt").is_null()

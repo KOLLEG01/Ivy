@@ -620,6 +620,7 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
                                         "value",
                                         Json::Array(
                                             [
+                                                "executor_already_running",
                                                 "task_board_handoff_missing",
                                                 "task_board_recovery_context_unavailable",
                                                 "task_board_recovery_evidence_missing",

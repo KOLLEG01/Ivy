@@ -188,6 +188,13 @@ pub async fn validate_dependencies<E: From<IvyError>, S: WakeStore<E>>(
 fn due(value: &Json, at: &JsString) -> bool {
     value.as_js_string().is_some_and(|value| value <= at)
 }
+pub(crate) fn executor_conflict(task: &Json) -> bool {
+    is(
+        f(task, "completionIssue"),
+        "code",
+        "executor_already_running",
+    )
+}
 pub fn next_execution_mode(task: &Json, at: &JsString) -> bool {
     next_execution_mode_with_inputs(task, at, comments_pending(task))
 }
@@ -199,7 +206,9 @@ pub(crate) fn next_execution_mode_with_inputs(task: &Json, at: &JsString, pendin
         return true;
     }
     let issue = f(task, "completionIssue");
-    let retry = !present(issue) || due(f(issue, "retryAt"), at);
+    let retry = !present(issue)
+        || due(f(issue, "retryAt"), at)
+        || executor_conflict(task) && !present(f(issue, "retryAt"));
     if f(task, "executionChangeRequested").as_bool() == Some(true) {
         return retry;
     }
@@ -230,7 +239,9 @@ pub(crate) async fn should_wake_with_inputs<E: From<IvyError>, S: WakeStore<E>>(
     }
     let issue = f(task, "completionIssue");
     if f(task, "executionChangeRequested").as_bool() == Some(true) {
-        return Ok(!present(issue) || due(f(issue, "retryAt"), at));
+        return Ok(!present(issue)
+            || due(f(issue, "retryAt"), at)
+            || executor_conflict(task) && !present(f(issue, "retryAt")));
     }
     if !is(f(task, "fields"), "control", "agent")
         || ["backlog", "done", "cancelled"]
@@ -240,7 +251,8 @@ pub(crate) async fn should_wake_with_inputs<E: From<IvyError>, S: WakeStore<E>>(
         return Ok(false);
     }
     if present(issue) {
-        return Ok(due(f(issue, "retryAt"), at));
+        return Ok(due(f(issue, "retryAt"), at)
+            || executor_conflict(task) && !present(f(issue, "retryAt")));
     }
     if missing_wake_trigger(task, !open_question_metadata(task)?.is_empty()) {
         let updated = f(task, "updatedAt")

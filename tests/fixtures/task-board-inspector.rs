@@ -1105,6 +1105,48 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
             Err("task_board_native_unavailable"),
         );
     }
+    for (state, expected) in [
+        ("idle", "true"),
+        ("notLoaded", "true"),
+        ("active", "false"),
+        ("systemError", "false"),
+    ] {
+        let mut snapshot = metadata("thread", false);
+        let thread = snapshot
+            .get_mut("reply")
+            .unwrap()
+            .get_mut("result")
+            .unwrap()
+            .get_mut("thread")
+            .unwrap();
+        thread.insert("status", Json::object([("type", state.into())]));
+        let mut unstarted = run.clone();
+        unstarted.insert("turnId", Json::Null);
+        unstarted.insert("nativeEpoch", Json::Null);
+        add(
+            &format!("unstarted conflict {state}"),
+            Json::object([
+                ("action", "unstarted".into()),
+                ("run", unstarted),
+                ("steps", Json::Array(vec![snapshot])),
+            ]),
+            Ok(vec![expected]),
+        );
+    }
+    let mut first_start = run.clone();
+    first_start.insert("primaryResourceRef", Json::Null);
+    first_start.insert("turnId", Json::Null);
+    first_start.insert("nativeEpoch", Json::Null);
+    add(
+        "unstarted first start checks its original owner without reading an absent thread",
+        Json::object([("action", "unstarted".into()), ("run", first_start)]),
+        Ok(vec!["true"]),
+    );
+    add(
+        "unstarted conflict refuses a retained turn",
+        Json::object([("action", "unstarted".into())]),
+        Err("task_board_turn_mismatch"),
+    );
     let mut retry_adapter_passes = 0;
     for (name, input, expected) in &rows {
         let i = input;
@@ -1149,6 +1191,8 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
                     Json::Bool(inspector.owner_stopped(i.required("run")?).await?)
                 } else if action == "context" {
                     inspector.context(&run_pin).await?.value()
+                } else if action == "unstarted" {
+                    Json::Bool(inspector.unstarted_context_idle(&run_pin).await?)
                 } else if action == "read" {
                     inspector
                         .read(

@@ -1760,16 +1760,34 @@ fn owner(phase: &str, result: Json) -> Json {
 
 #[tokio::test]
 async fn unstarted_failures_retry_only_explicit_transient_native_errors() {
-    for slot in ["thread", "turn"] {
-        for mode in ["preparation", "permanent", "transient"] {
+    for preparation in ["thread", "start", "turn"] {
+        let slot = if preparation == "start" {
+            "thread"
+        } else {
+            preparation
+        };
+        for mode in [
+            "preparation",
+            "executor",
+            "executor-dispatched",
+            "permanent",
+            "transient",
+        ] {
             let mut run = base_run();
             run.insert("turnId", Json::Null);
             run.insert("nativeEpoch", Json::Null);
             set(&mut run, "calls", slot, pin(10));
-            let w = World::new(base_task(), run);
+            let mut task = base_task();
+            if preparation == "start" {
+                run.insert("primaryResourceRef", Json::Null);
+                task.insert("primaryResourceRef", Json::Null);
+            }
+            let w = World::new(task, run);
             let original = native_call(
                 10,
-                if slot == "thread" {
+                if preparation == "start" {
+                    "thread/start"
+                } else if slot == "thread" {
                     "thread/resume"
                 } else {
                     "turn/start"
@@ -1778,12 +1796,12 @@ async fn unstarted_failures_retry_only_explicit_transient_native_errors() {
                 None,
             );
             w.put("task-board/native-call", pin(10), original.clone());
-            let epoch = if mode == "preparation" {
+            let epoch = if mode == "preparation" || mode == "executor" {
                 Json::Null
             } else {
                 "epoch".into()
             };
-            let reply = if mode == "preparation" {
+            let reply = if mode == "preparation" || mode == "executor" {
                 Json::Null
             } else {
                 Json::object([(
@@ -1801,7 +1819,9 @@ async fn unstarted_failures_retry_only_explicit_transient_native_errors() {
                     ]),
                 )])
             };
-            let code = if mode == "preparation" {
+            let code = if mode.starts_with("executor") {
+                Json::from("executor_already_running")
+            } else if mode == "preparation" {
                 Json::from("command_failed")
             } else {
                 "native_operation_failed".into()
@@ -1839,13 +1859,23 @@ async fn unstarted_failures_retry_only_explicit_transient_native_errors() {
             let t = w.final_task();
             assert_eq!(
                 !f(f(&t, "completionIssue"), "retryAt").is_null(),
-                mode == "transient",
+                mode == "transient" || mode == "executor" && slot == "thread",
                 "{slot}/{mode}"
             );
             assert_eq!(f(f(&t, "completionIssue"), "code"), &code);
-            assert_eq!(f(&t, "primaryResourceRef"), &primary());
+            assert_eq!(
+                f(&t, "primaryResourceRef"),
+                &if preparation == "start" {
+                    Json::Null
+                } else {
+                    primary()
+                }
+            );
             assert_eq!(f(&t, "latestResult"), &pin(901));
-            assert_eq!(!f(&t, "runtimeWait").is_null(), mode == "transient");
+            assert_eq!(
+                !f(&t, "runtimeWait").is_null(),
+                mode == "transient" || mode == "executor" && slot == "thread"
+            );
             if mode == "preparation" {
                 assert_eq!(
                     f(f(&w.result(), "content"), "summary"),
@@ -2156,7 +2186,7 @@ async fn observed_calls_keep_original_identity_and_require_exact_conclusive_owne
 }
 
 #[tokio::test]
-async fn terminal_publication_waits_for_steering_and_keeps_reassigned_task_results() {
+async fn terminal_publication_requires_steering_evidence_and_keeps_reassigned_task_results() {
     for phase in [
         None,
         Some("outcome_unknown"),
@@ -2177,7 +2207,7 @@ async fn terminal_publication_waits_for_steering_and_keeps_reassigned_task_resul
             w.put("task-board/native-call", pin(10), call);
         }
         let result = w.complete().await;
-        if [Some("succeeded"), Some("failed")].contains(&phase) {
+        if phase.is_some() {
             result.unwrap();
             let t = w.final_task();
             assert_eq!(f(&t, "workflowState"), &Json::from("review"));
@@ -2189,15 +2219,88 @@ async fn terminal_publication_waits_for_steering_and_keeps_reassigned_task_resul
         } else {
             assert_eq!(
                 result.unwrap_err().code,
-                if phase.is_none() {
-                    "task_board_native_evidence_required"
-                } else {
-                    "task_board_outcome_unresolved"
-                }
+                "task_board_native_evidence_required"
             );
             assert!(w.writes.borrow().is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn terminal_turn_keeps_unknown_steer_receipt_and_its_unacknowledged_input() {
+    for status in ["completed", "failed", "interrupted", "inProgress"] {
+        let mut task = base_task();
+        task.insert(
+            "comments",
+            Json::Array(vec![comment("captured", pin(2), "update")]),
+        );
+        task.insert(
+            "commentDeliveries",
+            Json::Array(vec![Json::object([
+                ("commentId", "captured".into()),
+                ("state", "queued".into()),
+                ("code", Json::Null),
+            ])]),
+        );
+        let mut run = base_run();
+        set(&mut run, "calls", "steer", pin(10));
+        let world = World::new(task, run);
+        world.status(status, "epoch", Json::Null);
+        world.observe(
+            pin(10),
+            native_call(10, "turn/steer", Json::Null, Some("outcome_unknown")),
+            owner("outcome_unknown", Json::Null),
+        );
+        let result = world.complete().await;
+        if status == "inProgress" {
+            assert_eq!(result.unwrap_err().code, "task_board_native_state_changed");
+            assert!(world.writes.borrow().is_empty());
+        } else {
+            result.unwrap();
+            assert_eq!(
+                f(&world.final_task(), "commentDeliveries")
+                    .as_array()
+                    .unwrap()[0]
+                    .get("state"),
+                Some(&"queued".into())
+            );
+            assert!(f(&world.saved_run(), "finishedAt").as_js_string().is_some());
+        }
+        assert_eq!(
+            f(
+                &world
+                    .lookup("task-board/native-call", &pin(10))
+                    .unwrap()
+                    .value,
+                "ownerPhase"
+            ),
+            &"outcome_unknown".into()
+        );
+    }
+    // A failed process observation without a verified terminal turn does not
+    // gain the completion path's authority to retire an uncertain steer.
+    let mut run = base_run();
+    set(&mut run, "calls", "steer", pin(10));
+    let world = World::new(base_task(), run);
+    world.observe(
+        pin(10),
+        native_call(10, "turn/steer", Json::Null, Some("outcome_unknown")),
+        owner("outcome_unknown", Json::Null),
+    );
+    assert_eq!(
+        world
+            .publish(Json::object([
+                ("kind", "unavailable".into()),
+                ("reason", "external_outcome".into()),
+                ("code", "native_process_lost".into()),
+                ("detail", "Stopped owner".into()),
+            ]))
+            .await
+            .unwrap_err()
+            .code,
+        "task_board_outcome_unresolved"
+    );
+    assert!(world.writes.borrow().is_empty());
 }
 
 #[tokio::test]

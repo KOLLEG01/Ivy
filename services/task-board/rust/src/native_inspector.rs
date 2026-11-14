@@ -201,6 +201,9 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         self.store.read_task_routing(run.required("taskId")?).await
     }
     pub async fn context(&self, run_pin: &Json) -> IvyResult<InspectionContext> {
+        self.context_for(run_pin, true).await
+    }
+    async fn context_for(&self, run_pin: &Json, started: bool) -> IvyResult<InspectionContext> {
         self.store.verify_owner().await?;
         let run = self
             .store
@@ -210,11 +213,14 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         let primary = field(value, "primaryResourceRef");
         let target = value.required("target")?;
         require(
-            matches_primary(target, primary)?
-                && has_identity(value, "turnId")
-                && has_identity(value, "nativeEpoch"),
+            (matches_primary(target, primary)? || (!started && primary.is_null()))
+                && if started {
+                    has_identity(value, "turnId") && has_identity(value, "nativeEpoch")
+                } else {
+                    field(value, "turnId").is_null() && field(value, "nativeEpoch").is_null()
+                },
             "task_board_turn_mismatch",
-            "Inspection requires an already saved original native primary and turn.",
+            "Inspection requires the saved original native execution identity.",
         )?;
         let task = self.routing_task(value).await?;
         let route = routed_target(&task, target)?;
@@ -238,9 +244,55 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
             catalog_source_hash: text(plan, "catalogSourceHash")?,
             service_node_id: text(&status, "serviceNodeId")?,
             epoch: text(&status, "epoch")?,
-            thread_id: text(primary, "nativeId")?,
-            turn_id: text(value, "turnId")?,
+            thread_id: if primary.is_null() {
+                JsString::default()
+            } else {
+                text(primary, "nativeId")?
+            },
+            turn_id: if started {
+                text(value, "turnId")?
+            } else {
+                JsString::default()
+            },
         })
+    }
+    /// The caller separately proves the original resume never dispatched. This
+    /// fresh, authenticated read grants no authority to replay a native call.
+    pub async fn unstarted_context_idle(&self, run_pin: &Json) -> IvyResult<bool> {
+        let context = self.context_for(run_pin, false).await?;
+        if context.thread_id.0.is_empty() {
+            return Ok(true);
+        }
+        let metadata = self
+            .read(
+                &context,
+                &"thread/read".into(),
+                Json::object([
+                    ("threadId", Json::String(context.thread_id.clone())),
+                    ("includeTurns", false.into()),
+                ]),
+                false,
+            )
+            .await?;
+        let selection = Json::object([
+            (
+                "nativeVersion",
+                Json::String(context.native_version.clone()),
+            ),
+            (
+                "catalogSourceHash",
+                Json::String(context.catalog_source_hash.clone()),
+            ),
+        ]);
+        let source = crate::native_plan::catalog(self.catalogs, &selection)?;
+        let state = ivy_sdk::native_observations::NativeObservations::new(&source)
+            .native_thread_state(metadata.required("reply")?.required("result")?)?;
+        Ok(
+            state.thread.get("id") == Some(&Json::String(context.thread_id))
+                && field(&state.thread, "ephemeral") == &Json::Bool(false)
+                && (state.state == JsString::from("idle")
+                    || state.state == JsString::from("notLoaded")),
+        )
     }
     pub async fn owner_stopped(&self, run: &Json) -> IvyResult<bool> {
         if !has_identity(run, "nativeEpoch") {

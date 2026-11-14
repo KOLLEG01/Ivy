@@ -327,6 +327,225 @@ fn seed(database: &Connection, docs: &[Json], base: &Json, row: &Json) {
             .unwrap();
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn executor_conflict_requires_original_predispatch_evidence_after_terminal_slot_cleanup() {
+    let data = oracle();
+    let base = data.required("base").unwrap();
+    let row = Json::Object(vec![]);
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    for preparation in ["resume", "start"] {
+        let mut docs = records(base, &row);
+        if preparation == "start" {
+            for document in &mut docs {
+                let key = s(document, "key");
+                let mut value = document.required("value").unwrap().clone();
+                if key == JsString::from("task-board/run") {
+                    value.insert("primaryResourceRef", Json::Null);
+                    value.insert("nativeEpoch", Json::Null);
+                    value.get_mut("calls").unwrap().insert("turn", Json::Null);
+                } else if key == JsString::from("task-board/native-call")
+                    && s(document.required("pin").unwrap(), "objectId")
+                        == s(&pin(300, 1.0), "objectId")
+                {
+                    let request = value.get_mut("request").unwrap();
+                    request.insert("method", "thread/start".into());
+                    let packed = request.get_mut("params").unwrap();
+                    packed.insert("method", "thread/start".into());
+                    packed.insert("params", Json::Object(vec![]));
+                    value.insert(
+                        "expectedDefinitionHash",
+                        catalogs
+                            .checked_native_contract(&"0.159.2".into(), None)
+                            .unwrap()
+                            .definition_hash(&"thread/start".into())
+                            .unwrap()
+                            .into(),
+                    );
+                }
+                document.insert("value", value);
+            }
+        }
+        for mode in [
+            "unstarted",
+            "dispatched",
+            "unknown",
+            "cancelled",
+            "known-turn",
+            "wrong-account",
+        ] {
+            let database = Connection::open_in_memory().unwrap();
+            seed(&database, &docs, base, &row);
+            let mut store = JournalStore {
+                journal: LocalJournal {
+                    connection: &database,
+                    root_object_id: Some("root".into()),
+                },
+                client: Arc::new(NoRpc),
+                contracts: Policy(
+                    docs.iter()
+                        .map(|d| hash_json(d.required("value").unwrap()).unwrap())
+                        .collect(),
+                ),
+                limits: HistoryLimits::default(),
+                now: || String::from("2026-01-02T03:04:05.006Z"),
+                new_id: || JsString::from(uuid::Uuid::new_v4().to_string()),
+                cache: None,
+            };
+            let saved = Store::read(&store, "task-board/run", &pin(200, 1.0), true)
+                .await
+                .unwrap();
+            let mut call = Store::read(&store, "task-board/native-call", &pin(300, 2.0), true)
+                .await
+                .unwrap();
+            let identity = NativeIntent {
+                store: &store,
+                catalogs: &catalogs,
+            }
+            .evidence_identity(&saved.value, &call.value, &"caller".into())
+            .unwrap();
+            let mut observation = parse(
+                std::str::from_utf8(&bytes(
+                    &base.required("blobs").unwrap().as_array().unwrap()[0]
+                        .required("body")
+                        .unwrap(),
+                ))
+                .unwrap(),
+                MANAGEMENT_FRAME_BYTES,
+            )
+            .unwrap();
+            observation.insert("code", "executor_already_running".into());
+            if preparation == "start" {
+                let params = Json::Object(vec![]);
+                observation.insert("method", "thread/start".into());
+                observation.insert("params", params.clone());
+                observation.insert(
+                    "requestHash",
+                    hash_json(&Json::object([
+                        ("method", "thread/start".into()),
+                        ("params", params),
+                    ]))
+                    .unwrap()
+                    .into(),
+                );
+            }
+            if mode != "dispatched" && mode != "unknown" {
+                for key in ["epoch", "requestId", "reply"] {
+                    observation.insert(key, Json::Null);
+                }
+            }
+            if mode == "unknown" {
+                observation.insert("phase", "outcome_unknown".into());
+                observation.insert("reply", Json::Null);
+            }
+            let artifact = NativeEvidence {
+                store: &store,
+                catalogs: &catalogs,
+            }
+            .save(&call.pin.to_json(), &observation, &identity)
+            .await
+            .unwrap();
+            for (key, value) in [
+                ("evidence", artifact),
+                ("code", "executor_already_running".into()),
+                ("epoch", observation.required("epoch").unwrap().clone()),
+                ("ownerPhase", observation.required("phase").unwrap().clone()),
+            ] {
+                call.value.insert(key, value);
+            }
+            store.contracts.0.insert(hash_json(&call.value).unwrap());
+            store
+                .journal
+                .update(
+                    "task-board/native-call",
+                    &s(&call.pin.to_json(), "objectId"),
+                    2.0,
+                    &call.value,
+                    &"2026-01-02T03:04:05.006Z".into(),
+                )
+                .unwrap();
+            let mut terminal = Store::read(&store, "task-board/run", &pin(200, 2.0), true)
+                .await
+                .unwrap()
+                .value;
+            terminal.insert(
+                "externalOutcome",
+                Json::object([
+                    ("state", "failed".into()),
+                    ("code", "executor_already_running".into()),
+                ]),
+            );
+            terminal.insert(
+                "calls",
+                Json::object([("thread", Json::Null), ("turn", Json::Null)]),
+            );
+            if mode == "cancelled" {
+                terminal.insert(
+                    "cancellation",
+                    Json::object([("reason", "cancelled".into())]),
+                );
+            }
+            if mode == "known-turn" {
+                terminal.insert("turnId", "known-turn".into());
+            }
+            store.contracts.0.insert(hash_json(&terminal).unwrap());
+            store
+                .journal
+                .update(
+                    "task-board/run",
+                    &s(&pin(200, 2.0), "objectId"),
+                    2.0,
+                    &terminal,
+                    &"2026-01-02T03:04:05.006Z".into(),
+                )
+                .unwrap();
+            let raw = base.required("task").unwrap();
+            let mut value = raw.required("value").unwrap().clone();
+            if preparation == "start" {
+                value.insert("primaryResourceRef", Json::Null);
+                value.insert("primaryBackend", Json::Null);
+            }
+            value.insert("lastRun", pin(200, 3.0));
+            value.insert(
+                "completionIssue",
+                Json::object([
+                    ("code", "executor_already_running".into()),
+                    ("run", pin(200, 2.0)),
+                    ("retryAt", Json::Null),
+                ]),
+            );
+            if mode == "wrong-account" {
+                value.insert(
+                    "primaryBackend",
+                    Json::object([
+                        ("backendId", "codex".into()),
+                        ("provider", "codex".into()),
+                        ("accountId", "other".into()),
+                    ]),
+                );
+            }
+            let task = Document {
+                pin: ivy_task_board::operations::ObjectPin::from_json(
+                    raw.required("pin").unwrap().clone(),
+                )
+                .unwrap(),
+                value,
+                parent_id: Some("root".into()),
+                content_hash: String::new(),
+            };
+            let before = database.total_changes();
+            for _ in 0..2 {
+                let result = ContextRecovery::current(&store, &catalogs, "caller".into())
+                    .unstarted_executor_conflict(&task)
+                    .await
+                    .unwrap();
+                assert_eq!(result.is_some(), mode == "unstarted", "{mode}");
+            }
+            assert_eq!(database.total_changes(), before);
+        }
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn recovery_proof_selection_matches_original_over_exact_journal_and_receipts() {
     let data = oracle();

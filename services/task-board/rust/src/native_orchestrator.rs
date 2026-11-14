@@ -842,8 +842,15 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
                 .await?;
             return Ok(());
         }
-        if self.unresolved(run, NativeSlot::Steer).await? {
-            self.services.advance(id, NativeSlot::Steer).await?;
+        let steering = self.unresolved(run, NativeSlot::Steer).await?;
+        if steering
+            && self
+                .services
+                .advance(id, NativeSlot::Steer)
+                .await?
+                .as_object()
+                .is_some()
+        {
             return Ok(());
         }
         if self.unresolved(run, NativeSlot::Thread).await? {
@@ -875,6 +882,12 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
         let status = s(turn, "status")?.clone();
         let thread = field(field(field(&metadata, "reply"), "result"), "thread");
         let in_progress = status == JsString::from("inProgress");
+        // An uncertain steer cannot outlive its exact terminal turn. Keep its
+        // original receipt unresolved, but let verified turn completion proceed.
+        // Active turns still wait for that receipt before further control.
+        if steering && in_progress {
+            return Ok(());
+        }
         if !in_progress {
             self.progress.forget(id);
             self.threads.borrow_mut().retain(|v| &v.run != id);

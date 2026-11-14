@@ -321,6 +321,26 @@ impl<
         .retry_at(t)
         .await
     }
+    async fn executor_conflict_ready(&self, t: &Document) -> IvyResult<bool> {
+        let proof = ContextRecovery::current(
+            self.checks.core.store,
+            self.checks.core.catalogs,
+            self.principal_id.clone(),
+        )
+        .unstarted_executor_conflict(t)
+        .await?;
+        match proof {
+            Some(run) => {
+                NativeInspector {
+                    store: self.comments,
+                    catalogs: self.checks.core.catalogs,
+                }
+                .unstarted_context_idle(&run)
+                .await
+            }
+            None => Ok(false),
+        }
+    }
     async fn schedule(&self, r: &Json) -> IvyResult<Json> {
         self.calls.schedule(r)?.await
     }

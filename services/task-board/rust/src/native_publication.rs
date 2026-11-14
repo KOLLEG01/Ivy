@@ -1169,16 +1169,34 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                             } else {
                                 f(&observation, "code").clone()
                             },
-                            Some(if f(run, "cancellation").is_null() && has(reply, "error") {
-                                crate::native_rate_limit::native_error_retry_at(
-                                    f(reply, "error"),
-                                    s(op, "createdAt")?,
-                                )?
-                                .map(Json::String)
-                                .unwrap_or(Json::Null)
-                            } else {
-                                Json::Null
-                            }),
+                            Some(
+                                if slot_text == "thread"
+                                    && (eq(f(&call.value, "request"), "method", "thread/resume")
+                                        || eq(f(&call.value, "request"), "method", "thread/start"))
+                                    && eq(&observation, "code", "executor_already_running")
+                                    && f(run, "cancellation").is_null()
+                                    && f(run, "turnId").is_null()
+                                    && f(&observation, "epoch").is_null()
+                                    && f(&observation, "requestId").is_null()
+                                    && reply.is_null()
+                                {
+                                    let attempt = n(run, "attempt").max(1.0).min(5.0) as u32;
+                                    completion_policy::after(
+                                        s(op, "createdAt")?,
+                                        (30_000.0 * f64::from(1_u32 << (attempt - 1)))
+                                            .min(300_000.0),
+                                    )?
+                                } else if f(run, "cancellation").is_null() && has(reply, "error") {
+                                    crate::native_rate_limit::native_error_retry_at(
+                                        f(reply, "error"),
+                                        s(op, "createdAt")?,
+                                    )?
+                                    .map(Json::String)
+                                    .unwrap_or(Json::Null)
+                                } else {
+                                    Json::Null
+                                },
+                            ),
                         );
                     }
                 } else {
@@ -1649,7 +1667,9 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         if !done.is_null() && !f(f(run, "calls"), "steer").is_null() {
             let (_, o) = self.observed(run, f(f(run, "calls"), "steer")).await?;
             require(
-                one(&o, "phase", &["succeeded", "failed"]),
+                one(&o, "phase", &["succeeded", "failed"])
+                    || eq(&o, "phase", "outcome_unknown")
+                        && one(change, "kind", &["completion", "transcript"]),
                 "task_board_outcome_unresolved",
                 "Resolve the original steering receipt before closing its turn.",
             )?;

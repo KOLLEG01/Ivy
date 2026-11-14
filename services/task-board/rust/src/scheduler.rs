@@ -90,6 +90,7 @@ pub trait SchedulerPolicies: TaskPrompts {
     async fn unstarted_missing_context(&self, task: &Document) -> IvyResult<bool>;
     async fn unstarted_archived_context(&self, task: &Document) -> IvyResult<bool>;
     async fn failed_rate_limit_retry_at(&self, task: &Document) -> IvyResult<Option<JsString>>;
+    async fn executor_conflict_ready(&self, task: &Document) -> IvyResult<bool>;
     async fn schedule(&self, request: &Json) -> IvyResult<Json>;
     async fn recover_operation(&self, id: &JsString) -> IvyResult<Json>;
 }
@@ -182,6 +183,9 @@ impl<R: RpcClient + 'static, P: SchedulerPolicies> SchedulerPolicies for Schedul
     }
     async fn failed_rate_limit_retry_at(&self, t: &Document) -> IvyResult<Option<JsString>> {
         self.policies.failed_rate_limit_retry_at(t).await
+    }
+    async fn executor_conflict_ready(&self, t: &Document) -> IvyResult<bool> {
+        self.policies.executor_conflict_ready(t).await
     }
     async fn schedule(&self, r: &Json) -> IvyResult<Json> {
         self.policies.schedule(r).await
@@ -347,6 +351,59 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         if !should_wake_with_inputs(self.store, value, &at, !comments.is_empty()).await? {
             return Ok(None);
         }
+        if crate::wake::executor_conflict(value) {
+            let checked = self.engine.executor_conflict_ready(task).await;
+            if !matches!(checked, Ok(true)) {
+                let previous = f(value, "runtimeWait");
+                let prior_delay = f(previous, "retryAt")
+                    .as_js_string()
+                    .zip(f(value, "updatedAt").as_js_string())
+                    .map(|(retry, updated)| {
+                        Ok::<_, IvyError>(
+                            native_instant(retry, None)? - native_instant(updated, None)?,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(15_000);
+                let retry_at = date_to_iso(
+                    (native_instant(&at, None)? + (prior_delay * 2).clamp(30_000, 300_000)) as f64,
+                )?;
+                let mut detail = JsString::from(
+                    "Executor conflict: the original preparation must be conclusively unstarted and any saved context idle before continuation. ",
+                );
+                if let Err(error) = checked {
+                    detail.0.extend(error.code_js().0);
+                    detail.0.extend(": ".encode_utf16());
+                    detail.0.extend(error.message_js().0.into_iter().take(1024));
+                } else {
+                    detail.0.extend(
+                        "The original context or operation is still active or unresolved."
+                            .encode_utf16(),
+                    );
+                }
+                detail.0.extend(" Next reconciliation: ".encode_utf16());
+                detail.0.extend(&retry_at.0);
+                let mut request = base;
+                request.insert("action", "defer".into());
+                request.insert(
+                    "runtimeWait",
+                    Json::object([
+                        ("reason", "external_outcome".into()),
+                        ("detail", Json::String(detail)),
+                        (
+                            "since",
+                            f(previous, "since")
+                                .as_js_string()
+                                .cloned()
+                                .unwrap_or(at)
+                                .into(),
+                        ),
+                        ("retryAt", Json::String(retry_at)),
+                    ]),
+                );
+                return Ok(Some(request));
+            }
+        }
         let feedback = self
             .engine
             .task_prompt(value, self.engine.service_node_id(), None)?;
@@ -357,6 +414,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                 s(&base, "operationId")?,
                 Some(&feedback),
                 !comments.is_empty()
+                    || crate::wake::executor_conflict(value)
                     || f(value, "executionChangeRequested").as_bool() == Some(true),
             )
             .await;
@@ -564,7 +622,11 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         }
         let mut comments = self.engine.pending_comment_ids(&task, &[]).await?;
         let issue = f(value, "completionIssue");
-        if !comments.is_empty() && present(issue) && !present(f(issue, "retryAt")) {
+        if !comments.is_empty()
+            && present(issue)
+            && !present(f(issue, "retryAt"))
+            && !crate::wake::executor_conflict(value)
+        {
             let run = self
                 .store
                 .read("task-board/run", value.required("lastRun")?, true)

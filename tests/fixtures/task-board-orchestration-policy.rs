@@ -744,7 +744,23 @@ async fn bounded_orchestration_preserves_historical_fences_and_current_native_po
         };
         let world = World::new(&row);
         let results = actions(&world, &catalogs).await;
-        if name == "missing owner confirmation projects unknown" {
+        if name == "steering is reconciled before inspection" {
+            same(
+                &Json::Array(results),
+                &Json::Array(vec![outcome(Ok(Json::Null))]),
+            );
+            methods(
+                &world,
+                &["owner", "read", "read", "read", "advance", "find"],
+            );
+            assert!(!world.log.borrow().iter().any(|event| {
+                matches!(
+                    event.as_array().unwrap()[0].as_str().unwrap().as_str(),
+                    "prepare" | "update" | "complete" | "save-snapshot"
+                )
+            }));
+            current += 1;
+        } else if name == "missing owner confirmation projects unknown" {
             same(
                 &Json::Array(results),
                 &Json::Array(vec![outcome(Ok(Json::Null))]),
@@ -964,7 +980,7 @@ async fn bounded_orchestration_preserves_historical_fences_and_current_native_po
         "Historical trace changes require explicit current assertions:\n{}",
         mismatches.join("\n")
     );
-    assert_eq!((rows.len(), golden, current), (87, 69, 18));
+    assert_eq!((rows.len(), golden, current), (87, 68, 19));
 }
 
 #[tokio::test]

@@ -391,3 +391,108 @@ async fn current_recovery_retries_use_error_delays_without_growing_outage_backof
         assert_eq!(subject.drain(&id(200)).await.unwrap(), attempted);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn unresolved_steer_keeps_original_receipt_but_allows_verified_terminal_turn_completion() {
+    let catalogs = catalogs();
+    let pending = row("steering is reconciled before inspection");
+    for status in ["completed", "failed", "interrupted", "inProgress"] {
+        let mut retained = row("interrupted completion");
+        change(&mut retained, "advanceResult", Json::Null);
+        change(&mut retained, "status", status.into());
+        retained.insert("calls", f(&pending, "calls").clone());
+        let mut run = f(&retained, "run").clone();
+        let mut value = f(&run, "value").clone();
+        let mut calls = f(&value, "calls").clone();
+        calls.insert("steer", pin(302, 2.0));
+        value.insert("calls", calls);
+        run.insert("value", value);
+        retained.insert("run", run);
+        let mut turns = f(&retained, "turns").clone();
+        let mut reply = f(&turns, "reply").clone();
+        let mut result = f(&reply, "result").clone();
+        let mut data = f(&result, "data").as_array().unwrap().to_vec();
+        data[0].insert("status", status.into());
+        result.insert("data", Json::Array(data));
+        reply.insert("result", result);
+        turns.insert("reply", reply);
+        retained.insert("turns", turns);
+        let world = World::new(&retained);
+        NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker())
+            .step(&id(200))
+            .await
+            .unwrap();
+        let trace = world.log.borrow();
+        assert_eq!(
+            methods(&world).iter().filter(|m| *m == "advance").count(),
+            1
+        );
+        assert!(methods(&world).contains(&"find".into()));
+        assert!(!methods(&world).contains(&"prepare".into()));
+        let completion = trace.iter().find(|event| {
+            let values = event.as_array().unwrap();
+            values[0].is_str("update") && f(f(&values[1], "change"), "kind").is_str("completion")
+        });
+        assert_eq!(completion.is_some(), status != "inProgress", "{status}");
+        if status == "inProgress" {
+            assert!(
+                !methods(&world)
+                    .iter()
+                    .any(|m| ["update", "save-snapshot", "save-output"].contains(&m.as_str()))
+            );
+        }
+        // The harness rejects direct writes: terminal evidence never rewrites
+        // the unknown original operation or manufactures successful delivery.
+        assert_eq!(
+            f(
+                f(f(&retained, "calls"), &id(302).to_utf8().unwrap()),
+                "value"
+            )
+            .get("ownerPhase"),
+            Some(&"outcome_unknown".into())
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unresolved_steer_waits_for_uncertain_inspection_and_new_receipt_publication() {
+    let catalogs = catalogs();
+    for inspection in ["pending", "absent"] {
+        let mut retained = row("steering is reconciled before inspection");
+        change(&mut retained, "inspection", inspection.into());
+        let world = World::new(&retained);
+        NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker())
+            .step(&id(200))
+            .await
+            .unwrap();
+        assert!(methods(&world).contains(&"find".into()));
+        assert!(
+            !methods(&world)
+                .iter()
+                .any(|m| ["prepare", "save-snapshot", "save-output"].contains(&m.as_str()))
+        );
+        for event in world
+            .log
+            .borrow()
+            .iter()
+            .filter(|event| event.as_array().unwrap()[0].is_str("update"))
+        {
+            assert!(f(f(&event.as_array().unwrap()[1], "change"), "kind").is_str("unavailable"));
+        }
+    }
+    let mut changed = row("steering is reconciled before inspection");
+    change(
+        &mut changed,
+        "advanceResult",
+        Json::object([("advanced", true.into())]),
+    );
+    let world = World::new(&changed);
+    NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker())
+        .step(&id(200))
+        .await
+        .unwrap();
+    assert!(
+        !methods(&world).contains(&"find".into()),
+        "New receipt publication must finish before reading with the old Run pin."
+    );
+}
