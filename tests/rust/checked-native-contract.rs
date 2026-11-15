@@ -68,12 +68,25 @@ fn claude_catalog_keeps_saved_plan_identity_and_selects_rust_sdk_by_default() {
             "sha256:d2bbd218eeceea5c93b60aa6220944a4cc299aa6b78f5170259d98075a265e69".into(),
         ),
     ]);
+    let previous_sdk_identity = IvyJson::object([
+        (
+            "sourceHash",
+            "sha256:be33a088b4d71e58c2561b758f732093926cab0ca2d13bd5158f063fdf5af7d1".into(),
+        ),
+        (
+            "nativeExecutableHash",
+            "sha256:5c4d7cc0cf2a1a629816a66e514369a3360c76003ec3a7715c381fda7d0fda5d".into(),
+        ),
+    ]);
     let current = catalogs.checked_native_contract(&version, None).unwrap();
     let rust = catalogs
         .checked_native_contract(&version, Some(&rust_identity))
         .unwrap();
     let saved = catalogs
         .checked_native_contract(&version, Some(&saved_identity))
+        .unwrap();
+    let previous_sdk = catalogs
+        .checked_native_contract(&version, Some(&previous_sdk_identity))
         .unwrap();
     let lock = parse(
         &std::fs::read_to_string(repo.join("services/agent-manager/claude/adapter.lock.json"))
@@ -88,6 +101,20 @@ fn claude_catalog_keeps_saved_plan_identity_and_selects_rust_sdk_by_default() {
     assert_ne!(current.catalog_hash(), rust.catalog_hash());
     assert_ne!(rust.catalog_hash(), saved.catalog_hash());
     assert_ne!(current.catalog_hash(), saved.catalog_hash());
+    assert_ne!(current.catalog_hash(), previous_sdk.catalog_hash());
+    assert_eq!(
+        catalogs
+            .checked_native_contract(
+                &version,
+                Some(&IvyJson::object([(
+                    "sourceHash",
+                    previous_sdk_identity.get("sourceHash").unwrap().clone(),
+                )])),
+            )
+            .unwrap()
+            .catalog_hash(),
+        previous_sdk.catalog_hash()
+    );
     let mismatched_build = IvyJson::object([
         (
             "sourceHash",
