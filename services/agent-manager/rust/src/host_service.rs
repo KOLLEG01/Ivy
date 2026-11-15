@@ -228,8 +228,10 @@ impl HostResources {
                         .collect::<Vec<_>>();
                     for backend in host.backends() {
                         let observation = backend.readiness.observation()?;
-                        let available =
-                            backend.readiness.ready() && !backend.retiring.load(Ordering::Acquire);
+                        // Hive readiness also gates original-state reads. Keep
+                        // their route until native retirement; agent.status and
+                        // work admission report/reject new work while draining.
+                        let available = backend.readiness.ready();
                         ready |= available;
                         let observation = observation.unwrap_or_else(|| {
                             let mut snapshot = crate::reconciliation::readiness_snapshot(
