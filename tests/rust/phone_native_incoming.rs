@@ -94,6 +94,8 @@ pub(super) fn normalize(value: &mut IvyJson, generated: &str) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn original_incoming_admission_claim_cancel_expiry_and_source_identity_use_one_owner() {
+    let started_at = chrono::Utc::now().timestamp_millis();
+    let mut metadata_checked = 0;
     for scenario in [
         "cancel_unclaimed",
         "cancel_claimed",
@@ -396,12 +398,23 @@ async fn original_incoming_admission_claim_cancel_expiry_and_source_identity_use
                 ("originalBindingReleased", true.into()),
             ]),
         );
+        metadata_checked += super::dial::extend_current_calls(
+            &mut expected,
+            &actual,
+            started_at,
+            chrono::Utc::now().timestamp_millis(),
+        );
         assert_eq!(actual, expected, "{scenario}");
     }
+    assert!(
+        metadata_checked > 0,
+        "Native end metadata was not exercised"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_claim_preserves_original_dto_lookup_and_outgoing_refusal_order() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     let (owner, _, _, params) = actual_owner(43000, 43998);
     let remaining = Arc::new(Remaining::default());
     remaining.close_gate.release();
@@ -454,7 +467,7 @@ async fn native_claim_preserves_original_dto_lookup_and_outgoing_refusal_order()
             ("original", original.clone()),
         ]),
     );
-    super::dial::compare(&rows, &original, &steps);
+    super::dial::compare_current_calls(&rows, &original, &steps, started_at);
     handler.shutdown().await.unwrap();
 }
 

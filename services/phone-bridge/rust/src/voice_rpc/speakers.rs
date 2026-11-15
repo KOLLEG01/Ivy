@@ -19,10 +19,78 @@ pub trait VoiceSpeakerControl: VoiceModelControl {
     fn speaker_settings(&self) -> VoiceSpeakerSettings;
 }
 
-type Loading = watch::Receiver<Option<IvyResult<IvyJson>>>;
+#[derive(Debug)]
+pub struct SpeakerVoice {
+    pub id: JsString,
+    display_name: JsString,
+}
+
+#[derive(Debug)]
+pub struct VoiceSpeakers {
+    pub protocol: JsString,
+    pub catalog_version: JsString,
+    pub default_voice_id: JsString,
+    pub voices: Box<[SpeakerVoice]>,
+}
+
+impl VoiceSpeakers {
+    pub fn contains(&self, id: &JsString) -> bool {
+        self.voices.iter().any(|voice| &voice.id == id)
+    }
+
+    pub fn to_wire(&self) -> IvyJson {
+        IvyJson::object([
+            ("protocol", self.protocol.clone().into()),
+            ("catalogVersion", self.catalog_version.clone().into()),
+            ("defaultVoiceId", self.default_voice_id.clone().into()),
+            (
+                "voices",
+                IvyJson::Array(
+                    self.voices
+                        .iter()
+                        .map(|voice| {
+                            IvyJson::object([
+                                ("id", voice.id.clone().into()),
+                                ("displayName", voice.display_name.clone().into()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    pub fn from_wire(value: &IvyJson) -> IvyResult<Self> {
+        let string = |v: &IvyJson, key: &str| {
+            v.required(key)?
+                .as_js_string()
+                .cloned()
+                .ok_or_else(IvyError::internal)
+        };
+        Ok(Self {
+            protocol: string(value, "protocol")?,
+            catalog_version: string(value, "catalogVersion")?,
+            default_voice_id: string(value, "defaultVoiceId")?,
+            voices: value
+                .required("voices")?
+                .as_array()
+                .ok_or_else(IvyError::internal)?
+                .iter()
+                .map(|voice| {
+                    Ok(SpeakerVoice {
+                        id: string(voice, "id")?,
+                        display_name: string(voice, "displayName")?,
+                    })
+                })
+                .collect::<IvyResult<_>>()?,
+        })
+    }
+}
+
+type Loading = watch::Receiver<Option<IvyResult<Arc<VoiceSpeakers>>>>;
 struct Cache {
     connection: Weak<NativeRpc>,
-    catalog: IvyJson,
+    catalog: Arc<VoiceSpeakers>,
     expires_at: i128,
 }
 #[derive(Default)]
@@ -55,7 +123,7 @@ impl VoiceSpeakerCatalog {
         }))
     }
 
-    pub async fn speaker_voices(&self) -> IvyResult<IvyJson> {
+    pub async fn speaker_voices(&self) -> IvyResult<Arc<VoiceSpeakers>> {
         let connection = self.0.control.open().await?;
         let current = self
             .0
@@ -89,23 +157,30 @@ impl VoiceSpeakerCatalog {
                 state.loading = Some(receive.clone());
                 let owner = self.0.clone();
                 tokio::spawn(async move {
-                    let result = discover(&owner).await;
+                    let discovered = discover(&owner).await;
                     // Unlike model discovery, the original speaker operation has
                     // no initial-connection completion fence. A load spanning a
-                    // reconnect is cached on the connection current at completion.
-                    let identity = owner
-                        .control
-                        .current()
-                        .map(|rpc| Arc::downgrade(&rpc.rpc))
-                        .unwrap_or_default();
+                    // reconnect still completes for its observers. Cache it only
+                    // if the schema/config connection remains current, so a later
+                    // replacement cannot inherit that retired connection's view.
+                    let result = discovered
+                        .as_ref()
+                        .map(|(catalog, _)| catalog.clone())
+                        .map_err(Clone::clone);
+                    let current = owner.control.current();
                     {
                         let mut state = owner.state.lock().unwrap();
-                        if let Ok(catalog) = &result {
-                            state.cache = Some(Cache {
-                                connection: identity,
-                                catalog: catalog.clone(),
-                                expires_at: (owner.now)() + 60_000,
-                            });
+                        if let Ok((catalog, identity)) = discovered {
+                            if current.as_ref().is_some_and(|rpc| {
+                                rpc.transport().connected()
+                                    && identity.ptr_eq(&Arc::downgrade(&rpc.rpc))
+                            }) {
+                                state.cache = Some(Cache {
+                                    connection: identity,
+                                    catalog,
+                                    expires_at: (owner.now)() + 60_000,
+                                });
+                            }
                         }
                         state.loading = None;
                     }
@@ -124,27 +199,33 @@ impl VoiceSpeakerCatalog {
     }
 }
 
-async fn call(owner: &Inner, method: &str, params: IvyJson) -> IvyResult<IvyJson> {
+async fn call(
+    owner: &Inner,
+    method: &str,
+    params: IvyJson,
+) -> IvyResult<(super::VoiceRpc, IvyJson)> {
     let rpc = owner.control.current().ok_or_else(|| {
         IvyError::new(
             "phone_voice_unavailable",
             "Codex Voice transport is unavailable.",
         )
     })?;
-    rpc.call(
-        method,
-        params,
-        RequestOptions {
-            detach_on_timeout: true,
-            ..RequestOptions::default()
-        },
-        Some(15_000),
-    )
-    .await
+    let result = rpc
+        .call(
+            method,
+            params,
+            RequestOptions {
+                detach_on_timeout: true,
+                ..RequestOptions::default()
+            },
+            Some(15_000),
+        )
+        .await?;
+    Ok((rpc, result))
 }
 
-async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
-    let result = call(
+async fn discover(owner: &Inner) -> IvyResult<(Arc<VoiceSpeakers>, Weak<NativeRpc>)> {
+    let (_, result) = call(
         owner,
         "thread/realtime/listVoices",
         IvyJson::object([] as [(&str, IvyJson); 0]),
@@ -171,7 +252,7 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
         64 * 1024,
     )?;
     let voices = result.get("voices").ok_or_else(IvyError::internal)?;
-    let configuration = call(
+    let (configuration_connection, configuration) = call(
         owner,
         "config/read",
         IvyJson::object([
@@ -209,7 +290,7 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
                 "Native Voice startup is unavailable.",
             )
         })?;
-    select_catalog(voices, configured.as_ref(), |protocol, voice| {
+    let catalog = select_catalog(voices, configured.as_ref(), |protocol, voice| {
         let params = IvyJson::object([
             ("threadId", "speaker-catalog-discovery".into()),
             ("version", protocol.into()),
@@ -250,13 +331,19 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
                 .schemas
                 .validate(schema, &unsupported, 6 * 1024 * 1024)
                 .is_err()
-    })
+    })?;
+    let identity = if rpc.same_connection(&configuration_connection) {
+        Arc::downgrade(&rpc.rpc)
+    } else {
+        Weak::new()
+    };
+    Ok((Arc::new(catalog), identity))
 }
 fn select_catalog(
     voices: &IvyJson,
     configured: Option<&IvyJson>,
     supports: impl Fn(&str, &JsString) -> bool,
-) -> IvyResult<IvyJson> {
+) -> IvyResult<VoiceSpeakers> {
     let invalid = || {
         IvyError::new(
             "phone_speaker_catalog_invalid",
@@ -320,24 +407,21 @@ fn select_catalog(
                     "Default speaker voice is outside the selected native catalog.",
                 )
             })?;
-        return Ok(IvyJson::object([
-            ("protocol", protocol.into()),
-            ("catalogVersion", version.as_str().into()),
-            ("defaultVoiceId", IvyJson::String(selected.clone())),
-            (
-                "voices",
-                IvyJson::Array(
-                    ids.iter()
-                        .map(|id| {
-                            Ok(IvyJson::object([
-                                ("id", IvyJson::String(id.clone())),
-                                ("displayName", IvyJson::String(display_name(id)?)),
-                            ]))
-                        })
-                        .collect::<IvyResult<Vec<_>>>()?,
-                ),
-            ),
-        ]));
+        let default_voice_id = selected.clone();
+        return Ok(VoiceSpeakers {
+            protocol: protocol.into(),
+            catalog_version: version.as_str().into(),
+            default_voice_id,
+            voices: ids
+                .into_iter()
+                .map(|id| {
+                    Ok(SpeakerVoice {
+                        display_name: display_name(&id)?,
+                        id,
+                    })
+                })
+                .collect::<IvyResult<_>>()?,
+        });
     }
     Err(invalid())
 }

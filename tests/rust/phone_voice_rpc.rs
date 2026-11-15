@@ -1,9 +1,9 @@
+use crate::voice_rpc::{VoiceModels, VoiceRpc, VoiceSchemas, call_timeout_ms};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, Outcome,
     json::{parse, stringify},
 };
 use ivy_host_runtime::codex_rpc::{Events, NativeRpc, RequestOptions};
-use crate::voice_rpc::{VoiceRpc, VoiceSchemas, call_timeout_ms};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -102,13 +102,16 @@ fn model_selection_preserves_keypad_aliases_and_advertised_future_efforts() {
         model: "future-model".into(),
         reasoning_effort: "future-effort".into(),
     };
-    selection.validate(&value(r#"[{"model":"future-model","supportedReasoningEfforts":[{"reasoningEffort":"future-effort"}]}]"#)).unwrap();
+    selection.validate(&VoiceModels::from_wire(&value(r#"[{"model":"future-model","displayName":"Future","description":"Provider model","defaultReasoningEffort":"future-effort","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"future-effort","description":"Provider effort"}]}]"#)).unwrap()).unwrap();
     for models in [
         r#"[]"#,
-        r#"[{"model":"future-model","supportedReasoningEfforts":[]}]"#,
+        r#"[{"model":"future-model","displayName":"Future","description":"Provider model","defaultReasoningEffort":"future-effort","isDefault":false,"supportedReasoningEfforts":[]}]"#,
     ] {
         assert_eq!(
-            selection.validate(&value(models)).unwrap_err().code,
+            selection
+                .validate(&VoiceModels::from_wire(&value(models)).unwrap())
+                .unwrap_err()
+                .code,
             "phone_voice_selection_invalid"
         );
     }

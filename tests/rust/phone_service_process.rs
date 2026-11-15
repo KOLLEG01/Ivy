@@ -233,7 +233,8 @@ impl Launcher for FakeLauncher {
     ) -> Work<IvyResult<Launched>> {
         let capture = self.capture.clone();
         let journal = self.journal.clone();
-        let artifact = self.artifact.clone();
+        // The launcher receives the canonical OS root, including Windows' verbatim prefix.
+        let artifact = std::fs::canonicalize(&self.artifact).unwrap();
         let name = self.name.clone();
         let status_gate = self.status_gate.clone();
         let require_stop = self.require_stop;

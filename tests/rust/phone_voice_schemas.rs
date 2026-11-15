@@ -220,7 +220,7 @@ async fn model_and_speaker_outputs_use_exact_pinned_documents_and_can_retry() {
         (value(r#"{"data":[],"nextCursor":null}"#), true),
     ] {
         let models = models.clone();
-        let request = tokio::spawn(async move { models.models().await });
+        let request = tokio::spawn(async move { models.models().await.map(|view| view.to_wire()) });
         let frame = peer.request().await;
         assert_eq!(frame.get("method"), Some(&"model/list".into()));
         peer.reply(&frame, page).await;
@@ -243,7 +243,8 @@ async fn model_and_speaker_outputs_use_exact_pinned_documents_and_can_retry() {
         ),
     ] {
         let speakers = speakers.clone();
-        let request = tokio::spawn(async move { speakers.speaker_voices().await });
+        let request =
+            tokio::spawn(async move { speakers.speaker_voices().await.map(|view| view.to_wire()) });
         let frame = peer.request().await;
         assert_eq!(
             frame.get("method"),
@@ -263,12 +264,16 @@ async fn model_and_speaker_outputs_use_exact_pinned_documents_and_can_retry() {
             assert_eq!(result.unwrap_err().code, "invalid_arguments");
         }
     }
-    assert_eq!(models.models().await.unwrap(), IvyJson::Array(vec![]));
+    assert_eq!(
+        models.models().await.unwrap().to_wire(),
+        IvyJson::Array(vec![])
+    );
     assert_eq!(
         speakers
             .speaker_voices()
             .await
             .unwrap()
+            .to_wire()
             .get("defaultVoiceId"),
         Some(&"cove".into())
     );

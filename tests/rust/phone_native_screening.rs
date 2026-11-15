@@ -1,3 +1,4 @@
+use super::dial::compare_current_calls;
 use super::feedback::row;
 use super::*;
 use ivy_phone_bridge::native_sip::NativeSipCall;
@@ -310,6 +311,7 @@ fn audio_cases() -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_screening_composes_original_announcement_deadline_bridge_and_replacement() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     let (file, hash) = announcement();
     let screening = screening(&file.0, &hash);
     for mode in ["initial", "delayed"] {
@@ -424,7 +426,7 @@ async fn native_screening_composes_original_announcement_deadline_bridge_and_rep
                 ("syntheticRouteOpens", n(3)),
             ]),
         );
-        super::dial::compare(&rows, &original, &steps);
+        compare_current_calls(&rows, &original, &steps, started_at);
         assert_eq!(factory.starts.load(Ordering::SeqCst), 12);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 3);
         assert!(
@@ -440,6 +442,7 @@ async fn native_screening_composes_original_announcement_deadline_bridge_and_rep
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_screening_and_audio_dto_precedence_defaults_and_failed_preparation_match_original()
 {
+    let started_at = chrono::Utc::now().timestamp_millis();
     let (file, hash) = announcement();
     let valid = screening(&file.0, &hash);
     let selected = format!(r#"{{"callId":"{CALL}"}}"#);
@@ -559,7 +562,7 @@ async fn native_screening_and_audio_dto_precedence_defaults_and_failed_preparati
             ("physicalAudioOpens", n(0)),
         ]),
     );
-    super::dial::compare(&rows, &original, &steps);
+    compare_current_calls(&rows, &original, &steps, started_at);
     assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
     assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
     assert!(remaining.methods.lock().unwrap().is_empty());

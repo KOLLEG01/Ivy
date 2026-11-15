@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { unzipSync } from 'fflate';
 import { phoneEvsFlags, phoneEvsTarget } from '../package/phone-evs-package.mjs';
+import { compilerEnvironment } from './compiler-environment.mjs';
 
 // Separate reproducible dependency build. No tests, package activation or runtime mutation.
 // Only the pinned archive is extracted, and every output belongs to this fresh build directory.
@@ -24,7 +25,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function run(label, executable, args, timeout = 120_000) {
   const started = Date.now();
   const result = await new Promise((resolveResult, reject) => {
-    const child = spawn(executable, args, { cwd: work, windowsHide: true, timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(executable, args, { cwd: work, env: compilerEnvironment(process.env), windowsHide: true, timeout, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', value => { stdout += value; if (stdout.length > 4 * 1024 * 1024) child.kill(); });

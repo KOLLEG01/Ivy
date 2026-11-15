@@ -171,6 +171,166 @@ fn empty() -> IvyJson {
 }
 
 #[tokio::test]
+async fn byte_pressure_survives_out_of_order_and_late_reads_without_extra_requests() {
+    let mut f = Fixture::new("receipt-bytes");
+    let usage = |retained: f64| {
+        object([
+            ("receipts", 256.0.into()),
+            ("retainedBytes", retained.into()),
+            ("reservedBytes", 0.0.into()),
+            ("limitBytes", 16_777_216.0.into()),
+        ])
+    };
+    assert!(!f.client.receipt_rotation_due());
+    assert!(f.client.can_rotate_receipts());
+    let first = f.request("status", empty(), None, 5000);
+    let second = f.request("status", empty(), None, 5000);
+    f.sent(2).await;
+    let mut reply = f.response(1, empty());
+    reply.insert("receiptUsage", usage(8_388_608.0));
+    f.raw(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+        .await;
+    timed(second.wait()).await.unwrap();
+    assert!(f.client.receipt_rotation_due());
+    let mut reply = f.response(0, empty());
+    reply.insert("receiptUsage", usage(32.0));
+    f.raw(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+        .await;
+    timed(first.wait()).await.unwrap();
+    assert!(
+        f.client.receipt_rotation_due(),
+        "An older observation cannot erase completed-byte pressure in the same epoch"
+    );
+    assert_eq!(f.requests.lock().unwrap().len(), 2);
+    assert!(f.hooks.events.lock().unwrap().is_empty());
+    f.finish().await;
+
+    // Capacity pressure never permits retirement while the original result's
+    // durable acknowledgement is still blocked, even after native completion.
+    let mut f = Fixture::new("slow-receipt");
+    let effect = f.request("call.release", call_args(), Some(uuid(8)), 5000);
+    f.sent(1).await;
+    assert!(!f.client.can_rotate_receipts());
+    let mut reply = f.response(0, object([("released", true.into())]));
+    reply.insert("receiptUsage", usage(8_388_608.0));
+    f.raw(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+        .await;
+    until(|| f.client.receipt_rotation_due()).await;
+    assert!(!f.client.can_rotate_receipts());
+    f.hooks.saved.add_permits(1);
+    timed(effect.wait()).await.unwrap();
+    assert!(f.client.can_rotate_receipts());
+    f.finish().await;
+
+    // A fresh process epoch starts without pressure. Its original expired read
+    // can still report byte pressure; no repeat observation/effect is dispatched.
+    let mut f = Fixture::new("late-receipt-bytes");
+    assert!(!f.client.receipt_rotation_due());
+    let late = f.request("status", empty(), None, 1);
+    f.sent(1).await;
+    assert_eq!(
+        timed(late.wait()).await.unwrap_err().code,
+        "phone_request_timeout"
+    );
+    assert!(!f.client.is_closed());
+    let mut reply = f.response(0, empty());
+    reply.insert("receiptUsage", usage(8_388_608.0));
+    f.raw(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+        .await;
+    until(|| f.client.receipt_rotation_due()).await;
+    assert_eq!(f.requests.lock().unwrap().len(), 1);
+    f.finish().await;
+
+    let mut f = Fixture::new("invalid-receipt-bytes");
+    let read = f.request("status", empty(), None, 5000);
+    f.sent(1).await;
+    let mut reply = f.response(0, empty());
+    let mut invalid = usage(16_777_216.0);
+    invalid.insert("reservedBytes", 65_024.0.into());
+    reply.insert("receiptUsage", invalid);
+    f.raw(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+        .await;
+    assert_eq!(
+        timed(read.wait()).await.unwrap_err().code,
+        "phone_invalid_frame"
+    );
+    assert!(!f.client.receipt_rotation_due());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn one_poll_shares_call_reads_and_the_next_poll_observes_fresh_status() {
+    let mut f = Fixture::new("poll-snapshot");
+    let native = f.client.clone();
+    let first = tokio::spawn(async move {
+        let root = object([("call", object([("id", id(3))]))]);
+        let mut snapshot = PhoneNativeSnapshot::new(root);
+        assert_eq!(
+            snapshot
+                .for_call(&native, &uuid(3))
+                .await
+                .unwrap()
+                .get("call")
+                .unwrap()
+                .get("id"),
+            Some(&id(3))
+        );
+        for _ in 0..4 {
+            assert!(
+                snapshot
+                    .for_call(&native, &uuid(4))
+                    .await
+                    .unwrap()
+                    .get("call")
+                    .unwrap()
+                    .is_null()
+            );
+        }
+    });
+    f.sent(1).await;
+    assert_eq!(
+        f.requests.lock().unwrap()[0].get("params"),
+        Some(&object([("callId", id(4))]))
+    );
+    let status = object([
+        ("configured", true.into()),
+        ("endpoint", "127.0.0.1:5060".into()),
+        ("call", IvyJson::Null),
+        ("media", IvyJson::Null),
+        ("registration", IvyJson::Null),
+    ]);
+    f.reply(0, status).await;
+    timed(first).await.unwrap();
+    assert_eq!(f.requests.lock().unwrap().len(), 1);
+    let native = f.client.clone();
+    let next = tokio::spawn(async move {
+        let mut snapshot = PhoneNativeSnapshot::new(object([("call", IvyJson::Null)]));
+        snapshot
+            .for_call(&native, &uuid(4))
+            .await
+            .unwrap()
+            .get("endpoint")
+            .unwrap()
+            .clone()
+    });
+    f.sent(2).await;
+    f.reply(
+        1,
+        object([
+            ("configured", true.into()),
+            ("endpoint", "127.0.0.1:5070".into()),
+            ("call", IvyJson::Null),
+            ("media", IvyJson::Null),
+            ("registration", IvyJson::Null),
+        ]),
+    )
+    .await;
+    assert_eq!(timed(next).await.unwrap(), "127.0.0.1:5070".into());
+    assert_eq!(f.requests.lock().unwrap().len(), 2);
+    f.finish().await;
+}
+
+#[tokio::test]
 async fn realtime_errors_retain_the_original_receipt_and_leave_the_pipe_usable() {
     for code in ["phone_webrtc_failed", "phone_webrtc_sdp_invalid"] {
         let mut f = Fixture::new("realtime-error");
@@ -516,14 +676,14 @@ async fn original_pipe_receipts_late_replies_capacity_and_scoped_observations_ag
 }
 
 #[tokio::test]
-async fn real_journal_hooks_retain_dispatch_and_acknowledgement_after_observer_loss() {
+async fn real_journal_hooks_retain_original_success_and_native_errors_across_restart() {
     use crate::journal::{PhoneJournalLimits, PhoneJournalOptions, PhoneJournalOwner};
     let parent = std::env::var_os("IVY_TEST_TEMP")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let root = parent.join(format!("ivy-phone-client-journal-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
-    let journal = PhoneJournal::open(PhoneJournalOptions {
+    let options = || PhoneJournalOptions {
         data_root: root.clone(),
         owner: PhoneJournalOwner {
             host_id: "phone-fixture-host".into(),
@@ -531,9 +691,8 @@ async fn real_journal_hooks_retain_dispatch_and_acknowledgement_after_observer_l
         },
         limits: PhoneJournalLimits::default(),
         max_concurrent_calls: 1,
-    })
-    .await
-    .unwrap();
+    };
+    let journal = PhoneJournal::open(options()).await.unwrap();
     journal.begin_epoch(uuid(1)).await.unwrap();
     let (input, peer_input) = tokio::io::duplex(65536);
     let (mut output, read) = tokio::io::duplex(65536);
@@ -608,10 +767,122 @@ async fn real_journal_hooks_retain_dispatch_and_acknowledgement_after_observer_l
         }
     })
     .await;
+    let mut retained = vec![(
+        operation.clone(),
+        journal.operation(operation).await.unwrap().unwrap(),
+    )];
+    let schema = parse(
+        include_str!("../../specs/schemas/phone-ipc.schema.json"),
+        FRAME_BYTES,
+    )
+    .unwrap();
+    let codes = schema
+        .get("$defs")
+        .unwrap()
+        .get("Response")
+        .unwrap()
+        .get("properties")
+        .unwrap()
+        .get("error")
+        .unwrap()
+        .get("enum")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    for (index, code) in codes.iter().filter(|code| !code.is_null()).enumerate() {
+        let operation = uuid(200 + index as u32);
+        let arguments = object([
+            ("callId", id(100 + index as u32)),
+            ("generation", 0.0.into()),
+            ("sdp", "invalid answer".into()),
+        ]);
+        let work = client
+            .request(
+                "call.realtime.answer",
+                arguments.clone(),
+                Some(operation.clone()),
+                15000,
+            )
+            .unwrap();
+        line.clear();
+        timed(peer.read_line(&mut line)).await.unwrap();
+        let request = parse(&line, FRAME_BYTES).unwrap();
+        assert_eq!(request.get("method"), Some(&"call.realtime.answer".into()));
+        let reply = object([
+            ("version", 1.0.into()),
+            ("epoch", id(1)),
+            ("requestId", request.get("requestId").unwrap().clone()),
+            ("ok", false.into()),
+            ("result", IvyJson::Null),
+            ("error", code.clone()),
+        ]);
+        validate_phone("Response", &reply).unwrap();
+        output
+            .write_all(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        equal(
+            &timed(work.wait()).await.unwrap(),
+            &reply,
+            &code.as_str().unwrap(),
+        );
+        let saved = journal.operation(operation.clone()).await.unwrap().unwrap();
+        assert_eq!(saved.get("phase"), Some(&"result".into()));
+        assert_eq!(saved.get("receipt").unwrap().get("error"), Some(code));
+        retained.push((operation.clone(), saved));
+        let duplicate = client
+            .request("call.realtime.answer", arguments, Some(operation), 15000)
+            .unwrap();
+        assert_eq!(
+            timed(duplicate.wait()).await.unwrap_err().code,
+            "phone_operation_retained"
+        );
+        assert!(!client.is_closed());
+    }
+    let heartbeat = client.request("heartbeat", empty(), None, 15000).unwrap();
+    line.clear();
+    timed(peer.read_line(&mut line)).await.unwrap();
+    let request = parse(&line, FRAME_BYTES).unwrap();
+    assert_eq!(request.get("method"), Some(&"heartbeat".into()));
+    let reply = object([
+        ("version", 1.0.into()),
+        ("epoch", id(1)),
+        ("requestId", request.get("requestId").unwrap().clone()),
+        ("ok", true.into()),
+        ("result", object([("ok", true.into())])),
+        ("error", IvyJson::Null),
+    ]);
+    output
+        .write_all(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    equal(
+        &timed(heartbeat.wait()).await.unwrap(),
+        &reply,
+        "usable pipe",
+    );
+    assert!(!client.is_closed());
     client.close("phone_owner_stopping");
     drop(output);
     drop(peer);
     journal.close().wait().await.unwrap();
+    let reopened = PhoneJournal::open(options()).await.unwrap();
+    for (operation, original) in retained {
+        equal(
+            &reopened.operation(operation).await.unwrap().unwrap(),
+            &original,
+            "retained original after restart",
+        );
+        assert_eq!(
+            reopened
+                .submit(original.get("intent").unwrap().clone())
+                .await
+                .unwrap_err()
+                .code,
+            "phone_operation_retained"
+        );
+    }
+    reopened.close().wait().await.unwrap();
     assert!(
         root.file_name()
             .unwrap()

@@ -31,6 +31,9 @@ chrono.workspace = true
 subtle = "=2.6.1"
 chromiumoxide = { version = "=0.9.1", optional = true }
 png = "=0.18.1"
+resvg = { version = "=0.50.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+handlebars = "=6.4.4"
+chrono-tz.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true

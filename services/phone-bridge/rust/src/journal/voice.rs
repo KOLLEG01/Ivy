@@ -1,6 +1,9 @@
 use super::contracts::uuid;
 use super::*;
 use crate::voice_rpc::{VoiceJournalFuture, VoicePreparationJournal};
+use crate::voice_work::{
+    Changes, OBSERVATION_BYTES, Observation, RECORD_LIMIT, Records, WORK_BYTES, WorkRecord,
+};
 use ivy_contracts::{
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
@@ -34,27 +37,136 @@ fn parse_stored(value: &str) -> IvyResult<IvyJson> {
     // Writes enforce the record bound before storing JSON.
     parse(value, usize::MAX).map_err(|_| IvyError::internal())
 }
+fn check_voice_bytes(bytes: usize, count: usize, limit: usize) -> IvyResult<()> {
+    // Each retained row charges its bytes and one separator; only the array's
+    // opening byte remains. Empty arrays retain their original two-byte charge.
+    require(
+        if count == 0 { 2 } else { bytes + 1 } <= limit,
+        "phone_work_capacity",
+        "Voice records exceed their original total byte budget.",
+    )
+}
 
 impl PhoneJournal {
-    pub(crate) async fn voice_work_records(&self) -> IvyResult<IvyJson> {
-        self.request(|db| Ok(IvyJson::object([
-            ("works", parse_stored(&db.meta("voiceWorks")?.unwrap_or_else(|| "[]".into()))?),
-            ("observations", parse_stored(&db.meta("voiceObservations")?.unwrap_or_else(|| "[]".into()))?),
-        ]))).await
+    pub(crate) async fn initialize_voice_work_records(
+        &self,
+        cache: Arc<Mutex<Records>>,
+        now: i64,
+    ) -> IvyResult<()> {
+        self.request(move |db| {
+            let mut cache = cache.lock().unwrap();
+            if cache.initialized {
+                return Ok(());
+            }
+            let mut records = Records::default();
+            let mut recovered = Changes::default();
+            for (table, observations) in [("voice_works", false), ("voice_observations", true)] {
+                let mut statement = db
+                    .db
+                    .prepare_cached(&format!(
+                        "SELECT thread_id,value FROM {table} ORDER BY rowid LIMIT ?"
+                    ))
+                    .map_err(error)?;
+                let rows = statement
+                    .query_map([RECORD_LIMIT as i64 + 1], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(error)?;
+                let mut count = 0;
+                for row in rows {
+                    count += 1;
+                    require(
+                        count <= RECORD_LIMIT,
+                        "phone_work_storage_invalid",
+                        "Saved Voice records exceed their capacity.",
+                    )?;
+                    let (id, value) = row.map_err(error)?;
+                    let stored_bytes = value.len() + 1;
+                    let value = parse_stored(&value)?;
+                    if observations {
+                        let mut observation = Observation::from_wire(&value)?;
+                        observation.stored_bytes = stored_bytes;
+                        records.observation_bytes += stored_bytes;
+                        require(
+                            observation.thread.to_utf8()? == id
+                                && db.call(&observation.call)?.is_some()
+                                && db.voice_task(&observation.call, observation.generation)?
+                                    == Some(observation.thread.clone()),
+                            "phone_work_storage_invalid",
+                            "Saved observation belongs to another call or task.",
+                        )?;
+                        records.observations.push(observation);
+                    } else {
+                        let mut work = WorkRecord::from_wire(&value)?;
+                        work.stored_bytes = stored_bytes;
+                        records.work_bytes += stored_bytes;
+                        require(
+                            work.thread.to_utf8()? == id,
+                            "phone_work_storage_invalid",
+                            "Saved work has a different native task identity.",
+                        )?;
+                        // A crashed connected session never gets a new allowance.
+                        // An already detached session keeps its original deadline.
+                        if work.state.active() && work.attached.is_some() {
+                            work.attached = None;
+                            work.ended = Some(now);
+                            work.deadline = Some(now);
+                            work.bump()?;
+                            recovered.works.push(work.clone());
+                        }
+                        records.works.push(work);
+                    }
+                }
+            }
+            check_voice_bytes(records.work_bytes, records.works.len(), WORK_BYTES)?;
+            check_voice_bytes(
+                records.observation_bytes,
+                records.observations.len(),
+                OBSERVATION_BYTES,
+            )?;
+            if !recovered.empty() {
+                let (works, observations) =
+                    db.transaction(|db| db.write_voice_changes(&mut recovered, &records))?;
+                recovered.apply(&mut records);
+                records.work_bytes = works;
+                records.observation_bytes = observations;
+            }
+            records.initialized = true;
+            *cache = records;
+            Ok(())
+        })
+        .await
     }
-    pub(crate) async fn save_voice_work_records(&self, works: IvyJson, observations: IvyJson) -> IvyResult<()> {
-        self.request(move |db| db.transaction(|db| {
-            db.set_meta("voiceWorks", &canonical(&works, 256 * 1024)?)?;
-            db.set_meta("voiceObservations", &canonical(&observations, 64 * 1024)?)
-        })).await
+    pub(crate) async fn edit_voice_work_records<T: Send + 'static>(
+        &self,
+        cache: Arc<Mutex<Records>>,
+        changed: Arc<tokio::sync::Notify>,
+        change: impl FnOnce(&Records) -> IvyResult<(Changes, T)> + Send + 'static,
+    ) -> IvyResult<T> {
+        self.request(move |db| {
+            let mut records = cache.lock().unwrap();
+            let (mut changes, result) = change(&records)?;
+            if !changes.empty() {
+                let (works, observations) =
+                    db.transaction(|db| db.write_voice_changes(&mut changes, &records))?;
+                changes.apply(&mut records);
+                records.work_bytes = works;
+                records.observation_bytes = observations;
+                changed.notify_one();
+            }
+            Ok(result)
+        })
+        .await
     }
     pub(crate) async fn voice_notice(&self, token: &str) -> IvyResult<IvyJson> {
         let key = format!("voiceNotice:{token}");
-        self.request(move |db| parse_stored(&db.meta(&key)?.unwrap_or_else(|| "null".into()))).await
+        self.request(move |db| parse_stored(&db.meta(&key)?.unwrap_or_else(|| "null".into())))
+            .await
     }
     pub(crate) async fn save_voice_notice(&self, token: &str, notice: IvyJson) -> IvyResult<()> {
         let key = format!("voiceNotice:{token}");
-        self.request(move |db| db.set_meta(&key, &canonical(&notice, 512 * 1024)?)).await
+        self.request(move |db| db.set_meta(&key, &canonical(&notice, 512 * 1024)?))
+            .await
     }
     pub async fn voice_conversation(&self, fingerprint: &str) -> IvyResult<Option<IvyJson>> {
         let fingerprint = fingerprint.to_owned();
@@ -349,6 +461,63 @@ fn field_string(value: &IvyJson, key: &str) -> IvyResult<String> {
     value.get(key).ok_or_else(IvyError::internal)?.as_str()
 }
 impl JournalDb<'_> {
+    fn write_voice_changes(
+        &self,
+        changes: &mut Changes,
+        records: &Records,
+    ) -> IvyResult<(usize, usize)> {
+        let (mut work_bytes, mut observation_bytes) =
+            (records.work_bytes, records.observation_bytes);
+        let (mut work_count, mut observation_count) =
+            (records.works.len(), records.observations.len());
+        if let Some(id) = &changes.remove_work {
+            if let Some(prior) = records.get(id) {
+                work_bytes -= prior.stored_bytes;
+                work_count -= 1;
+            }
+            self.db
+                .prepare_cached("DELETE FROM voice_works WHERE thread_id=?")
+                .map_err(error)?
+                .execute([id.to_utf8()?])
+                .map_err(error)?;
+        }
+        for work in &mut changes.works {
+            let encoded = canonical(&work.to_wire(), WORK_BYTES)?;
+            work.stored_bytes = encoded.len() + 1;
+            if let Some(prior) = records.get(&work.thread) {
+                work_bytes -= prior.stored_bytes;
+            } else {
+                work_count += 1;
+            }
+            work_bytes += work.stored_bytes;
+            self.db.prepare_cached("INSERT INTO voice_works(thread_id,value) VALUES (?,?) ON CONFLICT(thread_id) DO UPDATE SET value=excluded.value").map_err(error)?.execute(params![work.thread.to_utf8()?, encoded]).map_err(error)?;
+        }
+        if let Some(id) = &changes.remove_observation {
+            if let Some(prior) = records.observation(id) {
+                observation_bytes -= prior.stored_bytes;
+                observation_count -= 1;
+            }
+            self.db
+                .prepare_cached("DELETE FROM voice_observations WHERE thread_id=?")
+                .map_err(error)?
+                .execute([id.to_utf8()?])
+                .map_err(error)?;
+        }
+        if let Some(observation) = &mut changes.observation {
+            let encoded = canonical(&observation.to_wire(), OBSERVATION_BYTES)?;
+            observation.stored_bytes = encoded.len() + 1;
+            if let Some(prior) = records.observation(&observation.thread) {
+                observation_bytes -= prior.stored_bytes;
+            } else {
+                observation_count += 1;
+            }
+            observation_bytes += observation.stored_bytes;
+            self.db.prepare_cached("INSERT INTO voice_observations(thread_id,value) VALUES (?,?) ON CONFLICT(thread_id) DO UPDATE SET value=excluded.value").map_err(error)?.execute(params![observation.thread.to_utf8()?, encoded]).map_err(error)?;
+        }
+        check_voice_bytes(work_bytes, work_count, WORK_BYTES)?;
+        check_voice_bytes(observation_bytes, observation_count, OBSERVATION_BYTES)?;
+        Ok((work_bytes, observation_bytes))
+    }
     fn task_cache(&self, principal_id: &str, fingerprint: &str) -> IvyResult<Option<IvyJson>> {
         validate_shared("Identifier", &principal_id.into())?;
         let Some(value) = self

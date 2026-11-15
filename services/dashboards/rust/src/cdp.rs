@@ -11,19 +11,19 @@ use chromiumoxide::{
             page::SetFontFamiliesParams,
             target::{CreateBrowserContextParams, CreateTargetParams},
         },
-        js_protocol::runtime::EvaluateParams,
+        js_protocol::runtime::{CallArgument, CallFunctionOnParams, EvaluateParams},
     },
     handler::HandlerConfig,
 };
 use futures_util::StreamExt;
 use std::{
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const WAIT: Duration = Duration::from_secs(15);
@@ -72,9 +72,7 @@ impl RenderError {
 
 /// Authored values cross CDP as shared-serializer expressions, retaining UTF-16.
 pub struct RenderInput {
-    document_json: String,
-    channel_json: String,
-    data_json: String,
+    payload_json: String,
     width: u32,
     height: u32,
     color_mode: ColorMode,
@@ -87,7 +85,7 @@ impl RenderInput {
         height: u32,
         color_mode: ColorMode,
     ) -> ivy_contracts::IvyResult<Self> {
-        use ivy_contracts::{IvyError, IvyJson, json::stringify, limits::MANAGEMENT_FRAME_BYTES};
+        use ivy_contracts::IvyError;
         if !(100..=4096).contains(&width)
             || !(100..=4096).contains(&height)
             || u64::from(width) * u64::from(height) > png::MAX_PIXELS
@@ -97,20 +95,45 @@ impl RenderInput {
                 "At most 8 million pixels; dimensions must be 100..4096.",
             ));
         }
+        Self::owned(
+            html.clone(),
+            data.clone(),
+            crate::validation::OutputOptions {
+                width,
+                height,
+                mode: color_mode,
+            },
+        )
+    }
+    pub fn owned(
+        html: ivy_contracts::JsString,
+        data: ivy_contracts::IvyJson,
+        output: crate::validation::OutputOptions,
+    ) -> ivy_contracts::IvyResult<Self> {
+        use ivy_contracts::{IvyJson, json::stringify, limits::MANAGEMENT_FRAME_BYTES};
         let channel = uuid::Uuid::new_v4().to_string();
-        let document = crate::document::dashboard_document(html, &channel.as_str().into())?;
+        let document = crate::document::dashboard_document(&html, &channel.as_str().into())?;
         Ok(Self {
-            document_json: stringify(&IvyJson::String(document), MANAGEMENT_FRAME_BYTES)?,
-            channel_json: stringify(&channel.into(), MANAGEMENT_FRAME_BYTES)?,
-            // JSON text must be parsed, not evaluated as an object literal:
-            // an authored __proto__ key is data, not a prototype setter.
-            data_json: stringify(
-                &IvyJson::from(stringify(data, MANAGEMENT_FRAME_BYTES)?),
+            payload_json: stringify(
+                &IvyJson::object([
+                    ("channel", channel.into()),
+                    ("document", IvyJson::String(document)),
+                    ("data", data),
+                    (
+                        "output",
+                        IvyJson::object([
+                            ("width", IvyJson::Number(output.width.into())),
+                            ("height", IvyJson::Number(output.height.into())),
+                            ("colorMode", output.color_mode().into()),
+                            ("mode", "image".into()),
+                        ]),
+                    ),
+                ]),
                 MANAGEMENT_FRAME_BYTES,
             )?,
-            width,
-            height,
-            color_mode,
+            width: output.width,
+            height: output.height,
+            color_mode: output.mode,
         })
     }
 }
@@ -119,7 +142,6 @@ pub struct CdpRenderer {
     browser: Arc<Browser>,
     pump: JoinHandle<()>,
     available: Arc<AtomicBool>,
-    permit: Arc<Semaphore>,
     shutdown: CancellationToken,
 }
 
@@ -156,7 +178,6 @@ impl CdpRenderer {
             browser: Arc::new(browser),
             pump,
             available,
-            permit: Arc::new(Semaphore::new(1)),
             shutdown: CancellationToken::new(),
         }
     }
@@ -165,103 +186,64 @@ impl CdpRenderer {
         self.available.load(Ordering::Acquire) && !self.pump.is_finished()
     }
 
-    /// Wait for the retained render lease, including cancellation disposal.
-    pub async fn idle(&self) {
-        let _permit = self.permit.acquire().await;
-    }
-
+    /// Called by the process owner, which retains request admission through
+    /// disposal and conversion even when the observing client disappears.
     pub async fn render(
         &self,
         input: RenderInput,
         cancel: &CancellationToken,
     ) -> Result<Vec<u8>, RenderError> {
-        let permit = self
-            .permit
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RenderError::Busy)?;
         if !self.ready() {
             return Err(RenderError::Unavailable);
         }
         if cancel.is_cancelled() {
             return Err(RenderError::Cancelled);
         }
-        let browser = self.browser.clone();
-        let live = self.available.clone();
-        // Spawn the lease owner: dropping the request future cannot abandon its
-        // context or release admission before bounded disposal has completed.
-        let cancel = cancel.clone();
-        let shutdown = self.shutdown.clone();
-        let (mut tx, mut rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            // Creation itself is owned even if the caller drops while CDP is
-            // accepting it; after its bounded reply we still dispose the result.
-            let context = match browser
-                .create_browser_context(CreateBrowserContextParams::default())
-                .await
-            {
-                Ok(context) => context,
-                Err(error) => {
-                    // A lost reply cannot establish that no context was made.
-                    // Require the enclosing owner to stop/recover this browser.
-                    live.store(false, Ordering::Release);
-                    let _ = tx.send(Err(error.into()));
-                    return;
-                }
-            };
-            let mode = input.color_mode;
-            let work = async {
-                let target = CreateTargetParams::builder()
-                    .url("about:blank")
-                    .browser_context_id(context.clone())
-                    .build()
-                    .expect("fixed target parameters");
-                let page = browser.new_page(target).await?;
-                render_page(&page, &input).await
-            };
-            let result = tokio::select! {
-                biased;
-                _=tx.closed()=>Err(RenderError::Cancelled),
-                _=cancel.cancelled()=>Err(RenderError::Cancelled),
-                _=shutdown.cancelled()=>Err(RenderError::Cancelled),
-                result=work=>result,
-            };
-            let cleanup =
-                tokio::time::timeout(DISPOSE, browser.dispose_browser_context(context)).await;
-            let disposed = matches!(cleanup, Ok(Ok(())));
-            if !disposed {
-                live.store(false, Ordering::Release);
+        let context = match self
+            .browser
+            .create_browser_context(CreateBrowserContextParams::default())
+            .await
+        {
+            Ok(context) => context,
+            Err(error) => {
+                self.available.store(false, Ordering::Release);
+                return Err(error.into());
             }
-            // The original renderer's finally block rejects the request when
-            // context disposal fails, even if screenshot capture succeeded.
-            let result = if disposed {
-                result
-            } else {
-                Err(RenderError::Unavailable)
-            };
-            // Keep the permit while native PNG work runs. A cancelled future
-            // must not leave a blocking conversion behind and admit another.
-            let result = match result {
-                Ok(_) if cancel.is_cancelled() || shutdown.is_cancelled() || tx.is_closed() => {
-                    Err(RenderError::Cancelled)
-                }
-                Ok(bytes) => {
-                    match tokio::task::spawn_blocking(move || png::convert(bytes, mode)).await {
-                        Ok(result) => result.map_err(RenderError::Png),
-                        Err(_) => Err(RenderError::Unavailable),
-                    }
-                }
-                error => error,
-            };
-            let result = if cancel.is_cancelled() || shutdown.is_cancelled() || tx.is_closed() {
-                Err(RenderError::Cancelled)
-            } else {
-                result
-            };
-            drop(permit);
-            let _ = tx.send(result);
-        });
-        (&mut rx).await.map_err(|_| RenderError::Unavailable)?
+        };
+        let mode = input.color_mode;
+        let work = async {
+            let target = CreateTargetParams::builder()
+                .url("about:blank")
+                .browser_context_id(context.clone())
+                .build()
+                .expect("fixed target parameters");
+            let page = self.browser.new_page(target).await?;
+            render_page(&page, input).await
+        };
+        let result = tokio::select! {
+            biased;
+            _=cancel.cancelled()=>Err(RenderError::Cancelled),
+            _=self.shutdown.cancelled()=>Err(RenderError::Cancelled),
+            result=work=>result,
+        };
+        if !matches!(
+            tokio::time::timeout(DISPOSE, self.browser.dispose_browser_context(context)).await,
+            Ok(Ok(()))
+        ) {
+            self.available.store(false, Ordering::Release);
+            return Err(RenderError::Unavailable);
+        }
+        let bytes = result?;
+        if cancel.is_cancelled() || self.shutdown.is_cancelled() {
+            return Err(RenderError::Cancelled);
+        }
+        tokio::task::spawn_blocking(move || png::convert(bytes, mode))
+            .await
+            .map_err(|_| RenderError::Unavailable)?
+            .map_err(RenderError::Png)
+    }
+    pub fn cancel(&self) {
+        self.shutdown.cancel();
     }
 
     /// Cancel outstanding work and request cooperative browser shutdown. The
@@ -269,10 +251,6 @@ impl CdpRenderer {
     pub async fn close(&self) -> Result<(), RenderError> {
         self.available.store(false, Ordering::Release);
         self.shutdown.cancel();
-        let _permit = tokio::time::timeout(DISPOSE, self.permit.acquire())
-            .await
-            .map_err(|_| RenderError::Timeout)?
-            .map_err(|_| RenderError::Unavailable)?;
         self.browser
             .execute(chromiumoxide::cdp::browser_protocol::browser::CloseParams::default())
             .await?;
@@ -289,7 +267,7 @@ impl Drop for CdpRenderer {
     }
 }
 
-async fn render_page(page: &Page, input: &RenderInput) -> Result<Vec<u8>, RenderError> {
+async fn render_page(page: &Page, input: RenderInput) -> Result<Vec<u8>, RenderError> {
     let mut requests = page.event_listener::<EventRequestPaused>().await?;
     let intercept_page = page.clone();
     let intercept = tokio::spawn(async move {
@@ -323,18 +301,19 @@ async fn render_page(page: &Page, input: &RenderInput) -> Result<Vec<u8>, Render
     // (notably Consolas versus Courier New on Windows). Preserve the pinned
     // families, including script-specific overrides. Apache-2.0 attribution is
     // retained alongside the screenshot preparation asset.
-    let fonts: serde_json::Value = serde_json::from_str(include_str!("../assets/fonts.json"))
-        .expect("embedded Playwright font families");
-    let platform = if cfg!(target_os = "windows") {
-        "win"
-    } else if cfg!(target_os = "macos") {
-        "mac"
-    } else {
-        "linux"
-    };
-    let fonts: SetFontFamiliesParams =
-        serde_json::from_value(fonts[platform].clone()).expect("pinned CDP font parameters");
-    page.execute(fonts).await?;
+    static FONTS: LazyLock<SetFontFamiliesParams> = LazyLock::new(|| {
+        let fonts: serde_json::Value = serde_json::from_str(include_str!("../assets/fonts.json"))
+            .expect("embedded Playwright font families");
+        let platform = if cfg!(target_os = "windows") {
+            "win"
+        } else if cfg!(target_os = "macos") {
+            "mac"
+        } else {
+            "linux"
+        };
+        serde_json::from_value(fonts[platform].clone()).expect("pinned CDP font parameters")
+    });
+    page.execute(FONTS.clone()).await?;
     page.execute(SetDeviceMetricsOverrideParams::new(
         input.width as i64,
         input.height as i64,
@@ -343,44 +322,26 @@ async fn render_page(page: &Page, input: &RenderInput) -> Result<Vec<u8>, Render
     ))
     .await?;
     page.set_content(OUTER).await?;
-    let mode = match input.color_mode {
-        ColorMode::Color => "color",
-        ColorMode::Grayscale => "grayscale",
-        ColorMode::Monochrome => "monochrome",
-    };
-    let expression = format!(
-        r#"(() => {{
-      const frame=document.querySelector('iframe'), channel={channel};
-      const data=JSON.parse({data}), output={{width:{width},height:{height},colorMode:'{mode}',mode:'image'}};
-      return new Promise(resolve => {{
-        window.addEventListener('message', event => {{
-          if(event.source!==frame.contentWindow || event.data?.channel!==channel) return;
-          if(event.data.type==='ready') frame.contentWindow.postMessage({{channel,type:'update',sequence:1,data,output}},'*');
-          if(event.data.type==='rendered') resolve({{state:'done'}});
-          if(event.data.type==='error') resolve({{state:'error',messageJson:JSON.stringify(event.data.message)}});
-        }});
-        frame.srcdoc={document};
-      }});
-    }})()"#,
-        channel = input.channel_json,
-        data = input.data_json,
-        width = input.width,
-        height = input.height,
-        document = input.document_json
-    );
-    let evaluated = tokio::time::timeout(
-        WAIT,
-        page.evaluate_expression(
-            EvaluateParams::builder()
-                .expression(expression)
-                .await_promise(true)
-                .return_by_value(true)
-                .build()
-                .expect("fixed evaluation parameters"),
-        ),
-    )
-    .await
-    .map_err(|_| RenderError::Timeout)??;
+    // Only fixed code is evaluated. Authored HTML/data cross CDP as a typed
+    // argument containing lossless JSON; JSON.parse keeps __proto__ as data.
+    let evaluated = tokio::time::timeout(WAIT, page.evaluate_function(
+        CallFunctionOnParams::builder()
+            .function_declaration(r#"function(payload) {
+                const {channel, document, data, output} = JSON.parse(payload);
+                const frame = window.document.querySelector('iframe');
+                return new Promise(resolve => {
+                    window.addEventListener('message', event => {
+                        if(event.source!==frame.contentWindow || event.data?.channel!==channel) return;
+                        if(event.data.type==='ready') frame.contentWindow.postMessage({channel,type:'update',sequence:1,data,output},'*');
+                        if(event.data.type==='rendered') resolve({state:'done'});
+                        if(event.data.type==='error') resolve({state:'error',messageJson:JSON.stringify(event.data.message)});
+                    });
+                    frame.srcdoc=document;
+                });
+            }"#)
+            .argument(CallArgument::builder().value(serde_json::Value::String(input.payload_json)).build())
+            .await_promise(true).return_by_value(true).build().expect("fixed render call")
+    )).await.map_err(|_| RenderError::Timeout)??;
     let state: serde_json::Value = evaluated
         .into_value()
         .map_err(|_| RenderError::Unavailable)?;

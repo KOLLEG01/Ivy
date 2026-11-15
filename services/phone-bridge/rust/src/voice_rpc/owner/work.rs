@@ -1,4 +1,5 @@
 use super::*;
+use crate::voice_rpc::history::TurnSearch;
 use crate::voice_work::{active, view};
 pub type InputNotice = Arc<
     dyn Fn(
@@ -9,6 +10,30 @@ pub type InputNotice = Arc<
         + Send
         + Sync,
 >;
+
+enum InFlightKey {
+    Interrupt(JsString),
+    Notice(String),
+}
+struct InFlight {
+    owner: Weak<Inner>,
+    key: InFlightKey,
+}
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.upgrade() {
+            let mut state = owner.state.lock().unwrap_or_else(|p| p.into_inner());
+            match &self.key {
+                InFlightKey::Interrupt(id) => {
+                    state.interrupting.remove(id);
+                }
+                InFlightKey::Notice(token) => {
+                    state.notifying.remove(token);
+                }
+            }
+        }
+    }
+}
 
 impl PhoneCodexVoice {
     pub fn set_work_observer(&self, observer: WorkObserver) {
@@ -85,36 +110,59 @@ impl Inner {
         let weak = Arc::downgrade(owner);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
                 let Some(owner) = weak.upgrade() else {
                     return;
                 };
                 if owner.control.is_stopping() {
                     return;
                 }
-                let Ok(_gate) = owner.maintenance.try_lock() else {
-                    continue;
-                };
-                let result = async {
-                    owner.works.initialize().await?;
-                    owner.claim_deadlines(false).await?;
-                    owner.observe_detached_inner().await?;
-                    if owner.works.has_work()
-                        && !owner
-                            .control
-                            .current()
-                            .is_some_and(|rpc| rpc.transport().connected())
-                    {
-                        owner.recover_works().await?;
+                let mut busy = false;
+                let result = if let Ok(_gate) = owner.maintenance.try_lock() {
+                    async {
+                        owner.works.initialize().await?;
+                        owner.claim_deadlines(false).await?;
+                        owner.observe_detached_inner().await?;
+                        if owner.works.has_work()
+                            && !owner
+                                .control
+                                .current()
+                                .is_some_and(|rpc| rpc.transport().connected())
+                        {
+                            owner.recover_works().await?;
+                        }
+                        owner.notify_inputs()?;
+                        Ok::<_, IvyError>(())
                     }
-                    owner.notify_inputs()?;
-                    Ok::<_, IvyError>(())
-                }
-                .await;
+                    .await
+                } else {
+                    busy = true;
+                    Ok(())
+                };
+                let failed = result.is_err();
                 owner.report_work(
                     &"owner".into(),
                     result.as_ref().err().map(|error| error.code.as_str()),
                 );
+                // Notifications retain one coalesced wake. Only real deadlines
+                // need a precise timer; pending reconciliation has a slow retry.
+                let retry = (failed || owner.works.has_work()).then_some(Duration::from_secs(15));
+                let delay = match (owner.works.next_deadline(), retry) {
+                    (Some(deadline), Some(retry)) => Some(deadline.min(retry)),
+                    (deadline, retry) => deadline.or(retry),
+                };
+                let delay = if busy {
+                    Some(Duration::from_secs(1))
+                } else {
+                    delay
+                };
+                let works = owner.works.clone();
+                drop(owner);
+                match delay {
+                    Some(delay) => {
+                        tokio::select! { _ = works.changed() => {}, _ = tokio::time::sleep(delay.max(Duration::from_millis(1))) => {} }
+                    }
+                    None => works.changed().await,
+                }
             }
         });
     }
@@ -146,6 +194,7 @@ impl Inner {
         };
         if notification.method == JsString::from("serverRequest/resolved") {
             self.state.lock().unwrap().pending_inputs.retain(|(id, r)| {
+                let r = &r.request;
                 Some(id) != params.get("requestId")
                     || r.params.get("threadId") != Some(&thread.clone().into())
             });
@@ -218,6 +267,7 @@ impl Inner {
             if let (Ok(id), Ok(status)) = (text(turn, "id"), text(turn, "status")) {
                 self.works.completed(thread, &id, &status).await?;
                 self.state.lock().unwrap().pending_inputs.retain(|(_, r)| {
+                    let r = &r.request;
                     r.params.get("threadId") != Some(&thread.clone().into())
                         || r.params.get("turnId") != Some(&id.clone().into())
                 });
@@ -258,14 +308,18 @@ impl Inner {
         self.state.lock().unwrap().reconciled.insert(thread.clone());
         Ok(())
     }
-    async fn read_work(&self, thread: &JsString) -> IvyResult<IvyJson> {
-        let value = self
-            .rpc()?
+    async fn read_work(
+        &self,
+        thread: &JsString,
+        search: TurnSearch<'_>,
+    ) -> IvyResult<Option<IvyJson>> {
+        let rpc = self.rpc()?;
+        let value = rpc
             .call(
                 "thread/read",
                 IvyJson::object([
                     ("threadId", thread.clone().into()),
-                    ("includeTurns", true.into()),
+                    ("includeTurns", false.into()),
                 ]),
                 RequestOptions {
                     detach_on_timeout: true,
@@ -275,14 +329,20 @@ impl Inner {
             )
             .await?;
         self.thread(&value)?;
-        Ok(value)
+        require(
+            value.required("thread")?.get("id") == Some(&thread.clone().into()),
+            "phone_work_owner_changed",
+            "Native Voice history belongs to another thread.",
+        )?;
+        rpc.work_turn(thread, search).await
     }
     pub(super) async fn observe_work(&self, thread: &JsString) -> IvyResult<()> {
         let Some(work) = self.works.get(thread) else {
             return Ok(());
         };
         let revision = work.get("revision").cloned();
-        let value = self.read_work(thread).await?;
+        let turn_id = text(&work, "turnId")?;
+        let turn = self.read_work(thread, TurnSearch::Id(&turn_id)).await?;
         if self
             .works
             .get(thread)
@@ -292,12 +352,7 @@ impl Inner {
         {
             return Ok(());
         }
-        let turn = value
-            .required("thread")?
-            .get("turns")
-            .and_then(IvyJson::as_array)
-            .and_then(|ts| ts.iter().find(|t| t.get("id") == work.get("turnId")));
-        if let Some(turn) = turn {
+        if let Some(turn) = turn.as_ref() {
             if turn.get("status") != Some(&"inProgress".into()) {
                 self.works
                     .completed(thread, &text(turn, "id")?, &text(turn, "status")?)
@@ -336,18 +391,10 @@ impl Inner {
     }
     async fn observe_detached_inner(&self) -> IvyResult<()> {
         self.works.initialize().await?;
-        let observation = self.works.observations().into_iter().find(|o| {
-            text(o, "threadId").ok().is_some_and(|id| {
-                self.state
-                    .lock()
-                    .unwrap()
-                    .observation_retry_at
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(0)
-                    <= self.works.now()
-            })
-        });
+        let observation = {
+            let state = self.state.lock().unwrap();
+            self.works.due_observation(&state.observation_retry_at)
+        };
         let Some(observation) = observation else {
             return Ok(());
         };
@@ -367,7 +414,16 @@ impl Inner {
                 "Saved observation belongs to another native owner.",
             )?;
             self.subscribe_work(&thread).await?;
-            let value = self.read_work(&thread).await?;
+            let turn_id = self
+                .works
+                .get(&thread)
+                .as_ref()
+                .and_then(|w| w.get("turnId"))
+                .and_then(IvyJson::as_js_string)
+                .cloned();
+            let turn = self
+                .read_work(&thread, TurnSearch::ActiveOrId(turn_id.as_ref()))
+                .await?;
             if self.works.observation(&thread).as_ref() != Some(&observation) {
                 return Ok(());
             }
@@ -378,14 +434,10 @@ impl Inner {
                         .is_none_or(|id| id.is_null() || id == &call_id.clone().into())
                 })
             {
-                let turns = value
-                    .required("thread")?
-                    .get("turns")
-                    .and_then(IvyJson::as_array);
-                if let Some(turn) = turns.and_then(|ts| {
-                    ts.iter()
-                        .find(|t| t.get("status") == Some(&"inProgress".into()))
-                }) {
+                if let Some(turn) = turn
+                    .as_ref()
+                    .filter(|t| t.get("status") == Some(&"inProgress".into()))
+                {
                     let call = self
                         .journal
                         .call(call_id.clone())
@@ -400,10 +452,10 @@ impl Inner {
                             &party_key(&call)?,
                         )
                         .await?;
-                } else if let Some(turn) = turns.and_then(|ts| {
-                    ts.iter()
-                        .find(|t| current.as_ref().and_then(|w| w.get("turnId")) == t.get("id"))
-                }) {
+                } else if let Some(turn) = turn
+                    .as_ref()
+                    .filter(|t| current.as_ref().and_then(|w| w.get("turnId")) == t.get("id"))
+                {
                     self.works
                         .completed(&thread, &text(turn, "id")?, &text(turn, "status")?)
                         .await?;
@@ -425,7 +477,7 @@ impl Inner {
         if let Some(observer) = observer {
             observer(&call_id, result.as_ref().err().map(|e| e.code.as_str()));
         }
-        if let Err(error) = result {
+        if result.is_err() {
             self.state
                 .lock()
                 .unwrap()
@@ -453,12 +505,18 @@ impl Inner {
         if let Some(prior) = state.interrupting.get(&id) {
             return Ok(prior.clone());
         }
-        if state.interrupted.contains(&id) {
-            return Ok(operation(async { Ok(()) }));
-        }
+        require(
+            state.interrupting.len() < 64,
+            "phone_voice_interrupt_capacity",
+            "Too many pending Voice interrupts.",
+        )?;
         let owner = self.clone();
         let work_id = id.clone();
         let work = operation(async move {
+            let _pending = InFlight {
+                owner: Arc::downgrade(&owner),
+                key: InFlightKey::Interrupt(work_id.clone()),
+            };
             let result = async {
                 owner.control.open_cleanup().wait().await?;
                 require(
@@ -468,18 +526,9 @@ impl Inner {
                 )?;
                 let thread = text(&claim, "threadId")?;
                 owner.subscribe_work(&thread).await?;
-                if owner.works.get(&thread).is_none_or(|w| {
-                    w.get("state") != Some(&"halting".into())
-                        || w.get("interruptId") != claim.get("interruptId")
-                }) {
+                if !owner.works.begin_interrupt(&claim).await? {
                     return Ok(());
                 }
-                owner
-                    .state
-                    .lock()
-                    .unwrap()
-                    .interrupted
-                    .insert(work_id.clone());
                 owner
                     .rpc()?
                     .call(
@@ -497,11 +546,11 @@ impl Inner {
                     )
                     .await?;
                 owner.observe_work(&thread).await?;
-                if owner
-                    .works
-                    .get(&thread)
-                    .is_some_and(|w| w.get("state") == Some(&"halting".into()))
-                {
+                if owner.works.get(&thread).is_some_and(|w| {
+                    w.get("interruptId") == claim.get("interruptId")
+                        && w.get("state") == Some(&"outcome_unknown".into())
+                        && w.get("error") == Some(&"phone_work_interrupt_pending".into())
+                }) {
                     owner
                         .works
                         .unknown(&thread, "phone_work_interrupt_unconfirmed")
@@ -514,7 +563,6 @@ impl Inner {
                 owner.works.interrupted(&claim, &error.code).await?;
                 owner.report_work(&text(&claim, "threadId")?, Some("phone_work_stop_unknown"));
             }
-            owner.state.lock().unwrap().interrupting.remove(&work_id);
             Ok(())
         });
         state.interrupting.insert(id, work.clone());
@@ -530,7 +578,7 @@ impl Inner {
             .unwrap()
             .pending_inputs
             .iter()
-            .map(|(_, r)| r.clone())
+            .map(|(_, r)| r.request.clone())
             .collect::<Vec<_>>();
         for request in requests {
             if ![
@@ -559,7 +607,12 @@ impl Inner {
             let token = self.input_token(&request)?.to_utf8()?;
             {
                 let s = self.state.lock().unwrap();
-                if s.notified.contains(&token) || s.notifying.contains_key(&token) {
+                if s.pending_inputs
+                    .iter()
+                    .any(|(_, p)| p.matches(&request) && p.notified.as_deref() == Some(&token))
+                    || s.notifying.contains_key(&token)
+                    || s.notifying.len() >= 64
+                {
                     continue;
                 }
             }
@@ -594,19 +647,30 @@ impl Inner {
                         && o.input_token(&expected)
                             .ok()
                             .is_some_and(|t| t.to_utf8().ok().as_ref() == Some(&token_check))
-                        && o.state.lock().unwrap().pending_inputs.iter().any(|(_, r)| {
-                            r.id == expected.id
-                                && r.method == expected.method
-                                && r.params == expected.params
-                        })
+                        && o.state
+                            .lock()
+                            .unwrap()
+                            .pending_inputs
+                            .iter()
+                            .any(|(_, r)| r.matches(&expected))
                 })
             });
             let mut state = self.state.lock().unwrap();
-            if state.notified.contains(&token) || state.notifying.contains_key(&token) {
+            if state
+                .pending_inputs
+                .iter()
+                .any(|(_, p)| p.matches(&request) && p.notified.as_deref() == Some(&token))
+                || state.notifying.contains_key(&token)
+                || state.notifying.len() >= 64
+            {
                 continue;
             }
             let task_token = token.clone();
             let pending = operation(async move {
+                let _pending = InFlight {
+                    owner: Arc::downgrade(&owner),
+                    key: InFlightKey::Notice(task_token.clone()),
+                };
                 let result = notify(work, input, current).await;
                 if !matches!(result, Ok(false)) {
                     let observer = owner.work_observer.lock().unwrap().clone();
@@ -620,13 +684,11 @@ impl Inner {
                             .state
                             .lock()
                             .unwrap()
-                            .notified
-                            .insert(task_token.clone());
+                            .notice_delivered(&request, &task_token)?;
                     }
                     Ok(false) => {}
                     Err(_) => {}
                 }
-                owner.state.lock().unwrap().notifying.remove(&task_token);
                 Ok(())
             });
             state.notifying.insert(token, pending);

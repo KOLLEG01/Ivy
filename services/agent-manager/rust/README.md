@@ -80,3 +80,13 @@ The Rust process owns service registration, management/native handlers, SQLite,
 health and control files. A matching control file or an OS termination signal
 closes the owned process and drains service work before exit. Windows and Linux
 use their native process adapters.
+
+For an owned Windows native process fence, first disable the enclosing instance
+through the Host CLI and verify that original deployment succeeded. Then run
+`ivy-agent-manager --recover-native-stop <absolute-request.json>`. The request
+contains `hostConfigPath`, `instanceId`, `deploymentId`, the exact `backend`
+identity and unchanged `fence`. Recovery requires the original accepted process
+policy without breakaway, a matching conclusive stopped-owner observation and
+no pending lifecycle action. It records the release evidence and native epoch
+before clearing that exact fence. Original native receipts and turns remain
+unchanged; enable or deploy the instance normally afterward.

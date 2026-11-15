@@ -11,6 +11,7 @@ pub struct Definition {
     pub refresh_seconds: u32,
     pub metadata: J,
     pub image_token: Option<JsString>,
+    pub image: Option<JsString>,
 }
 
 impl Definition {
@@ -29,6 +30,7 @@ impl Definition {
                 "refreshSeconds",
                 "metadata",
                 "imageToken",
+                "image",
             ],
         )?;
         let mut title = object.string("title")?;
@@ -47,6 +49,12 @@ impl Definition {
         title.0 = title.0[start..end].to_vec();
         text_length(&title, &object.path("title"), 1, 200)?;
         let html = object.text("html", 1, 500_000)?;
+        let image = match value.get("image") {
+            None | Some(J::Null) => None,
+            Some(image) => {
+                Some(Object::new(image, &object.path("image"), &["svg"])?.text("svg", 1, 500_000)?)
+            }
+        };
 
         let source_path = object.path("sources");
         let pairs = object
@@ -68,6 +76,22 @@ impl Definition {
             let source = if value.get("objectId").is_some() {
                 let source = Object::new(value, &path, &["objectId"])?;
                 Source::Object(source.text("objectId", 1, usize::MAX)?)
+            } else if let Some(ids) = value.get("objectIds") {
+                Object::new(value, &path, &["objectIds"])?;
+                let ids = ids
+                    .as_array()
+                    .filter(|a| !a.is_empty() && a.len() <= 100)
+                    .ok_or_else(|| invalid(&path, "expected 1..100 object IDs"))?;
+                let ids = ids
+                    .iter()
+                    .map(|v| {
+                        v.as_js_string()
+                            .filter(|s| !s.0.is_empty())
+                            .cloned()
+                            .ok_or_else(|| invalid(&path, "expected an object ID"))
+                    })
+                    .collect::<IvyResult<Vec<_>>>()?;
+                Source::Objects(ids)
             } else {
                 let source = Object::new(value, &path, &["contractKey", "limit"])?;
                 Source::Contract {
@@ -120,11 +144,12 @@ impl Definition {
             refresh_seconds,
             metadata,
             image_token,
+            image,
         })
     }
 
     pub fn into_json(self) -> J {
-        J::object([
+        let mut value = J::object([
             ("title", J::String(self.title)),
             ("html", J::String(self.html)),
             (
@@ -135,6 +160,10 @@ impl Definition {
                         .map(|(name, source)| {
                             let value = match source {
                                 Source::Object(id) => J::object([("objectId", J::String(id))]),
+                                Source::Objects(ids) => J::object([(
+                                    "objectIds",
+                                    J::Array(ids.into_iter().map(J::String).collect()),
+                                )]),
                                 Source::Contract { key, limit } => J::object([
                                     ("contractKey", J::String(key)),
                                     ("limit", J::Number(f64::from(limit))),
@@ -151,7 +180,11 @@ impl Definition {
                 "imageToken",
                 self.image_token.map(J::String).unwrap_or(J::Null),
             ),
-        ])
+        ]);
+        if let Some(svg) = self.image {
+            value.insert("image", J::object([("svg", J::String(svg))]));
+        }
+        value
     }
 }
 
@@ -225,6 +258,7 @@ pub enum Input {
     },
     Data {
         id: JsString,
+        html_hash: Option<JsString>,
     },
     Render {
         id: JsString,
@@ -234,6 +268,8 @@ pub enum Input {
         id: JsString,
         token: JsString,
         output: OutputOptions,
+        head: bool,
+        if_none_match: Option<JsString>,
     },
 }
 
@@ -248,12 +284,20 @@ impl Input {
                 }
             }
             "read" | "data" => {
-                let object = Object::new(value, name, &["id"])?;
+                let fields: &[&str] = if name == "data" {
+                    &["id", "htmlHash"]
+                } else {
+                    &["id"]
+                };
+                let object = Object::new(value, name, fields)?;
                 let id = object.text("id", 1, usize::MAX)?;
                 if name == "read" {
                     Self::Read { id }
                 } else {
-                    Self::Data { id }
+                    Self::Data {
+                        id,
+                        html_hash: object.optional_text("htmlHash", 0, 128)?,
+                    }
                 }
             }
             "save" => {
@@ -287,7 +331,15 @@ impl Input {
             }
             "render" | "image" => {
                 let fields: &[&str] = if name == "image" {
-                    &["id", "token", "width", "height", "colorMode"]
+                    &[
+                        "id",
+                        "token",
+                        "width",
+                        "height",
+                        "colorMode",
+                        "head",
+                        "ifNoneMatch",
+                    ]
                 } else {
                     &["id", "width", "height", "colorMode"]
                 };
@@ -299,6 +351,12 @@ impl Input {
                         id,
                         token: object.text("token", 1, 128)?,
                         output,
+                        head: match value.get("head") {
+                            None => false,
+                            Some(J::Bool(v)) => *v,
+                            _ => return Err(invalid(name, "head must be boolean")),
+                        },
+                        if_none_match: object.optional_text("ifNoneMatch", 0, 8192)?,
                     }
                 } else {
                     Self::Render { id, output }

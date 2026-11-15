@@ -97,8 +97,98 @@ pub(super) fn compare(rows: &[IvyJson], expected: &IvyJson, steps: &[(String, St
         }
     }
 }
+// The frozen protocol oracle predates native endedAt metadata. Keep its entire
+// payload comparison and validate that extension explicitly, including nested
+// raw native replies; never remove fields from the actual result.
+pub(super) fn extend_current_calls(
+    expected: &mut IvyJson,
+    actual: &IvyJson,
+    started: i64,
+    finished: i64,
+) -> usize {
+    let mut count = 0;
+    if expected.get("sipCallId").is_some()
+        && expected.get("direction").is_some()
+        && expected.get("endedAt").is_none()
+    {
+        let ended = actual
+            .get("endedAt")
+            .expect("native end metadata must be present");
+        match expected.get("state").unwrap().as_str().unwrap().as_str() {
+            "prepared" | "ringing" | "connected" => assert_eq!(ended, &IvyJson::Null),
+            "local_ended" | "outcome_unknown" => {
+                let raw = ended
+                    .as_str()
+                    .expect("ended original needs its native UTC time");
+                let time = chrono::DateTime::parse_from_rfc3339(&raw).unwrap();
+                assert_eq!(time.offset().local_minus_utc(), 0);
+                assert!((started..=finished).contains(&time.timestamp_millis()));
+                assert_eq!(
+                    raw,
+                    time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                );
+            }
+            state => panic!("Unexpected frozen native call state: {state}"),
+        }
+        expected.insert("endedAt", ended.clone());
+        count += 1;
+    }
+    match expected {
+        IvyJson::Object(fields) => {
+            for (key, value) in fields {
+                let key = key.to_utf8().unwrap();
+                let Some(current) = actual.get(&key) else {
+                    continue;
+                };
+                if key == "json"
+                    && value.as_js_string().is_some()
+                    && current.as_js_string().is_some()
+                {
+                    let mut decoded = parse(&value.as_str().unwrap(), 65536).unwrap();
+                    let current = parse(&current.as_str().unwrap(), 65536).unwrap();
+                    let added = extend_current_calls(&mut decoded, &current, started, finished);
+                    if added > 0 {
+                        *value = stringify(&decoded, 65536).unwrap().into();
+                        count += added;
+                    }
+                } else {
+                    count += extend_current_calls(value, current, started, finished);
+                }
+            }
+        }
+        IvyJson::Array(values) => {
+            if let Some(current) = actual.as_array() {
+                for (value, current) in values.iter_mut().zip(current) {
+                    count += extend_current_calls(value, current, started, finished);
+                }
+            }
+        }
+        _ => {}
+    }
+    count
+}
+
+pub(super) fn compare_current_calls(
+    rows: &[IvyJson],
+    original: &IvyJson,
+    steps: &[(String, String)],
+    started_at: i64,
+) {
+    let mut expected = original.clone();
+    let finished_at = chrono::Utc::now().timestamp_millis();
+    let IvyJson::Array(values) = &mut expected else {
+        panic!("original rows")
+    };
+    let mut checked = 0;
+    for (value, current) in values.iter_mut().zip(rows) {
+        checked += extend_current_calls(value, current, started_at, finished_at);
+    }
+    assert!(checked > 0, "native end metadata was not exercised");
+    compare(rows, &expected, steps);
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_dial_exact_dto_lookup_bounds_uri_and_attempt_precedence_match_original() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     let (owner, factory, routes, params) = actual_owner(51000, 51998);
     let remaining = Arc::new(Remaining::default());
     remaining.close_gate.release();
@@ -206,7 +296,7 @@ async fn native_dial_exact_dto_lookup_bounds_uri_and_attempt_precedence_match_or
             ("rawInputs", format!("{steps:?}").into()),
         ]),
     );
-    compare(&rows, &original, &steps);
+    compare_current_calls(&rows, &original, &steps, started_at);
     assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
     assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
     assert!(remaining.methods.lock().unwrap().is_empty());
@@ -583,6 +673,7 @@ pub(super) async fn outgoing(
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_receipts() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     for mode in ["initial", "delayed"] {
         let events = Arc::new(super::notifications::FailureEvents::default());
         let (owner, factory, routes, params) =
@@ -656,7 +747,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
                 ("savedReceiptReplayedAfterEachRelease", true.into()),
             ]),
         );
-        compare(&rows, &original, &steps);
+        compare_current_calls(&rows, &original, &steps, started_at);
         assert_eq!(factory.starts.load(Ordering::SeqCst), 6);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         assert!(remaining.methods.lock().unwrap().is_empty());
@@ -666,6 +757,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_descriptor_dispatch_failures_keep_attempted_original_receipts() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     for mode in ["initial", "delayed"] {
         let (owner, _, routes, params) = actual_owner(49000, 49998);
         let params = params.replace(
@@ -725,7 +817,7 @@ async fn native_descriptor_dispatch_failures_keep_attempted_original_receipts() 
                 ("original", original.clone()),
             ]),
         );
-        compare(&rows, &original, &steps);
+        compare_current_calls(&rows, &original, &steps, started_at);
         for (i, snapshot) in saved {
             let r = dispatcher
                 .execute(command(
@@ -744,6 +836,7 @@ async fn native_descriptor_dispatch_failures_keep_attempted_original_receipts() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_telephone_uri_uses_only_the_configured_owned_proxy() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     for mode in ["initial", "delayed"] {
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (owner, factory, routes, params) = actual_owner(48000, 48998);
@@ -798,7 +891,7 @@ async fn native_telephone_uri_uses_only_the_configured_owned_proxy() {
                 ("explicitOwnedProxy", true.into()),
             ]),
         );
-        compare(&rows, &original, &inputs);
+        compare_current_calls(&rows, &original, &inputs, started_at);
         assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         handler.shutdown().await.unwrap();

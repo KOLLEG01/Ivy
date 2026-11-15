@@ -504,6 +504,7 @@ fn normalize(value: &mut IvyJson) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_codec_upgrade_original_lookup_and_prepared_ending_guards() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     let (owner, _, routes, config) = actual_owner(42000, 42998);
     let remaining = Arc::new(Remaining::default());
     remaining.close_gate.release();
@@ -562,7 +563,7 @@ async fn native_codec_upgrade_original_lookup_and_prepared_ending_guards() {
             ("steps", n(steps.len())),
         ]),
     );
-    super::dial::compare(&rows, &original, &steps);
+    super::dial::compare_current_calls(&rows, &original, &steps, started_at);
     assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
     assert!(remaining.methods.lock().unwrap().is_empty());
     handler.shutdown().await.unwrap();

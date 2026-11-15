@@ -5,7 +5,7 @@ use crate::{
     call_logs::PhoneCallLogs,
     diagnostics::PhoneDiagnostics,
     journal::{PhoneJournal, PhoneJournalLimits, PhoneJournalOptions, PhoneJournalOwner},
-    native_client::validate_phone,
+    native_client::{PhoneNativeSnapshot, validate_phone},
     service_bridge::PhoneBridge,
     service_flow::{PhoneFlow, PhoneFlowVoice},
     service_process::{PhoneProcess, PhoneProcessOptions, start_phone_process},
@@ -664,25 +664,28 @@ impl Inner {
             return Ok(());
         }
         let current = self.local().await?;
-        let observed = current.process.client.observe(None).await?;
+        let mut observed = PhoneNativeSnapshot::new(current.process.client.observe(None).await?);
+        let mut calls = self.journal.current_calls().await?;
         {
             let mut diagnostics = self.diagnostics.lock().unwrap();
             diagnostics.registration_observed(
                 self.settings
                     .get("registration")
                     .is_some_and(|v| !v.is_null()),
-                observed.get("registration"),
+                observed.root().get("registration"),
                 &now(),
             );
             diagnostics.poll_succeeded();
         }
         if let Some(principal) = optional_text(&self.settings, "incomingPrincipalId") {
             let ids = observed
+                .root()
                 .get("callIds")
                 .and_then(IvyJson::as_array)
                 .map(|v| v.to_vec())
                 .unwrap_or_else(|| {
                     observed
+                        .root()
                         .get("call")
                         .and_then(|v| v.get("id"))
                         .cloned()
@@ -700,40 +703,39 @@ impl Inner {
                     continue;
                 };
                 if self.stopped.load(Ordering::Acquire)
+                    || calls.len() >= maximum
+                    || calls
+                        .iter()
+                        .any(|call| call.get("callId") == Some(&id.clone().into()))
                     || self.journal.call(id.clone()).await?.is_some()
-                    || self.journal.current_calls().await?.len() >= maximum
                 {
                     continue;
                 }
-                let candidate =
-                    if observed.get("call").and_then(|v| v.get("id")) == Some(&id.clone().into()) {
-                        observed.clone()
-                    } else {
-                        current.process.client.observe(Some(id.clone())).await?
-                    };
+                let candidate = observed.for_call(&current.process.client, &id).await?;
                 if candidate.get("call").and_then(|v| v.get("direction"))
                     != Some(&"incoming".into())
                     || candidate.get("call").and_then(|v| v.get("state")) != Some(&"ringing".into())
                 {
                     continue;
                 }
-                if let Err(error) = current
+                match current
                     .flow
                     .accept(principal.clone(), id.clone(), id)
                     .wait()
                     .await
                 {
-                    if !matches!(
-                        error.code.as_str(),
-                        "phone_caller_refused" | "phone_call_busy"
-                    ) {
-                        return Err(error);
-                    }
+                    Ok(call) => calls.push(call),
+                    Err(error)
+                        if matches!(
+                            error.code.as_str(),
+                            "phone_caller_refused" | "phone_call_busy"
+                        ) => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
-        current.flow.observe(Some(observed.clone())).await?;
-        let idle = self.journal.current_calls().await?.is_empty();
+        current.flow.observe(&calls, &mut observed).await?;
+        let idle = calls.is_empty();
         if idle
             && self
                 .last_voice_check
@@ -745,12 +747,15 @@ impl Inner {
         }
         if idle
             && !current.flow.has_voice_work()
-            && observed.get("call").is_none_or(IvyJson::is_null)
+            && observed.root().get("call").is_none_or(IvyJson::is_null)
             && observed
+                .root()
                 .get("callIds")
                 .and_then(IvyJson::as_array)
                 .is_none_or(|v| v.is_empty())
-            && self.journal.epoch_operations().await? >= 4000.0
+            && current.process.client.can_rotate_receipts()
+            && (current.process.client.receipt_rotation_due()
+                || self.journal.epoch_operations().await? >= 4000.0)
         {
             self.rotating.store(true, Ordering::Release);
             let rotated = async {

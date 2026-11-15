@@ -2,7 +2,7 @@ use ivy_contracts::{json::parse, limits::MANAGEMENT_FRAME_BYTES};
 use ivy_dashboards::document::dashboard_document;
 
 #[test]
-fn original_typescript_document_bytes_and_utf16_channels() {
+fn shared_document_bytes_and_utf16_channels() {
     let fixtures = parse(
         include_str!("../fixtures/dashboards/document.json"),
         MANAGEMENT_FRAME_BYTES,
@@ -17,7 +17,7 @@ fn original_typescript_document_bytes_and_utf16_channels() {
 }
 
 #[test]
-fn registry_keeps_seven_rpc_five_mcp_and_both_storage_versions() {
+fn registry_keeps_seven_rpc_five_mcp_and_storage_versions() {
     let registry = ivy_dashboards::registry();
     let ns = &registry.required("namespaces").unwrap().as_array().unwrap()[0];
     let tools = ns.required("tools").unwrap().as_array().unwrap();
@@ -35,6 +35,6 @@ fn registry_keeps_seven_rpc_five_mcp_and_both_storage_versions() {
             .iter()
             .map(|c| c.required("version").unwrap().as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["1.0.0", "1.1.0"]
+        ["1.0.0", "1.1.0", "1.2.0"]
     );
 }

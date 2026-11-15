@@ -341,14 +341,14 @@ impl Core {
                 // The original public send-codec field survives Close, then
                 // clears during Dispose before awaiting owned audio cleanup.
                 work.receiver().dispose_sender_format();
-                if let Some(screen) = work
+                let screen = work
                     .state
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .screening
-                    .take()
-                {
-                    screen.bridge();
+                    .take();
+                if let Some(screen) = screen {
+                    screen.close().await;
                 }
                 work.audio
                     .close()

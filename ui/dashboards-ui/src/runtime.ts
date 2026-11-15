@@ -28,9 +28,10 @@ export interface Dashboard {
   refreshSeconds: number;
   metadata?: Record<string, Wire.Json>;
   imageToken?: string | null;
+  image?: { svg: string };
   sources: Record<
     string,
-    { objectId: string } | { contractKey: string; limit?: number }
+    { objectId: string } | { objectIds: string[] } | { contractKey: string; limit?: number }
   >;
 }
 export interface Row {
@@ -38,6 +39,7 @@ export interface Row {
   revision: number;
   url: string;
   imageUrl?: string | null;
+  htmlHash?: string;
   value: Dashboard;
 }
 export const starter = `<style>body { font: 24px system-ui; padding: 32px; } h1 { margin-top: 0; }</style>

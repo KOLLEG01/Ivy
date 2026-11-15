@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "data-collector",
   "kind": "service",
-  "version": "0.4.19",
+  "version": "0.4.25",
   "description": "Isolated script tasks and versioned collection results",
   "connectsToHive": true,
   "requirements": {
@@ -53,8 +53,8 @@
   },
   "storage": {
     "minReadableFormat": 1,
-    "maxReadableFormat": 1,
-    "writeFormat": 1
+    "maxReadableFormat": 2,
+    "writeFormat": 2
   },
   "runtimeReset": {
     "delete": [

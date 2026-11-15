@@ -3,13 +3,13 @@
 //! moves into this adapter.
 use ivy_contracts::{IvyError, IvyJson, IvyResult};
 use ivy_host_runtime::codex_rpc::{Events, NativeRpc, RequestOptions};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 mod models;
-pub use models::{VoiceModelCatalog, VoiceModelControl};
+pub use models::{VoiceModelCatalog, VoiceModelControl, VoiceModels};
 mod speakers;
-pub use speakers::{VoiceSpeakerCatalog, VoiceSpeakerControl, VoiceSpeakerSettings};
+pub use speakers::{VoiceSpeakerCatalog, VoiceSpeakerControl, VoiceSpeakerSettings, VoiceSpeakers};
 mod control;
 #[cfg(test)]
 pub(crate) use control::tests as control_test_support;
@@ -19,6 +19,7 @@ pub use control::{
 };
 mod process;
 pub use process::NativeVoiceConnector;
+mod history;
 mod preparation;
 pub use preparation::{VoiceJournalFuture, VoicePreparation, VoicePreparationJournal};
 mod owner;
@@ -42,6 +43,7 @@ impl VoiceSchemas for ivy_contracts::schema::SchemaValidators {
 pub struct VoiceRpc {
     rpc: Arc<NativeRpc>,
     schemas: Arc<dyn VoiceSchemas>,
+    item_layout: Arc<OnceLock<ivy_sdk::native_observations::ItemLayout>>,
 }
 
 pub fn call_timeout_ms(method: &str) -> u64 {
@@ -76,6 +78,7 @@ impl VoiceRpc {
         Self {
             rpc: Arc::new(rpc),
             schemas,
+            item_layout: Arc::new(OnceLock::new()),
         }
     }
 

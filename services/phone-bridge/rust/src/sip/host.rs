@@ -1,5 +1,6 @@
 //! Native SIP ownership. Reservation and publication are serialized; protocol
 //! and disposal work outlive command observers without holding that lock.
+use super::retirement::Retirements;
 use super::{
     BindError, BoundSipTransport, CallError, CallObservation, CallOutcome, DelayedInvite,
     DelayedInviteMedia, DigestCredentials, InviteExchange, RegistrationError,
@@ -17,7 +18,10 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, OnceLock, Weak},
 };
-use tokio::{sync::Notify, task::JoinSet};
+use tokio::{
+    sync::{Notify, OwnedSemaphorePermit},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +191,7 @@ struct Call {
     state: Mutex<CallState>,
     media: OnceLock<Arc<dyn HostedSipMedia>>,
     initializing: Option<Arc<Completion<()>>>,
+    incoming_slot: Mutex<Option<OwnedSemaphorePermit>>,
 }
 impl Call {
     fn request_media_close(&self) {
@@ -217,8 +222,16 @@ impl Call {
         } else {
             SipHostCallPhase::Prepared
         };
-        let ended_at=state.ended_at.into_iter().chain(signalling.and_then(|s|s.ended_at)).min().or_else(||(phase==SipHostCallPhase::LocalEnded).then(||chrono::Utc::now().timestamp_millis()));
-        state.ended_at=ended_at;
+        let ended_at = state
+            .ended_at
+            .into_iter()
+            .chain(signalling.and_then(|s| s.ended_at))
+            .min()
+            .or_else(|| {
+                (phase == SipHostCallPhase::LocalEnded)
+                    .then(|| chrono::Utc::now().timestamp_millis())
+            });
+        state.ended_at = ended_at;
         SipHostCallObservation {
             ended_at,
             id: self.id.clone(),
@@ -231,7 +244,9 @@ impl Call {
     fn hangup(&self) {
         let mut state = self.state.lock().unwrap();
         state.ending = true;
-        state.ended_at.get_or_insert_with(||chrono::Utc::now().timestamp_millis());
+        state
+            .ended_at
+            .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
         self.request_media_close();
         if let Some(invite) = &state.invite {
             invite.request_hangup();
@@ -257,7 +272,7 @@ impl SipHostCall {
                 .as_ref()
                 .is_some_and(|call| call.matches_info(request, state.ending))
     }
-    pub(crate) fn request_codec_upgrade(&self) -> Result<(), SipHostError> {
+    pub(crate) fn request_codec_upgrade(&self, before: impl FnOnce()) -> Result<(), SipHostError> {
         self.0
             .state
             .lock()
@@ -265,7 +280,15 @@ impl SipHostCall {
             .incoming
             .as_ref()
             .ok_or(SipHostError::NotReady)?
-            .request_upgrade()
+            .request_upgrade(before)
+    }
+    pub(super) fn incoming_completed(&self) {
+        if let Some(host) = self.0.host.upgrade() {
+            host.lock()
+                .unwrap()
+                .retired_incoming
+                .retain(|call| !call.cleanup_confirmed());
+        }
     }
     pub(crate) fn request_hangup(&self) {
         self.0.hangup();
@@ -336,7 +359,7 @@ pub struct SipHostObservation {
     pub registration: Option<RegistrationObservation>,
     pub calls: Vec<SipHostCallObservation>,
 }
-struct State {
+pub(super) struct State {
     configured: bool,
     stopping: bool,
     closed: bool,
@@ -349,7 +372,7 @@ struct State {
     calls: crate::call_slots::CallSlots<Arc<Call>>,
     retired_incoming: Vec<super::incoming::IncomingInvite>,
     requests: Option<ManagedRequests>,
-    unhandled_requests: Vec<Transaction>,
+    retirements: Arc<Retirements>,
     closing: Option<Arc<Completion<()>>>,
 }
 struct ManagedRequests {
@@ -364,7 +387,7 @@ pub(crate) type SipRequestHandler = Arc<
         + Send
         + Sync,
 >;
-type Shared = Arc<Mutex<State>>;
+pub(super) type Shared = Arc<Mutex<State>>;
 struct Handle(Shared);
 impl Drop for Handle {
     fn drop(&mut self) {
@@ -375,7 +398,9 @@ impl Drop for Handle {
                 // A forgotten failed owner must not silently release its
                 // original socket. Native process exit remains the boundary.
                 if closing.wait().await.is_err() {
-                    std::future::pending::<()>().await;
+                    let retirements = owner.lock().unwrap().retirements.clone();
+                    retirements.host_failed(owner);
+                    return;
                 }
                 drop(owner);
             });
@@ -404,7 +429,7 @@ impl SipHost {
             calls: Default::default(),
             retired_incoming: Vec::new(),
             requests: None,
-            unhandled_requests: Vec::new(),
+            retirements: Retirements::new(),
             closing: None,
         })))))
     }
@@ -477,6 +502,10 @@ impl SipHost {
                 };
                 let result = async {
                     let bound = bound.map_err(SipHostError::Binding)?;
+                    bound
+                        .endpoint()
+                        .map_err(SipHostError::Binding)?
+                        .set_retirements(owner.lock().unwrap().retirements.clone());
                     let endpoint = bound.local_addr();
                     let bound = Arc::new(bound);
                     owner.lock().unwrap().binding = Some(bound.clone());
@@ -554,6 +583,7 @@ impl SipHost {
             }),
             media: OnceLock::from(media),
             initializing: None,
+            incoming_slot: Mutex::new(None),
         });
         state.calls.push(call.clone());
         Ok(SipHostCall(call))
@@ -600,6 +630,16 @@ impl SipHost {
         let (call, observers) = {
             let mut state = self.shared().lock().unwrap();
             admission(&state, &id, incoming)?;
+            let incoming_slot = if incoming {
+                Some(
+                    state
+                        .retirements
+                        .incoming_slot()
+                        .ok_or(SipHostError::OperationConflict)?,
+                )
+            } else {
+                None
+            };
             let observers = state
                 .binding
                 .as_ref()
@@ -624,6 +664,7 @@ impl SipHost {
                 }),
                 media: OnceLock::new(),
                 initializing: Some(initializing.clone()),
+                incoming_slot: Mutex::new(incoming_slot),
             });
             state.calls.push(call.clone());
             (call, observers)
@@ -648,6 +689,7 @@ impl SipHost {
                 Err(error) => {
                     original.state.lock().unwrap().failed_before_send = true;
                     if error != SipHostError::CleanupUnconfirmed {
+                        original.incoming_slot.lock().unwrap().take();
                         // No original call was published by a failed synchronous
                         // constructor. Only a confirmed, resource-free failure
                         // can return this reservation before signalling it.
@@ -679,6 +721,9 @@ impl SipHost {
         if current.incoming.is_some() {
             return Err(transaction);
         }
+        let Some(incoming_slot) = call.0.incoming_slot.lock().unwrap().take() else {
+            return Err(transaction);
+        };
         let incoming = super::incoming::IncomingInvite::start(
             call.clone(),
             transaction,
@@ -689,6 +734,8 @@ impl SipHost {
                 .endpoint()
                 .expect("admitted endpoint"),
             ring_seconds,
+            state.retirements.clone(),
+            incoming_slot,
         );
         if current.ending {
             incoming.request_hangup();
@@ -1047,56 +1094,60 @@ async fn dispatch_requests(
                 let Some(host) = owner.upgrade() else {
                     return Err(SipHostError::CleanupUnconfirmed);
                 };
-                let (transaction, source) = {
+                let (transaction, source, retirements) = {
                     let state = host.lock().unwrap();
                     let source = state.binding.as_ref().and_then(|b| b.endpoint().ok())
                         .and_then(|endpoint| endpoint.incoming_source(&transaction));
                     match deliver_control(&state, transaction) {
                         Ok(()) => continue,
-                        Err(transaction) => (transaction, source),
+                        Err(transaction) => (transaction, source, state.retirements.clone()),
                     }
                 };
                 let request = &transaction.original;
                 let in_dialog = request.from_header().ok().and_then(|h| h.tag().ok().flatten()).is_some()
                     && request.to_header().ok().and_then(|h| h.tag().ok().flatten()).is_some();
+                let Some(slot) = retirements.response_slot() else {
+                    // No response or application work has started. Do not
+                    // queue another original when all admitted response owners
+                    // are occupied (including uncertain ones). Matching call
+                    // controls were delivered before this capacity check.
+                    drop(transaction);
+                    continue;
+                };
                 if request.method == Method::Invite && !in_dialog || request.method == Method::Info && in_dialog {
                         let incoming = incoming.clone();
-                        let owner = owner.clone();
                         replies.spawn(async move {
                             match incoming(transaction, source).await {
-                                Ok(()) => true,
+                                Ok(()) => { drop(slot); true },
                                 Err(original) => {
-                                    if let Some(host) = owner.upgrade() { host.lock().unwrap().unhandled_requests.push(original); }
+                                    retirements.response_failed(original, slot);
                                     false
                                 }
                             }
                         });
                     continue;
                 }
-                if request.method == Method::Invite {
-                    // A re-INVITE still requires its original negotiation
-                    // owner; do not bypass that unfinished cleanup fence.
-                    host.lock().unwrap().unhandled_requests.push(transaction);
-                    continue;
-                }
-                let status = if in_dialog { None } else { match request.method {
+                let status = if in_dialog { match request.method {
+                    // Never negotiate on behalf of a missing/full original
+                    // dialog owner. This new offer has not been admitted.
+                    Method::Invite => Some(StatusCode::ServiceUnavailable),
+                    _ => None,
+                }} else { match request.method {
                     Method::Options => Some(StatusCode::OK),
                     Method::Notify | Method::Message => Some(StatusCode::MethodNotAllowed),
                     _ => None,
                 }};
                 if let Some(status) = status {
-                    let owner = owner.clone();
                     replies.spawn(async move {
                         let mut original = transaction;
                         if original.reply(status).await.is_ok() {
                             // Server non-INVITE final responses retire on the
                             // original driver. Drop before publishing completion.
                             drop(original);
+                            drop(slot);
                             true
                         } else {
-                            if let Some(host) = owner.upgrade() {
-                                host.lock().unwrap().unhandled_requests.push(original);
-                            }
+                            retirements.response_failed(original, slot);
                             false
                         }
                     });
@@ -1113,7 +1164,7 @@ async fn dispatch_requests(
     if failed
         || owner
             .upgrade()
-            .is_none_or(|host| !host.lock().unwrap().unhandled_requests.is_empty())
+            .is_none_or(|host| host.lock().unwrap().retirements.unresolved())
     {
         Err(SipHostError::CleanupUnconfirmed)
     } else {
@@ -1217,6 +1268,7 @@ fn begin_release(owner: &Shared, call: &Arc<Call>) -> Arc<Completion<()>> {
         .await
         .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
         if result.is_ok() {
+            call.incoming_slot.lock().unwrap().take();
             let mut owner = owner.lock().unwrap();
             owner
                 .retired_incoming
@@ -1324,3 +1376,7 @@ fn begin_close(owner: &Shared) -> Arc<Completion<()>> {
     });
     completion
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/rust/phone_sip_capacity.rs"]
+mod capacity_cases;

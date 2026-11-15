@@ -37,7 +37,10 @@ pub trait Runner: Send + Sync + 'static {
         input: IvyJson,
         signal: CancellationToken,
         register: RegisterJob,
-    ) -> ServiceFuture<IvyJson>;
+    ) -> ServiceFuture<model::Output>;
+    fn can_verify_stopped(&self) -> bool {
+        false
+    }
     fn stopped(&self, task_id: String, job_name: String) -> ServiceFuture<bool>;
     /// Synchronous filesystem work is called on the blocking store owner.
     fn clear_authentication(&self, task_id: &str) -> IvyResult<()>;
@@ -288,9 +291,13 @@ impl Engine {
         Ok(result.value)
     }
     pub async fn pending_publications(&self) -> IvyResult<usize> {
-        self.0.store.call(|s| Ok(s.runs("publishing")?.len())).await
+        self.0.store.call(|s| s.run_count("publishing")).await
     }
     pub async fn flush(&self) {
+        self.wake_publication();
+        self.0.publication.wait().await;
+    }
+    fn wake_publication(&self) {
         if self.0.closing.is_cancelled() {
             return;
         }
@@ -307,7 +314,6 @@ impl Engine {
                     .await;
             });
         }
-        self.0.publication.wait().await;
     }
     pub async fn tick(&self, wait_for_publication: bool) -> IvyResult<()> {
         if self.0.closing.is_cancelled() {
@@ -322,18 +328,18 @@ impl Engine {
             .store
             .call(move |store| {
                 let cache = ExecutionCache { store };
-                for mut run in store.runs("publishing")? {
-                    cache.commit_execution(&mut run, now as f64)?;
-                }
                 cache.schedule(now as f64, || uuid::Uuid::new_v4().to_string())?;
                 Ok(())
             })
             .await?;
-        let flush = self.clone();
-        tokio::spawn(async move {
-            flush.flush().await;
-        });
-        let queued = self.0.store.call(|store| store.runs("queued")).await?;
+        self.wake_publication();
+        let free = (model::number(&self.0.settings, "concurrency")? as usize)
+            .saturating_sub(self.0.active.lock().unwrap().len());
+        let queued = self
+            .0
+            .store
+            .call(move |store| store.next_runs("queued", free))
+            .await?;
         for run in queued {
             let id = model::text(&run, "taskId")?;
             let mut active = self.0.active.lock().unwrap();
@@ -383,16 +389,15 @@ impl Engine {
         let task_id = model::text(&run, "taskId")?;
         let date = iso(self.0.clock.utc_millis())?;
         let key = id.clone();
-        let (running, state) = self
+        let (mut running, task, state) = self
             .0
             .store
             .call(move |store| {
                 let cache = ExecutionCache { store };
-                let row = cache.task(&task_id)?;
-                Ok((
-                    cache.mark_running(&key, &date)?,
-                    row.get("state").cloned().unwrap_or(IvyJson::Null),
-                ))
+                let state = store.execution_state(&task_id)?;
+                let run = cache.mark_running(&key, &date)?;
+                let task = store.execution_task(&run)?;
+                Ok((run, task, state))
             })
             .await?;
         let store = self.0.store.clone();
@@ -413,9 +418,9 @@ impl Engine {
             .0
             .runner
             .run(
-                model::field(&running, "task")?.clone(),
+                task,
                 state,
-                model::field(&running, "input")?.clone(),
+                running.remove("input").unwrap_or(IvyJson::Null),
                 signal.clone(),
                 register,
             )
@@ -432,15 +437,21 @@ impl Engine {
                     if signal.is_cancelled() {
                         return Err(IvyError::new("cancelled", "Task was cancelled."));
                     }
-                    let output = schema::parse_schema("outputSchema", &output)?;
-                    run.insert("output", output.clone());
-                    run.insert("finishedAt", date.clone().into());
-                    crate::policy::validate_publication(&run, &maximum)?;
-                    Ok(output)
+                    Ok(output.into_json())
                 });
                 match result {
                     Ok(output) => {
-                        cache.commit_output(&mut run, output, &date, now as f64, &maximum)
+                        match cache.commit_output(&mut run, output, &date, now as f64, &maximum) {
+                            Err(error)
+                                if matches!(
+                                    error.code.as_str(),
+                                    "limit_exceeded" | "invalid_arguments" | "content_too_large"
+                                ) =>
+                            {
+                                cache.fail(&mut run, &error.code, false, &date)
+                            }
+                            result => result,
+                        }
                     }
                     Err(error) => cache.fail(&mut run, &error.code, signal.is_cancelled(), &date),
                 }
@@ -448,6 +459,11 @@ impl Engine {
             .await
     }
     async fn recover_workers(&self) -> IvyResult<()> {
+        // A persisted Job name is not a native retirement proof. Production
+        // runners without such an owner keep the fence until explicit confirmation.
+        if !self.0.runner.can_verify_stopped() {
+            return Ok(());
+        }
         if self.0.clock.utc_millis() < self.0.next_recovery.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -457,7 +473,7 @@ impl Engine {
             .call(|store| {
                 let cache = ExecutionCache { store };
                 let mut found = Vec::new();
-                for row in store.list(false)? {
+                for row in store.summaries(false)? {
                     if cache.unconfirmed(&row)? {
                         let id = model::optional_sqlite_key(&row, "lastRunId").unwrap();
                         if let Some(run) = store.run(&id)? {

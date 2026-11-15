@@ -12,6 +12,8 @@ const PRINCIPAL: &str = "prepared-phone-voice";
 fn fingerprint() -> String {
     digest("phone-voice-journal-fixture")
 }
+#[path = "phone_journal_maintenance.rs"]
+mod maintenance_cases;
 fn value(text: &str) -> IvyJson {
     parse(text, 4 * 1024 * 1024).unwrap()
 }
@@ -74,6 +76,18 @@ async fn command_step(
     action: &str,
     arguments: &IvyJson,
 ) -> IvyResult<IvyJson> {
+    // The frozen oracle places maintenance before these actions. Drive the new
+    // asynchronous maintenance explicitly at that schedule, without changing
+    // its original outcomes, error checks or persisted-row comparisons.
+    if ["beginEpoch", "admitCall", "submit"].contains(&action) {
+        journal
+            .request(|db| {
+                db.rebuild_projection()?;
+                while db.compact_page()? {}
+                Ok(())
+            })
+            .await?;
+    }
     let args = arguments.as_array().unwrap();
     let text = |index: usize| args[index].as_js_string().unwrap().clone();
     let number = |index: usize| args[index].as_f64().unwrap() as u32;
@@ -269,7 +283,9 @@ async fn call_command_epoch_compaction_and_receipts_preserve_format7() {
                 *target = number as usize;
             }
         }
-        let journal = PhoneJournal::open(configuration).await.unwrap();
+        let journal = PhoneJournal::open_with_maintenance(configuration, false)
+            .await
+            .unwrap();
         let mut call: JsString = "10000000-0000-4000-8000-000000000005".into();
         let mut allocated = Vec::new();
         let mut observations = Vec::new();
@@ -356,7 +372,9 @@ async fn call_command_epoch_compaction_and_receipts_preserve_format7() {
                 &normalize_command_value(&readback, &allocated, ""),
                 expected.get("snapshot").unwrap(),
             );
-            let reopened = PhoneJournal::open(root.options()).await.unwrap();
+            let reopened = PhoneJournal::open_with_maintenance(root.options(), false)
+                .await
+                .unwrap();
             same(
                 &normalize_command_value(&command_snapshot(&reopened).await, &allocated, ""),
                 expected.get("snapshot").unwrap(),
@@ -635,12 +653,64 @@ async fn format7_fixture_reopens_and_preserves_historical_voice_evidence() {
     assert_eq!(readback.get("reasoning"), Some(&"high".into()));
     assert_eq!(
         readback.get("snapshot").unwrap().get("format"),
-        Some(&7.0.into())
+        Some(&8.0.into())
     );
-    same(
-        seed.get("snapshot").unwrap().get("schema").unwrap(),
-        readback.get("snapshot").unwrap().get("schema").unwrap(),
+    let original_schema = seed
+        .get("snapshot")
+        .unwrap()
+        .get("schema")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let upgraded_schema = readback
+        .get("snapshot")
+        .unwrap()
+        .get("schema")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let additions = [
+        ("voice_works", "table"),
+        ("voice_observations", "table"),
+        ("receipt_archive_history_usage", "table"),
+        ("receipt_history_usage_insert", "trigger"),
+        ("receipt_history_usage_delete", "trigger"),
+        ("receipt_history_usage_update", "trigger"),
+        ("receipt_history_archive_insert", "trigger"),
+        ("receipt_history_archive_delete", "trigger"),
+        ("receipt_history_archive_update", "trigger"),
+        ("commands_by_call_order", "index"),
+    ];
+    assert_eq!(
+        upgraded_schema.len(),
+        original_schema.len() + additions.len()
     );
+    for original in original_schema {
+        assert!(upgraded_schema.contains(original));
+    }
+    for (name, kind) in additions {
+        let added = upgraded_schema
+            .iter()
+            .find(|entry| entry.get("name") == Some(&name.into()))
+            .unwrap();
+        assert!(!original_schema.contains(added));
+        assert_eq!(added.get("type"), Some(&kind.into()));
+    }
+    for name in ["voice_works", "voice_observations"] {
+        let added = upgraded_schema
+            .iter()
+            .find(|entry| entry.get("name") == Some(&name.into()))
+            .unwrap();
+        assert!(!original_schema.contains(added));
+        assert_eq!(added.get("type"), Some(&"table".into()));
+        assert_eq!(
+            added.get("sql"),
+            Some(
+                &format!("CREATETABLE{name}(thread_idTEXTPRIMARYKEY,valueTEXTNOTNULL)STRICT")
+                    .into()
+            )
+        );
+    }
     // Original historical deletion evidence is outside this maintenance path.
     let historical = |snapshot: &IvyJson| {
         snapshot
@@ -671,10 +741,10 @@ async fn format7_fixture_reopens_and_preserves_historical_voice_evidence() {
         .wait()
         .await
         .unwrap();
-    let backwards = persisted_state(&blank, None);
+    let fresh = persisted_state(&blank, None);
     same(
-        seed.get("snapshot").unwrap().get("schema").unwrap(),
-        backwards.get("snapshot").unwrap().get("schema").unwrap(),
+        readback.get("snapshot").unwrap().get("schema").unwrap(),
+        fresh.get("snapshot").unwrap().get("schema").unwrap(),
     );
 }
 
@@ -828,6 +898,8 @@ async fn admitted_work_survives_observer_loss_and_close_drains_without_readmissi
 
 #[tokio::test]
 async fn preparation_persists_original_and_turn_on_real_worker_before_completion() {
+    #[path = "../fixtures/phone-voice-history.rs"]
+    mod history_pages;
     use crate::voice_rpc::{
         VoicePreparation,
         control_test_support::{Plan, fixture, hooks},
@@ -864,10 +936,41 @@ async fn preparation_persists_original_and_turn_on_real_worker_before_completion
     assert_eq!(read.get("method"), Some(&"thread/read".into()));
     let saved = journal.task_cache(PRINCIPAL, &fp).await.unwrap().unwrap();
     assert_eq!(saved.get("preparationTurnId"), Some(&TURN.into()));
-    let ready = value(
+    let mut ready = value(
         r#"{"thread":{"id":"10000000-0000-4000-8000-000000000001","cwd":"C:\\WORK","projectId":null,"ephemeral":false,"turns":[{"id":"10000000-0000-4000-8000-000000000002","status":"completed","items":[{"type":"mcpToolCall","tool":"ivy_instructions","server":"regular","status":"completed","result":{}},{"type":"mcpToolCall","tool":"phone_bridge_status","server":"regular","status":"completed","result":{}},{"type":"agentMessage","phase":"final_answer","text":"READY"}]}]}}"#,
     );
+    let turn = ready
+        .required("thread")
+        .unwrap()
+        .required("turns")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .clone();
+    ready
+        .get_mut("thread")
+        .unwrap()
+        .insert("turns", IvyJson::Array(vec![]));
+    assert_eq!(
+        read.required("params").unwrap().get("includeTurns"),
+        Some(&false.into())
+    );
     peer.reply(&read, ready).await;
+    let read = peer.request().await;
+    assert_eq!(read.get("method"), Some(&"thread/turns/list".into()));
+    assert_eq!(
+        read.required("params").unwrap().get("limit"),
+        Some(&16.0.into())
+    );
+    peer.reply(&read, history_pages::turns(&[turn.clone()]))
+        .await;
+    let read = peer.request().await;
+    assert_eq!(read.get("method"), Some(&"thread/items/list".into()));
+    assert_eq!(
+        read.required("params").unwrap().get("turnId"),
+        Some(&TURN.into())
+    );
+    peer.reply(&read, history_pages::items(&turn)).await;
     timed(work.wait()).await.unwrap();
     control
         .close(Box::pin(async { Ok(()) }))

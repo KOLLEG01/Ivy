@@ -85,7 +85,7 @@ test('native staging needs only the selected host and emits no Node entry shim',
   assert.ok(!existsSync(join(root, 'missing')));
 });
 
-for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 'agent-manager']) test(`normal native build selects one target and registered helpers (${component})`, t => {
+for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 'agent-manager', 'data-collector']) test(`normal native build selects one target and registered helpers (${component})`, t => {
   const root = mkdtempSync(join(tmpdir(), 'ivy-native-build-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const previousTarget = process.env.CARGO_TARGET_DIR, previousCache = process.env.IVY_BUILD_CACHE_ROOT;
@@ -147,6 +147,10 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 
     mkdirSync(join(root, 'instructions'));
     writeFileSync(join(root, 'instructions/secretary-notification-policy.ts'), "export const secretaryNotificationPolicy = 'synthetic policy';");
   }
+  if (component === 'data-collector') {
+    mkdirSync(join(root, 'services/data-collector/rust/assets'), { recursive: true });
+    writeFileSync(join(root, 'services/data-collector/rust/assets/worker.mjs'), 'synthetic collector worker');
+  }
   if (component === 'agent-manager') {
     const runtime = join(root, '.local/native-runtime/win32-x64'); mkdirSync(runtime, { recursive: true });
     writeFileSync(join(root, `services/${component}/build-inputs.json`), JSON.stringify({ schemaVersion: 1,
@@ -205,6 +209,10 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 
     assert.equal(existsSync(join(root, 'dist/specs/native/fixture/catalog.json')), true);
     assert.equal(existsSync(join(root, 'dist/native/win32-x64/ivy-job.exe')), true);
     assert.equal(existsSync(join(root, 'dist/services/secretary/src/main.js')), false);
+  }
+  if (component === 'data-collector') {
+    assert.equal(readFileSync(join(root, 'dist/services/data-collector/worker.mjs'), 'utf8'), 'synthetic collector worker');
+    assert.equal(existsSync(join(root, 'dist/specs')), false);
   }
   delete process.env.CARGO_TARGET_DIR;
   targetDirectory = join(root, 'prepared-cache', 'cargo');

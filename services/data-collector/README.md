@@ -17,8 +17,8 @@ never replaces the accepted execution. `enable` selects the latest draft;
 `definitionHistory` and `script` for central history; tasks expose desired and
 adopted revisions and adoption errors. Rollback activates a complete earlier
 definition, including its pinned script and configuration. Mutation calls carry the same inner and routed
-`operationId`; inspect the original operation after a lost reply. Receipts are
-retained for seven days; do not retry an old operation after that window.
+`operationId`; inspect the original operation after a lost reply. See the bounded
+journal retention below; evicted identities cannot be reused.
 
 Each task exports `default async ({ config, secrets, state, input, signal })` and
 returns `{ data, state?, events?: [{ name, payload }] }`. `data` is any JSON value.
@@ -75,6 +75,12 @@ the original service operation, never a new operation ID or an automatic replay.
 
 Hive and plugin credentials stay in their owning processes. The script bridge
 exists only for its run and closes with it.
+Each active MCP run keeps its own loopback listener and random bearer token.
+This keeps task, account and tool grants bound to the same cancellation and
+connection lifetime. At the configured concurrency cap, sharing this small set
+of listeners would add a token/session registry and retirement races without
+removing worker or context memory. Rejected requests close the connection;
+they do not spawn background tasks to drain unbounded bodies.
 Native context ownership and outstanding operation identities are saved in the
 local database before dispatch. Cleanup reconciles the originals after cancellation
 or restart; unknown outcomes authorize neither replay nor unloading. At most 64
@@ -124,6 +130,9 @@ replaces it. Known completed execution history uses a bounded FIFO ring without 
 retention duration. Evicted operation IDs retain compact replay guards. Pending results
 and events resume publication after restart without running the script again;
 publication completes the run independently of later local executions.
+Historical interval and externally supplied run IDs share the same ID space and
+their guards contain no provenance. Retain these disk records to prevent reuse;
+they are queried by ID, never loaded as an in-memory set.
 Invalid content or a conflicting result target ends publication with an error;
 temporary failures and uncertain replies remain pending for reconciliation.
 
@@ -159,8 +168,16 @@ JSON document limit. Camera examples use bounded JPEG data URLs.
 Scripts run in separate Node processes with individual working directories and
 npm dependencies pinned to exact versions. Dependency installation uses
 `--ignore-scripts`; packages requiring installation hooks need host preparation.
+The packaged worker loads script and dependencies prepared once per accepted
+content revision. SQLite pins accepted task snapshots independently of later
+definition changes; legacy saved runs remain readable. Execution commits its
+private cursor atomically before publication. A single coalesced publisher reads
+one pending result at a time and journals event acknowledgements separately.
 Configure `npmCliPath` if npm is not installed beside Node. Task timeouts, V8 heap
 limits, a service concurrency cap and owned process trees contain task failures.
+Schedule, manual and HTTP admission share `settings.concurrency`; excess accepted
+runs wait in SQLite without a worker, and each task has at most one queued or
+running execution.
 Windows uses the existing Job Object launcher; Linux uses process groups.
 This is process isolation for trusted user scripts, not a hostile-code sandbox:
 scripts retain the service OS user's file and network permissions, and V8 heap
@@ -168,7 +185,7 @@ limits do not bound every native allocation. Run the service as a dedicated OS
 user. Service credentials are not passed to scripts.
 
 Set `intervalSeconds: 0` for manual/input tasks. Optional `settings.ingress`
-starts a standalone Node HTTP listener on its configured `host` and `port`.
+starts a native HTTP listener on its configured `host` and `port`.
 It accepts JSON at `POST /tasks/<id>/run`; optional `ingress.routes` maps extra
 exact paths to task IDs. Built-in task paths keep their original meaning.
 Devices connect directly to this listener. It runs in the DataCollector process
@@ -194,10 +211,12 @@ deletion waits for execution and publication. Drafts can be saved during executi
 A run interrupted by an abrupt service
 exit is never replayed. Windows workers use a named Job Object per task; the name
 is stored before execution, and a second launcher cannot join the same job.
-After interruption, DataCollector checks that the exact job has disappeared,
-preserves the task's enabled setting and resumes its next scheduled observation.
-Manual and input runs remain interrupted and are not automatically repeated.
-Unavailable observations are retried; they do not establish worker termination.
+After interruption, the original run stays fenced until termination is proved.
+The production adapter cannot reconstruct the retired launch's proof from a
+Job Object name and does not poll a check that always returns false. Qualified
+process-owner adapters may resolve the exact original job; an unavailable or
+negative observation never establishes termination. Interrupted manual and input
+runs are not automatically repeated.
 
 If process termination returns `outcome_unknown`, the task stays blocked for
 run, save, enable and delete until worker termination is verified. Other tasks can

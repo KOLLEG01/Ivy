@@ -5,6 +5,9 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 
+pub(super) const PAGE: i64 = 16;
+pub(super) const INTERVAL: Duration = Duration::from_millis(25);
+
 pub(super) struct Usage {
     pub operations: f64,
     pub calls: f64,
@@ -73,7 +76,6 @@ impl JournalDb<'_> {
     fn begin_epoch(&self, epoch: JsString) -> IvyResult<()> {
         let db = self;
         uuid(Some(&epoch.clone().into()))?;
-        db.compact()?;
         db.transaction(|db| {
             require(
                 db.epoch()?.is_none(),
@@ -107,7 +109,9 @@ impl JournalDb<'_> {
                 .map_err(error)?;
             db.set_counter("epochs", count + 1.0)?;
             db.set_meta("epoch", &id)?;
-            db.set_meta("epochOperations", "0")
+            db.set_meta("epochOperations", "0")?;
+            db.maintenance_pending.set(true);
+            Ok(())
         })
     }
     fn lose_epoch(&self, epoch: JsString) -> IvyResult<()> {
@@ -126,7 +130,9 @@ impl JournalDb<'_> {
                     db.save(operation)?;
                 }
                 db.set_meta("epoch", "")?;
-                db.db.execute_batch("DELETE FROM active_calls;").map_err(error)
+                db.db.execute_batch("DELETE FROM active_calls;").map_err(error)?;
+                db.maintenance_pending.set(true);
+                Ok(())
             })
     }
     pub(super) fn counter(&self, key: &str) -> IvyResult<f64> {
@@ -173,80 +179,137 @@ impl JournalDb<'_> {
             epochs: self.counter("epochs")?,
         })
     }
-    pub(super) fn compact(&self) -> IvyResult<()> {
-        self.transaction(|db| {
-            // Materialize each selection before mutating it, like the original .all().
-            let calls = db.db.prepare_cached("SELECT call_id,value,operation_id FROM calls WHERE call_id NOT IN (SELECT call_id FROM active_calls) AND NOT EXISTS
-        (SELECT 1 FROM commands WHERE commands.call_id=calls.call_id AND
-          (phase='submitted' AND epoch=? OR method='call.archiveVoice' AND
-            (phase!='result' OR json_extract(value,'$.receipt.result.state') IS NOT 'archived') AND
-            json_extract(value,'$.archiveResolution.state') IS NOT 'observed_archived')) LIMIT 32").map_err(error)?
-                .query_map([db.epoch()?.unwrap_or_default()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(error)?
-                .collect::<Result<Vec<_>,_>>().map_err(error)?;
-            for (id, value, operation_id) in calls {
-                db.archive.retain("call", &id, &value)?;
-                db.archive.retain("call-operation", &operation_id, &id)?;
-                let commands = db.db.prepare_cached("SELECT operation_id,method,value FROM commands WHERE call_id=? ORDER BY rowid").map_err(error)?
-                    .query_map([&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(error)?
-                    .collect::<Result<Vec<_>,_>>().map_err(error)?;
-                for (operation_id, method, value) in commands {
-                    db.archive.retain("command", &operation_id, &value)?;
-                    let command = parse(&value, usize::MAX).map_err(|_| IvyError::internal())?;
-                    let intent = field(&command, "intent")?;
-                    let generation = intent.get("voiceGeneration").filter(|value| !value.is_null()).cloned().unwrap_or(IvyJson::Number(0.0));
-                    let mut key = vec![id.clone().into(), method.clone().into()];
-                    if generation != IvyJson::Number(0.0) {key.push(generation);}
-                    let key = canonical(&IvyJson::Array(key), MANAGEMENT_FRAME_BYTES)?;
-                    if db.archive.read("call-command", &key)?.is_none() {db.archive.retain("call-command", &key, &operation_id)?;}
-                    if intent.get("commandSequence").and_then(IvyJson::as_f64).is_some_and(|sequence| sequence > 0.0) {
-                        let kind = match method.as_str() {"call.command.feedback" => Some("command-feedback"), "call.selectVoice" => Some("voice-selection"), _ => None};
-                        if let Some(kind) = kind {
-                            db.archive.retain(kind, &canonical(&IvyJson::Array(vec![id.clone().into(), field(intent, "commandSequence")?.clone()]), MANAGEMENT_FRAME_BYTES)?, &operation_id)?;
-                        }
-                    }
+    /// One small transaction between original jobs, never inside submit/admit.
+    /// Partial calls retain their admission until their final command is moved.
+    pub(super) fn compact_page(&self) -> IvyResult<bool> {
+        let progress = self.transaction(|db| {
+            let mut progress = false;
+            let call: Option<(String, String, String)> = db.db.query_row(
+                "SELECT c.call_id,c.value,c.operation_id FROM calls c
+                 WHERE NOT EXISTS(SELECT 1 FROM active_calls a WHERE a.call_id=c.call_id)
+                   AND NOT EXISTS(SELECT 1 FROM phone_command_facts f WHERE f.call_id=c.call_id AND f.active=1
+                     AND (f.submitted=1 AND f.epoch=? OR f.archive_pending=1))
+                 ORDER BY c.rowid LIMIT 1", [db.epoch()?.unwrap_or_default()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional().map_err(error)?;
+            if let Some((id, value, operation_id)) = call {
+                let commands = db.db.prepare_cached(
+                    "SELECT operation_id,method,value FROM commands WHERE call_id=? ORDER BY rowid LIMIT ?"
+                ).map_err(error)?.query_map(params![id, PAGE], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                }).map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
+                for (operation, method, text) in commands {
+                    db.retire_command(&operation, Some((&id, &method)), &text)?;
+                    progress = true;
                 }
-                let target: Option<String> = db.db.query_row("SELECT value FROM targets WHERE call_id=?", [&id], |row| row.get(0)).optional().map_err(error)?;
-                if let Some(target) = target { db.archive.retain("target", &id, &target)?; }
-                for sql in ["DELETE FROM commands WHERE call_id=?", "DELETE FROM targets WHERE call_id=?", "DELETE FROM calls WHERE call_id=?"] { db.db.execute(sql, [&id]).map_err(error)?; }
+                let remaining = db.db.query_row("SELECT 1 FROM commands WHERE call_id=? LIMIT 1",
+                    [&id], |_| Ok(())).optional().map_err(error)?.is_some();
+                if !remaining {
+                    db.archive.retain("call", &id, &value)?;
+                    db.archive.retain("call-operation", &operation_id, &id)?;
+                    let target: Option<String> = db.db.query_row("SELECT value FROM targets WHERE call_id=?",
+                        [&id], |row| row.get(0)).optional().map_err(error)?;
+                    if let Some(target) = target { db.archive.retain("target", &id, &target)?; }
+                    let targets = db.db.execute("DELETE FROM targets WHERE call_id=?", [&id]).map_err(error)?;
+                    db.subtract("targets", targets)?;
+                    let calls = db.db.execute("DELETE FROM calls WHERE call_id=?", [&id]).map_err(error)?;
+                    db.subtract("calls", calls)?;
+                    progress = true;
+                }
             }
-            let commands = db.db.prepare_cached("SELECT operation_id,value FROM commands WHERE call_id IS NULL AND phase IN ('result','outcome_unknown') LIMIT 128").map_err(error)?
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
-            for (id, value) in commands {
-                db.archive.retain("command", &id, &value)?;
-                db.db.execute("DELETE FROM commands WHERE operation_id=?", [&id]).map_err(error)?;
+            let commands = db.db.prepare_cached(
+                "SELECT c.operation_id,c.value FROM phone_command_facts f JOIN commands c ON c.operation_id=f.operation_id
+                 WHERE f.active=1 AND f.call_id IS NULL AND f.submitted=0 ORDER BY c.rowid LIMIT ?"
+            ).map_err(error)?.query_map([PAGE], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
+            for (id, text) in commands {
+                db.retire_command(&id, None, &text)?;
+                progress = true;
             }
-            let epochs = db.db.prepare_cached("SELECT epoch FROM epochs WHERE epoch!=? LIMIT 128").map_err(error)?
-                .query_map([db.epoch()?.unwrap_or_default()], |row| row.get::<_, String>(0)).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
+            let epochs = db.db.prepare_cached("SELECT epoch FROM epochs WHERE epoch!=? ORDER BY rowid LIMIT ?")
+                .map_err(error)?.query_map(params![db.epoch()?.unwrap_or_default(), PAGE], |row| row.get::<_, String>(0))
+                .map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
             for epoch in epochs {
                 db.archive.retain("epoch", &epoch, &epoch)?;
-                db.db.execute("DELETE FROM epochs WHERE epoch=?", [&epoch]).map_err(error)?;
+                let removed = db.db.execute("DELETE FROM epochs WHERE epoch=?", [&epoch]).map_err(error)?;
+                db.subtract("epochs", removed)?;
+                progress = true;
             }
-            // Admission IDs, Voice pointers and all uncertainty remain recovery state.
-            let released = db.db.prepare_cached("SELECT a.key FROM receipt_archive a
-        WHERE a.kind='command' AND json_extract(a.value,'$.phase')='result'
-          AND json_extract(a.value,'$.intent.method') NOT IN
-            ('call.bindVoice','call.createVoice','call.selectSpeakerVoice','call.archiveVoice','call.release')
-          AND NOT EXISTS(SELECT 1 FROM receipt_archive_history h WHERE h.kind=a.kind AND h.key=a.key)
-          AND NOT EXISTS(SELECT 1 FROM json_tree(a.value) j WHERE
-            j.key IN ('phase','state','ownerPhase','outcome','execution') AND j.value IN ('unknown','outcome_unknown','needs_attention') OR
-            j.key IN ('error','errorCode','code') AND (j.value GLOB '*outcome_unknown*' OR j.value IN ('native_connection_lost','native_epoch_lost')))
-          AND (json_extract(a.value,'$.intent.callId') IS NULL OR (
-            EXISTS(SELECT 1 FROM receipt_archive r WHERE r.kind='command'
-              AND json_extract(r.value,'$.intent.callId')=json_extract(a.value,'$.intent.callId')
-              AND json_extract(r.value,'$.intent.method')='call.release' AND json_extract(r.value,'$.receipt.ok')=1)
-            AND NOT EXISTS(SELECT 1 FROM receipt_archive p WHERE p.kind='command'
-              AND json_extract(p.value,'$.intent.callId')=json_extract(a.value,'$.intent.callId') AND json_extract(p.value,'$.phase')!='result')
-            AND NOT EXISTS(SELECT 1 FROM receipt_archive u,json_tree(u.value) j WHERE u.kind='command'
-              AND json_extract(u.value,'$.intent.callId')=json_extract(a.value,'$.intent.callId')
-              AND (j.key IN ('phase','state','ownerPhase','outcome','execution') AND j.value IN ('unknown','outcome_unknown','needs_attention') OR
-                j.key IN ('error','errorCode','code') AND (j.value GLOB '*outcome_unknown*' OR j.value IN ('native_connection_lost','native_epoch_lost'))))))
-        ORDER BY a.rowid LIMIT 128").map_err(error)?.query_map([], |row| row.get::<_, String>(0)).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
-            for key in released { db.archive.release("command", &key)?; }
-            for (key, sql) in [("count", "SELECT count(*) FROM commands"), ("epochs", "SELECT count(*) FROM epochs"), ("calls", "SELECT count(*) FROM calls"), ("targets", "SELECT count(*) FROM targets")] {
-                let count: i64 = db.db.query_row(sql, [], |row| row.get(0)).map_err(error)?;
-                db.set_meta(key, &count.to_string())?;
+            // Every command in a partly moved call still participates in its
+            // uncertainty/release fence. No JSON trees or whole-table counts.
+            let released = db.db.prepare_cached(
+                "SELECT f.operation_id FROM phone_command_facts f
+                 WHERE f.active=0 AND f.ordinary=1 AND f.released=0
+                   AND (f.call_id IS NULL OR (
+                     NOT EXISTS(SELECT 1 FROM phone_command_facts a WHERE a.call_id=f.call_id AND a.active=1)
+                     AND EXISTS(SELECT 1 FROM phone_command_facts r WHERE r.call_id=f.call_id AND r.positive_release=1)
+                     AND NOT EXISTS(SELECT 1 FROM phone_command_facts u WHERE u.call_id=f.call_id AND u.unresolved=1)))
+                 ORDER BY f.archive_order LIMIT ?"
+            ).map_err(error)?.query_map([PAGE], |row| row.get::<_, String>(0))
+                .map_err(error)?.collect::<Result<Vec<_>, _>>().map_err(error)?;
+            for key in released {
+                db.archive.release("command", &key)?;
+                db.db.execute("UPDATE phone_command_facts SET released=1 WHERE operation_id=?", [&key]).map_err(error)?;
+                progress = true;
             }
-            Ok(())
-        })
+            Ok(progress)
+        })?;
+        // Rollback leaves canonical rows and the TEMP projection in the same
+        // transaction. A stable blocked set sleeps until an actual write.
+        self.maintenance_pending.set(progress);
+        Ok(progress)
+    }
+    fn subtract(&self, key: &str, removed: usize) -> IvyResult<()> {
+        if removed != 0 {
+            self.set_counter(key, self.counter(key)? - removed as f64)?;
+        }
+        Ok(())
+    }
+    fn retire_command(&self, id: &str, call: Option<(&str, &str)>, text: &str) -> IvyResult<()> {
+        self.archive.retain("command", id, text)?;
+        let command = parse(text, usize::MAX).map_err(|_| IvyError::internal())?;
+        if let Some((call_id, method)) = call {
+            let intent = field(&command, "intent")?;
+            let generation = intent
+                .get("voiceGeneration")
+                .filter(|v| !v.is_null())
+                .cloned()
+                .unwrap_or(IvyJson::Number(0.0));
+            let mut key = vec![call_id.into(), method.into()];
+            if generation != IvyJson::Number(0.0) {
+                key.push(generation);
+            }
+            let key = canonical(&IvyJson::Array(key), MANAGEMENT_FRAME_BYTES)?;
+            if self.archive.read("call-command", &key)?.is_none() {
+                self.archive.retain("call-command", &key, id)?;
+            }
+            if intent
+                .get("commandSequence")
+                .and_then(IvyJson::as_f64)
+                .is_some_and(|n| n > 0.0)
+            {
+                let kind = match method {
+                    "call.command.feedback" => Some("command-feedback"),
+                    "call.selectVoice" => Some("voice-selection"),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    let key = canonical(
+                        &IvyJson::Array(vec![
+                            call_id.into(),
+                            field(intent, "commandSequence")?.clone(),
+                        ]),
+                        MANAGEMENT_FRAME_BYTES,
+                    )?;
+                    self.archive.retain(kind, &key, id)?;
+                }
+            }
+        }
+        self.project_command(&command, false)?;
+        let removed = self
+            .db
+            .execute("DELETE FROM commands WHERE operation_id=?", [id])
+            .map_err(error)?;
+        self.subtract("count", removed)
     }
 }

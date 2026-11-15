@@ -7,6 +7,62 @@ use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 const DATE: &str = "2026-01-01T00:00:00.000Z";
 
+#[cfg(windows)]
+#[tokio::test]
+async fn native_stop_recovery_requires_the_completed_original_disable_and_conclusive_owner() {
+    let f = ServiceFixture::new();
+    save(&f).await;
+    seed(&f).await;
+    let config = ivy_host_runtime::host_config::host_config(f.0.join("host.json")).await.unwrap();
+    let journal = HostJournal::open_with_clock(config, Arc::new(FixedClock)).await.unwrap();
+    let mut deploy = request("deploy", "native-original");
+    deploy.insert("candidateId", hash("a"));
+    let entry = journal.accept(deploy, None).await.unwrap();
+    let deployment = id(&entry).to_utf8().unwrap();
+    for (from, to, change) in [
+        ("prepared", "checking", empty()), ("checking", "draining", empty()),
+        ("draining", "activating", J::object([("target", target(&f))])),
+        ("activating", "verifying", empty()), ("verifying", "succeeded", empty()),
+    ] { journal.advance(&deployment, from, to, change).await.unwrap(); }
+    let entry = journal.accept(request("disable", "native-disable"), None).await.unwrap();
+    let disabled = id(&entry).to_utf8().unwrap();
+    let mut stopped = target(&f);
+    stopped.insert("revision", "stopped-launch".into());
+    stopped.insert("desired", "stopped".into());
+    for (from, to, change) in [
+        ("prepared", "checking", empty()), ("checking", "draining", empty()),
+        ("draining", "activating", J::object([("target", stopped.clone())])),
+        ("activating", "verifying", empty()), ("verifying", "succeeded", empty()),
+    ] { journal.advance(&disabled, from, to, change).await.unwrap(); }
+    let observed = J::object([
+        ("schemaVersion", 1.0.into()), ("instanceId", "fixture".into()),
+        ("ownerPid", 123.0.into()), ("ownerBootId", "owner".into()),
+        ("observedAt", DATE.into()), ("targetRevision", "stopped-launch".into()),
+        ("candidateId", hash("a")), ("buildId", hash("a")), ("state", "stopped".into()),
+        ("health", J::Null), ("restartCount", 0.0.into()), ("nextRestartAt", J::Null),
+        ("code", J::Null), ("message", "".into()),
+    ]);
+    for (key, value) in [
+        ("state", "unknown".into()), ("code", "outcome_unknown".into()),
+        ("targetRevision", "other-owner".into()), ("observedAt", "2025-12-31T23:59:59.000Z".into()),
+    ] {
+        let mut invalid = observed.clone(); invalid.insert(key, value);
+        journal.record_observation("fixture", invalid).await.unwrap();
+        assert_eq!(journal.with_stopped_owner("fixture".into(), disabled.clone(), |_, _, _| -> ivy_contracts::IvyResult<()> {
+            panic!("Unverified ownership must not release the fence")
+        }).await.unwrap_err().code, "native_stop_unverified", "{key}");
+    }
+    journal.record_observation("fixture", observed).await.unwrap();
+    let original = journal.with_stopped_owner("fixture".into(), disabled.clone(), |_, original, _| Ok(original)).await.unwrap();
+    assert_json(&original, &target(&f));
+    assert!(journal.with_stopped_owner("fixture".into(), deployment, |_, _, _| -> ivy_contracts::IvyResult<()> {
+        panic!("An unrelated or retired deployment must not release the fence")
+    }).await.is_err());
+    journal.accept(request("enable", "pending-owner"), None).await.unwrap();
+    assert_eq!(journal.with_stopped_owner("fixture".into(), disabled, |_, _, _| Ok(())).await.unwrap_err().code, "native_stop_unverified");
+    journal.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn shared_connection_keeps_accepted_configuration_and_observes_external_writes() {
     let f = ServiceFixture::new();

@@ -6,6 +6,47 @@ const denied = { behavior: 'deny', message: 'turn already finished' };
 const iterable = async function* (messages) { yield* messages; };
 const failure = error => ({ name: error?.name ?? 'Error', message: String(error?.message ?? error) });
 
+// One input stream owns the SDK transport for the lifetime of a query. Ending a
+// stream makes SDK streamInput wait for the first result and close CLI stdin;
+// it is not an acknowledgement of a steering message during an active turn.
+function queryInput(messages) {
+  const maximum = 32, pending = [];
+  let wake, closed = false, current;
+  const ended = () => new Error('SDK query ended before consuming its input');
+  function close() {
+    if (closed) return;
+    closed = true;
+    current?.reject?.(ended());
+    for (const entry of pending.splice(0)) entry.reject?.(ended());
+    wake?.(); wake = undefined;
+  }
+  if (messages.length > maximum) throw capacity();
+  pending.push(...messages.map(value => ({ value })));
+  return {
+    close,
+    push(messages) {
+      if (closed) return Promise.reject(ended());
+      if (pending.length + messages.length > maximum) return Promise.reject(capacity());
+      const accepted = messages.map(value => new Promise((resolve, reject) => {
+        pending.push({ value, resolve, reject });
+      }));
+      wake?.(); wake = undefined;
+      return Promise.all(accepted).then(() => null);
+    },
+    async *[Symbol.asyncIterator]() {
+      try {
+        while (!closed) {
+          if (!pending.length) { await new Promise(resolve => { wake = resolve; }); continue; }
+          current = pending.shift();
+          yield current.value;
+          // The SDK requests the next item only after its transport write.
+          current.resolve?.(); current = undefined;
+        }
+      } finally { close(); }
+    },
+  };
+}
+
 // Credits cover original events through Rust processing. RPC replies bypass
 // these windows, so a stalled message consumer cannot hold a control response.
 export function eventFlow(write) {
@@ -84,6 +125,7 @@ export function session(sdk, send, onTransportError) {
   function close(entry, error) {
     if (entry.closed) return;
     entry.closed = true;
+    entry.input.close();
     cancelCallbacks(entry.turnId);
     entry.controller.abort();
     entry.query.close();
@@ -135,10 +177,11 @@ export function session(sdk, send, onTransportError) {
       if (queries.has(params.turnId)) throw new Error('SDK query already exists');
       if (queries.size >= queryLimit) throw capacity();
       const controller = new AbortController();
-      const entry = { turnId: params.turnId, controller, closed: false };
+      const entry = { turnId: params.turnId, controller, closed: false, input: queryInput(params.messages) };
       const options = { ...params.options, abortController: controller };
       if (params.permissionCallback) options.canUseTool = (name, input, options) => permission(entry, name, input, options);
-      entry.query = sdk.query({ prompt: iterable(params.messages), options });
+      try { entry.query = sdk.query({ prompt: entry.input, options }); }
+      catch (error) { entry.input.close(); throw error; }
       queries.set(entry.turnId, entry);
       void (async () => {
         try {
@@ -164,7 +207,7 @@ export function session(sdk, send, onTransportError) {
     const entry = queries.get(params.turnId);
     if (method === 'query/close') { if (entry) close(entry); return null; }
     if (!entry) throw new Error('SDK query does not exist');
-    if (method === 'query/steer') { await entry.query.streamInput(iterable(params.messages)); return null; }
+    if (method === 'query/steer') return entry.input.push(params.messages);
     if (method === 'query/interrupt') {
       cancelCallbacks(entry.turnId);
       await entry.query.interrupt();

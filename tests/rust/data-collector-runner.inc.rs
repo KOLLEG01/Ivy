@@ -1,7 +1,4 @@
-use ivy_contracts::{
-    IvyError, IvyJson,
-    json::{parse, stringify},
-};
+use ivy_contracts::{IvyError, IvyJson, json::parse};
 use ivy_data_collector::{
     engine::{RegisterJob, Runner},
     runner::{McpBridge, McpBridgeFactory, TaskRunner},
@@ -27,6 +24,12 @@ impl Root {
         let root =
             std::env::temp_dir().join(format!("ivy-collector-runner-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join("dist/services/data-collector")).unwrap();
+        std::fs::write(
+            root.join("dist/services/data-collector/worker.mjs"),
+            ivy_data_collector::policy::WORKER,
+        )
+        .unwrap();
         Self(root)
     }
 }
@@ -51,8 +54,16 @@ async fn runner(
     let launcher = if cfg!(windows) {
         Some(
             std::env::var_os("IVY_TEST_JOB_LAUNCHER")
-                .expect("qualified Rust job helper")
-                .into(),
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_exe()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("ivy-job.exe")
+                }),
         )
     } else {
         None
@@ -94,6 +105,7 @@ async fn run(runner: &TaskRunner, task: IvyJson, root: &Root) -> Result<IvyJson,
             register(root),
         )
         .await
+        .map(|output| output.into_json())
 }
 
 #[tokio::test]
@@ -222,7 +234,7 @@ async fn real_runner_preserves_context_files_exit_codes_and_registration_before_
 async fn npm_preparation_uses_exact_flags_ordered_hash_cache_and_no_stale_modules() {
     let root = Root::new();
     let cli = root.0.join("npm-fixture.mjs");
-    std::fs::write(&cli,"import{existsSync,appendFileSync,mkdirSync,writeFileSync}from'node:fs';if(process.platform==='win32'&&!existsSync('../../registered'))process.exit(4);appendFileSync('install.jsonl',JSON.stringify(process.argv.slice(2))+'\\n');mkdirSync('node_modules',{recursive:true});writeFileSync('node_modules/prepared','yes');").unwrap();
+    std::fs::write(&cli,"import{existsSync,appendFileSync,mkdirSync,writeFileSync}from'node:fs';if(process.platform==='win32'&&!existsSync('../../../../registered'))process.exit(4);appendFileSync('install.jsonl',JSON.stringify(process.argv.slice(2))+'\\n');mkdirSync('node_modules',{recursive:true});writeFileSync('node_modules/prepared','yes');").unwrap();
     let runner = runner(
         &root,
         IvyJson::object([("npmCliPath", cli.to_string_lossy().as_ref().into())]),
@@ -236,7 +248,17 @@ async fn npm_preparation_uses_exact_flags_ordered_hash_cache_and_no_stale_module
     );
     run(&runner, value.clone(), &root).await.unwrap();
     run(&runner, value.clone(), &root).await.unwrap();
-    let cwd = root.0.join("work/fixture");
+    let root_cwd = root.0.join("work/fixture");
+    let revisions = || {
+        std::fs::read_dir(root_cwd.join("revisions"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.join("ready").exists())
+            .collect::<Vec<_>>()
+    };
+    let first = revisions();
+    assert_eq!(first.len(), 1);
+    let cwd = &first[0];
     let installs = std::fs::read_to_string(cwd.join("install.jsonl")).unwrap();
     assert_eq!(installs.lines().count(), 1);
     assert_eq!(parse(installs.trim(),1000).unwrap(),parse(r#"["install","--omit=dev","--ignore-scripts","--no-audit","--no-fund","--loglevel=error"]"#,1000).unwrap());
@@ -246,14 +268,46 @@ async fn npm_preparation_uses_exact_flags_ordered_hash_cache_and_no_stale_module
     )
     .unwrap();
     assert_eq!(package.get("dependencies"), value.get("dependencies"));
-    let expected=std::process::Command::new(node()).args(["-e","process.stdout.write(require('crypto').createHash('sha256').update(process.argv[1]).digest('hex'))",&stringify(value.get("dependencies").unwrap(),1000).unwrap()]).output().unwrap();
-    assert_eq!(
-        std::fs::read(cwd.join("dependencies.sha256")).unwrap(),
-        expected.stdout
-    );
+    let original_source = std::fs::read(cwd.join("task.mjs")).unwrap();
+    let original_time = std::fs::metadata(cwd.join("task.mjs"))
+        .unwrap()
+        .modified()
+        .unwrap();
     value.insert(
         "dependencies",
         parse(r#"{"a":"2.0.0","z":"1.0.0"}"#, 100).unwrap(),
+    );
+    run(&runner, value.clone(), &root).await.unwrap();
+    assert_eq!(
+        revisions().len(),
+        2,
+        "A distinct accepted revision has its own preparation"
+    );
+    assert_eq!(
+        std::fs::metadata(cwd.join("task.mjs"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        original_time
+    );
+    assert_eq!(
+        std::fs::read(cwd.join("task.mjs")).unwrap(),
+        original_source
+    );
+    value.insert(
+        "dependencies",
+        IvyJson::object(Vec::<(&str, IvyJson)>::new()),
+    );
+    run(&runner, value.clone(), &root).await.unwrap();
+    let empty = revisions()
+        .into_iter()
+        .find(|p| !first.contains(p) && !p.join("install.jsonl").exists())
+        .unwrap();
+    assert!(!empty.join("node_modules").exists());
+    // A prior revision can still execute from its original installed dependencies.
+    value.insert(
+        "dependencies",
+        parse(r#"{"z":"1.0.0","a":"2.0.0"}"#, 100).unwrap(),
     );
     run(&runner, value.clone(), &root).await.unwrap();
     assert_eq!(
@@ -261,20 +315,42 @@ async fn npm_preparation_uses_exact_flags_ordered_hash_cache_and_no_stale_module
             .unwrap()
             .lines()
             .count(),
-        2
+        1
     );
-    value.insert(
-        "dependencies",
-        IvyJson::object(Vec::<(&str, IvyJson)>::new()),
-    );
-    run(&runner, value.clone(), &root).await.unwrap();
-    assert!(!cwd.join("node_modules").exists());
     value.insert("dependencies", parse(r#"{"a":"2.0.0"}"#, 100).unwrap());
     std::fs::remove_file(cli).unwrap();
     assert_eq!(
         run(&runner, value, &root).await.unwrap_err().code,
         "npm_unavailable"
     );
+}
+
+#[tokio::test]
+async fn real_npm_prepares_a_local_dependency_from_the_discovered_runtime() {
+    let root = Root::new();
+    let dependency = root.0.join("local dependency");
+    std::fs::create_dir_all(&dependency).unwrap();
+    std::fs::write(
+        dependency.join("package.json"),
+        r#"{"name":"collector-fixture-dependency","version":"1.0.0","type":"module","exports":"./index.mjs"}"#,
+    ).unwrap();
+    std::fs::write(
+        dependency.join("index.mjs"),
+        "export default 'local-dependency-ok';",
+    )
+    .unwrap();
+    let runner = runner(&root, parse("{}", 100).unwrap(), None).await;
+    let mut value =
+        task("import value from 'collector-fixture-dependency';export default()=>({data:value});");
+    value.insert(
+        "dependencies",
+        IvyJson::object([(
+            "collector-fixture-dependency",
+            format!("file:{}", dependency.to_string_lossy().replace('\\', "/")).into(),
+        )]),
+    );
+    let output = run(&runner, value, &root).await.unwrap();
+    assert_eq!(output.get("data"), Some(&"local-dependency-ok".into()));
 }
 
 #[tokio::test]

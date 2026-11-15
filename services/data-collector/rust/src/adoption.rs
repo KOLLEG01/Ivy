@@ -153,7 +153,7 @@ pub fn adopt(store: &CollectorStore, input: Adoption<'_>) -> IvyResult<bool> {
             task.insert("secretNames", IvyJson::Array(Vec::new()));
             task.insert("inputSecretName", IvyJson::Null);
         }
-        let row = IvyJson::object([
+        let mut row = IvyJson::object([
             ("task", task),
             (
                 "revision",
@@ -201,6 +201,11 @@ pub fn adopt(store: &CollectorStore, input: Adoption<'_>) -> IvyResult<bool> {
             ),
             ("adoptionError", IvyJson::Null),
         ]);
+        if current.as_ref().and_then(|r| r.get("resultObjectId")) == row.get("resultObjectId")
+            && let Some(revision) = previous("resultRevision")
+        {
+            row.insert("resultRevision", revision);
+        }
         store.save(&row)?;
         if transfer.is_some() {
             store.set_metadata(&format!("handoff-consumed:{job}"), "true")?;

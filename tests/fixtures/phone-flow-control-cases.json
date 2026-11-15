@@ -22,5 +22,5 @@
     {"model":"gpt-6-luna","displayName":"gpt-6-luna","description":"Fixture catalog","defaultReasoningEffort":"high","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low","description":"low"},{"reasoningEffort":"high","description":"high"}]},
     {"model":"future-model","displayName":"future-model","description":"Fixture catalog","defaultReasoningEffort":"high","isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"high","description":"high"},{"reasoningEffort":"future-effort","description":"future-effort"}]}
   ],
-  "speakers": {"protocol":"v3","defaultVoiceId":"cove","voices":[{"id":"cove","displayName":"Cove"},{"id":"ember","displayName":"Ember"}]}
+  "speakers": {"protocol":"v3","catalogVersion":"v1","defaultVoiceId":"cove","voices":[{"id":"cove","displayName":"Cove"},{"id":"ember","displayName":"Ember"}]}
 }

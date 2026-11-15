@@ -1,6 +1,7 @@
 //! Sampled diagnostics are evictable and remain separate from effect receipts.
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
+    hash::digest,
     json::{canonical, parse},
 };
 use ivy_store::{
@@ -14,14 +15,83 @@ use std::{
     time::Instant,
 };
 
+struct Signature {
+    call: IvyJson,
+    closed: Option<bool>,
+    failed: Option<bool>,
+    audio: Option<JsString>,
+}
+impl Signature {
+    fn new(call: &IvyJson, media: Option<&IvyJson>) -> Self {
+        Self {
+            call: call.clone(),
+            closed: media
+                .and_then(|m| m.get("closed"))
+                .and_then(IvyJson::as_bool),
+            failed: media
+                .and_then(|m| m.get("failed"))
+                .and_then(IvyJson::as_bool),
+            audio: media
+                .and_then(|m| m.get("audio"))
+                .and_then(|a| a.get("state"))
+                .and_then(IvyJson::as_js_string)
+                .cloned(),
+        }
+    }
+    fn matches(&self, call: &IvyJson, media: Option<&IvyJson>) -> bool {
+        self.call == *call
+            && self.closed
+                == media
+                    .and_then(|m| m.get("closed"))
+                    .and_then(IvyJson::as_bool)
+            && self.failed
+                == media
+                    .and_then(|m| m.get("failed"))
+                    .and_then(IvyJson::as_bool)
+            && self.audio.as_ref()
+                == media
+                    .and_then(|m| m.get("audio"))
+                    .and_then(|a| a.get("state"))
+                    .and_then(IvyJson::as_js_string)
+    }
+}
 struct Sample {
     call_id: JsString,
-    signature: String,
+    signature: Signature,
+    value_hash: String,
     at: Instant,
 }
 struct Store {
     db: Option<Connection>,
     sampled: VecDeque<Sample>,
+}
+impl Store {
+    fn sampled(
+        &mut self,
+        id: &JsString,
+        call: &IvyJson,
+        media: Option<&IvyJson>,
+        value_hash: String,
+        at: Instant,
+    ) {
+        if let Some(sample) = self.sampled.iter_mut().find(|s| &s.call_id == id) {
+            if !sample.signature.matches(call, media) {
+                sample.signature = Signature::new(call, media);
+            }
+            sample.value_hash = value_hash;
+            sample.at = at;
+        } else {
+            self.sampled.push_back(Sample {
+                call_id: id.clone(),
+                signature: Signature::new(call, media),
+                value_hash,
+                at,
+            });
+            if self.sampled.len() > 64 {
+                self.sampled.pop_front();
+            }
+        }
+    }
 }
 #[derive(Clone)]
 pub struct PhoneCallLogs(Arc<Mutex<Store>>);
@@ -49,39 +119,11 @@ impl PhoneCallLogs {
             return Ok(());
         };
         let media = status.get("media");
-        let signature = canonical(
-            &IvyJson::object([
-                ("call", observed.clone()),
-                (
-                    "closed",
-                    media
-                        .and_then(|m| m.get("closed"))
-                        .cloned()
-                        .unwrap_or(IvyJson::Null),
-                ),
-                (
-                    "failed",
-                    media
-                        .and_then(|m| m.get("failed"))
-                        .cloned()
-                        .unwrap_or(IvyJson::Null),
-                ),
-                (
-                    "audio",
-                    media
-                        .and_then(|m| m.get("audio"))
-                        .and_then(|a| a.get("state"))
-                        .cloned()
-                        .unwrap_or(IvyJson::Null),
-                ),
-            ]),
-            32768,
-        )?;
         let mut store = self.0.lock().unwrap();
         let now = Instant::now();
         if store.sampled.iter().any(|s| {
             &s.call_id == call_id
-                && s.signature == signature
+                && s.signature.matches(observed, media)
                 && now.duration_since(s.at).as_millis() < 5000
         }) {
             return Ok(());
@@ -91,17 +133,30 @@ impl PhoneCallLogs {
             snapshot.insert("media", media.clone());
         }
         let value = canonical(&snapshot, 32768)?;
+        let value_hash = digest(&value);
+        if store
+            .sampled
+            .iter()
+            .any(|s| &s.call_id == call_id && s.value_hash == value_hash)
+        {
+            store.sampled(call_id, observed, media, value_hash, now);
+            return Ok(());
+        }
         let db = store.db.as_ref().ok_or_else(closed)?;
         let native_id = String::from_utf16_lossy(&call_id.0);
-        let previous: Option<String> = db
-            .query_row(
+        let previous: Option<String> = if store.sampled.iter().any(|s| &s.call_id == call_id) {
+            None // The cached hash already identifies this owner's last committed value.
+        } else {
+            db.query_row(
                 "SELECT value FROM snapshots WHERE call_id=? ORDER BY id DESC LIMIT 1",
                 [&native_id],
                 |r| r.get(0),
             )
             .optional()
-            .map_err(error)?;
+            .map_err(error)?
+        };
         if previous.as_deref() == Some(&value) {
+            store.sampled(call_id, observed, media, value_hash, now);
             return Ok(());
         }
         db.execute_batch("BEGIN IMMEDIATE").map_err(error)?;
@@ -120,19 +175,7 @@ impl PhoneCallLogs {
             db.execute_batch("ROLLBACK").map_err(error)?;
             return Err(cause);
         }
-        if let Some(sample) = store.sampled.iter_mut().find(|s| &s.call_id == call_id) {
-            sample.signature = signature;
-            sample.at = now;
-        } else {
-            store.sampled.push_back(Sample {
-                call_id: call_id.clone(),
-                signature,
-                at: now,
-            });
-        }
-        if store.sampled.len() > 64 {
-            store.sampled.pop_front();
-        }
+        store.sampled(call_id, observed, media, value_hash, now);
         Ok(())
     }
     pub fn read(&self, call_id: &JsString, limit: u32) -> IvyResult<Vec<IvyJson>> {

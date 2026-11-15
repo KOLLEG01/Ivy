@@ -96,7 +96,7 @@ fn callback_wire_errors_keep_lone_surrogates_and_existing_error_codes() {
 
 #[tokio::test]
 #[ignore = "requires pinned Chromium"]
-async fn abandoned_requests_release_contexts_and_browser_loss_clears_readiness() {
+async fn cancelled_requests_release_contexts_and_browser_loss_clears_readiness() {
     let mut runtime = renderer().await;
     let data = IvyJson::Object(vec![]);
     let slow = input(
@@ -105,10 +105,12 @@ async fn abandoned_requests_release_contexts_and_browser_loss_clears_readiness()
         ColorMode::Color,
     );
     let render = runtime.renderer.clone();
-    let request = tokio::spawn(async move { render.render(slow, &CancellationToken::new()).await });
+    let cancel=CancellationToken::new();
+    let signal=cancel.clone();
+    let request = tokio::spawn(async move { render.render(slow, &signal).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
-    request.abort();
-    let _ = request.await;
+    cancel.cancel();
+    assert!(matches!(request.await.unwrap(), Err(RenderError::Cancelled)));
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let result = runtime
@@ -121,7 +123,7 @@ async fn abandoned_requests_release_contexts_and_browser_loss_clears_readiness()
             match result {
                 Err(RenderError::Busy) => tokio::time::sleep(Duration::from_millis(20)).await,
                 other => {
-                    other.expect("abandoned request must release render admission");
+                    other.expect("cancelled request must dispose its context");
                     break;
                 }
             }
@@ -198,7 +200,7 @@ async fn authored_network_attempts_do_not_reach_a_loopback_listener() {
 
 #[tokio::test]
 #[ignore = "requires pinned Chromium"]
-async fn cancellation_busy_callback_errors_and_fresh_context_recovery() {
+async fn cancellation_callback_errors_and_fresh_context_recovery() {
     let mut runtime = renderer().await;
     let renderer = runtime.renderer.clone();
     let data = IvyJson::Object(vec![]);
@@ -213,10 +215,7 @@ async fn cancellation_busy_callback_errors_and_fresh_context_recovery() {
     let task = tokio::spawn(async move { r.render(slow, &c).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
     let request = || input(&"<p>ok</p>".into(), &data, ColorMode::Color);
-    assert!(matches!(
-        renderer.render(request(), &CancellationToken::new()).await,
-        Err(RenderError::Busy)
-    ));
+    // Admission is owned by Handlers/BrowserOwner, before source reads.
     cancel.cancel();
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(6), task)

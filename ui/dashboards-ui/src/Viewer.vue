@@ -25,7 +25,7 @@ let data: unknown = {},
   sequence = 0,
   rendered = false,
   renderedHtml: string | null = null,
-  renderedRevision = 0;
+  htmlHash: string | undefined;
 const render = (html: string) => {
   ready = false;
   renderedHtml = html;
@@ -46,7 +46,7 @@ const sendDocument = () => {
   }
 };
 let resize: ResizeObserver | undefined;
-const send = () => {
+const send = (includeData = true) => {
   if (!ready || !frame.value) return;
   const { width, height } = frame.value.getBoundingClientRect();
   frame.value.contentWindow?.postMessage(
@@ -54,7 +54,7 @@ const send = () => {
       channel,
       type: "update",
       sequence: ++sequence,
-      data,
+      ...(includeData ? { data } : {}),
       output: {
         mode: "interactive",
         width: Math.round(width),
@@ -72,14 +72,14 @@ async function refresh() {
       const result = await call<{ data: unknown; dashboard: Row }>(
         props.node,
         "data",
-        { id: props.id },
+        { id: props.id, ...(htmlHash ? { htmlHash } : {}) },
       );
       if (stopped) return;
       const row = result.dashboard,
-        html = props.html ?? row.value.html;
+        html = props.html ?? row.value.html ?? renderedHtml ?? "";
+      htmlHash = row.htmlHash;
       data = result.data;
-      if (row.revision !== renderedRevision || html !== renderedHtml) {
-        renderedRevision = row.revision;
+      if (html !== renderedHtml) {
         render(html);
       }
       current.value = row;
@@ -119,7 +119,7 @@ const receive = (event: MessageEvent) => {
 };
 onMounted(() => {
   window.addEventListener("message", receive);
-  resize = new ResizeObserver(send);
+  resize = new ResizeObserver(() => send(false));
   if (frame.value) resize.observe(frame.value);
   void refresh();
 });

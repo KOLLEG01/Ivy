@@ -1,5 +1,8 @@
 use ivy_contracts::{IvyError, IvyResult, json};
 use ivy_host_runtime::config::{configuration_path, native_instance_config};
+use ivy_phone_bridge::journal::{
+    PhoneJournal, PhoneJournalLimits, PhoneJournalOptions, PhoneJournalOwner,
+};
 use ivy_phone_bridge::service_runtime::{PhoneService, validate_current_settings};
 use tokio::io::AsyncReadExt;
 
@@ -19,7 +22,44 @@ async fn run() -> IvyResult<()> {
         return Ok(());
     }
     let path = configuration_path(&args, std::env::var_os("IVY_INSTANCE_CONFIG"))?;
-    let service = PhoneService::start(native_instance_config(path).await?).await?;
+    let config = native_instance_config(path).await?;
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--upgrade-voice-storage")
+    {
+        let source = config.json();
+        if source.get("componentId") != Some(&"phone-bridge".into()) {
+            return Err(IvyError::new(
+                "invalid_arguments",
+                "Offline Voice storage requires a PhoneBridge instance.",
+            ));
+        }
+        let text = |name| {
+            source
+                .required(name)?
+                .as_js_string()
+                .cloned()
+                .ok_or_else(IvyError::internal)
+        };
+        let result = PhoneJournal::upgrade_voice_storage(PhoneJournalOptions {
+            data_root: config.data_root().into(),
+            owner: PhoneJournalOwner {
+                host_id: text("hostId")?,
+                service_node_id: text("serviceNodeId")?,
+            },
+            limits: PhoneJournalLimits::default(),
+            max_concurrent_calls: source
+                .get("settings")
+                .and_then(|s| s.get("binding"))
+                .and_then(|b| b.get("maxConcurrentCalls"))
+                .and_then(ivy_contracts::IvyJson::as_f64)
+                .unwrap_or(1.0) as usize,
+        })
+        .await?;
+        println!("{}", json::stringify(&result, 4096)?);
+        return Ok(());
+    }
+    let service = PhoneService::start(config).await?;
     #[cfg(unix)]
     {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

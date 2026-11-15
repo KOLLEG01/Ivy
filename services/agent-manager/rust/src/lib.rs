@@ -11,6 +11,7 @@ pub mod bundled_tools;
 pub mod capabilities;
 pub mod claude;
 mod claude_connection;
+pub mod native_stop_recovery;
 pub mod claude_launch;
 pub mod claude_mcp;
 pub mod control;

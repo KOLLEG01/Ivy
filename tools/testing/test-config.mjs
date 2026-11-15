@@ -134,6 +134,7 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/agent-service-work.rs": { package: "ivy-agent-manager", lib: true, filter: "service_work::tests::" },
   "tests/secretary-rust/assignment_voice_engine_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_voice_engine_cases::" },
   "tests/secretary-rust/store_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "store_cases::" },
   "tests/secretary-rust/engine_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "engine_cases::" },
@@ -2220,7 +2221,8 @@ export const rustTests = {
   },
   "tests/rust/data-collector-worker.rs": {
     "package": "ivy-data-collector",
-    "test": "data-collector-worker"
+    "test": "data-collector-worker",
+    prerequisites: [{ platform: "win32", package: "ivy-host-runtime", bin: "ivy-job" }],
   },
   "tests/rust/data-collector-http.rs": {
     "package": "ivy-data-collector",
@@ -2406,6 +2408,18 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "test": "phone_native_rpc",
     "filter": "call_audio::audio_",
+    "testThreads": 1
+  },
+  "tests/rust/phone_announcement.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "media::announcement::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/phone_service_speech.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "service_speech::tests::",
     "testThreads": 1
   },
   "tests/rust/phone_call_features.rs": {
@@ -2708,10 +2722,22 @@ export const rustTests = {
     "filter": "journal::tests::",
     "testThreads": 1
   },
+  "tests/rust/phone_journal_maintenance.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "journal::tests::maintenance_cases::",
+    "testThreads": 1
+  },
   "tests/rust/phone_voice_preparation.rs": {
     "package": "ivy-phone-bridge",
     "lib": true,
     "filter": "voice_rpc::preparation::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/phone_voice_history.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "voice_rpc::history::tests::",
     "testThreads": 1
   },
   "tests/rust/phone_voice_process.rs": {
@@ -3364,6 +3390,12 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "test": "phone_native_rpc",
     "filter": "sip_host::",
+    "testThreads": 1
+  },
+  "tests/rust/phone_sip_capacity.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "sip::host::capacity_cases::",
     "testThreads": 1
   },
   "tests/rust/phone_sip_stack.rs": {

@@ -8,6 +8,38 @@ use std::{
 pub const BROWSER_REVISION: &str = "1243";
 pub const BROWSER_VERSION: &str = "153.0.8010.12";
 
+/// Resolve the service account's browser only when an HTML image is requested.
+pub fn resolve_runtime(artifact: &Path) -> ivy_contracts::IvyResult<PathBuf> {
+    let environment = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    let cwd = std::env::current_dir().map_err(|_| ivy_contracts::IvyError::internal())?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .ok_or_else(ivy_contracts::IvyError::internal)?;
+    BrowserPaths {
+        platform: if cfg!(windows) {
+            Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            Platform::Mac
+        } else {
+            Platform::Linux
+        },
+        arm64: cfg!(target_arch = "aarch64"),
+        home: &home,
+        cwd: &cwd,
+        playwright_package: &artifact.join("node_modules/playwright-core"),
+        environment: &environment,
+    }
+    .resolve(None)
+    .ok_or_else(|| {
+        ivy_contracts::IvyError::new(
+            "dependency_unavailable",
+            "Chromium is unavailable for this HTML image request.",
+        )
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Platform {
     Windows,

@@ -105,6 +105,17 @@ impl<'a> ReceiptArchive<'a> {
         CREATE TRIGGER IF NOT EXISTS receipt_archive_delete AFTER DELETE ON receipt_archive BEGIN UPDATE receipt_archive_usage SET records=records-1,bytes=bytes-length(CAST(OLD.value AS BLOB)) WHERE id=1; END;
         CREATE TABLE IF NOT EXISTS receipt_archive_history(sequence INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,key TEXT NOT NULL,UNIQUE(kind,key));
         CREATE TABLE IF NOT EXISTS receipt_archive_retired(kind TEXT NOT NULL,key TEXT NOT NULL,value_hash TEXT NOT NULL,PRIMARY KEY(kind,key)) STRICT;").map_err(error)?;
+        // A persistent derived counter is maintained by every SQLite writer,
+        // including older JS/Rust owners. A connection-local cache would become
+        // stale when another owner releases receipts or rolls a transaction back.
+        if db.is_autocommit() {
+            let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)
+                .map_err(error)?;
+            initialize_history_usage(db)?;
+            tx.commit().map_err(error)?;
+        } else {
+            initialize_history_usage(db)?;
+        }
         Ok(Self { db, limits })
     }
     fn lookup(&self, kind: &str, key: &str) -> IvyResult<Option<String>> {
@@ -198,23 +209,27 @@ impl<'a> ReceiptArchive<'a> {
                 params![kind, key],
             )
             .map_err(error)?;
-        let(mut count,mut bytes):(usize,usize)=self.db.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(a.value AS BLOB))),0) FROM receipt_archive_history h JOIN receipt_archive a ON a.kind=h.kind AND a.key=h.key",[],|r|Ok((count_column(r,0)?,count_column(r,1)?))).map_err(error)?;
-        if count <= self.limits.count && bytes <= self.limits.bytes {
-            return Ok(());
-        }
-        let mut statement=self.db.prepare("SELECT a.kind,a.key,a.value FROM receipt_archive_history h JOIN receipt_archive a ON a.kind=h.kind AND a.key=h.key ORDER BY h.sequence").map_err(error)?;
-        let rows = statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(error)?
-            .collect::<Result<Vec<_>, _>>()
+        let (mut count, mut bytes): (usize, usize) = self
+            .db
+            .query_row(
+                "SELECT records,bytes FROM receipt_archive_history_usage WHERE id=1",
+                [],
+                |r| Ok((count_column(r, 0)?, count_column(r, 1)?)),
+            )
             .map_err(error)?;
-        for (kind, key, value) in rows {
+        while count > self.limits.count || bytes > self.limits.bytes {
+            // Read only the next original, even when a changed limit needs to
+            // retire many receipts. Never materialize the complete history.
+            let (kind, key, value): (String, String, String) = self
+                .db
+                .query_row(
+                    "SELECT a.kind,a.key,a.value FROM receipt_archive_history h
+                 JOIN receipt_archive a ON a.kind=h.kind AND a.key=h.key
+                 ORDER BY h.sequence LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .map_err(error)?;
             self.db
                 .execute(
                     "INSERT INTO receipt_archive_retired VALUES(?,?,?)",
@@ -235,9 +250,6 @@ impl<'a> ReceiptArchive<'a> {
                 .map_err(error)?;
             count -= 1;
             bytes -= value.len();
-            if count <= self.limits.count && bytes <= self.limits.bytes {
-                break;
-            }
         }
         Ok(())
     }
@@ -255,4 +267,56 @@ impl<'a> ReceiptArchive<'a> {
             )
             .map_err(error)
     }
+}
+
+fn initialize_history_usage(db: &Connection) -> IvyResult<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receipt_archive_history_usage(
+        id INTEGER PRIMARY KEY CHECK(id=1),records INTEGER NOT NULL CHECK(records>=0),
+        bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;",
+    )
+    .map_err(error)?;
+    let initialized = db
+        .query_row(
+            "SELECT 1 FROM receipt_archive_history_usage WHERE id=1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(error)?
+        .is_some();
+    if !initialized {
+        db.execute_batch(
+            "INSERT INTO receipt_archive_history_usage
+            SELECT 1,COUNT(*),COALESCE(SUM(length(CAST(a.value AS BLOB))),0)
+            FROM receipt_archive_history h JOIN receipt_archive a
+              ON a.kind=h.kind AND a.key=h.key;",
+        )
+        .map_err(error)?;
+    }
+    // Both sides of the join are maintained, so insert/delete order, orphaned
+    // history rows, owner transactions and cross-open writers remain coherent.
+    db.execute_batch("CREATE TRIGGER IF NOT EXISTS receipt_history_usage_insert AFTER INSERT ON receipt_archive_history
+      BEGIN UPDATE receipt_archive_history_usage SET
+        records=records+EXISTS(SELECT 1 FROM receipt_archive WHERE kind=NEW.kind AND key=NEW.key),
+        bytes=bytes+COALESCE((SELECT length(CAST(value AS BLOB)) FROM receipt_archive WHERE kind=NEW.kind AND key=NEW.key),0) WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS receipt_history_usage_delete AFTER DELETE ON receipt_archive_history
+      BEGIN UPDATE receipt_archive_history_usage SET
+        records=records-EXISTS(SELECT 1 FROM receipt_archive WHERE kind=OLD.kind AND key=OLD.key),
+        bytes=bytes-COALESCE((SELECT length(CAST(value AS BLOB)) FROM receipt_archive WHERE kind=OLD.kind AND key=OLD.key),0) WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS receipt_history_usage_update AFTER UPDATE ON receipt_archive_history
+      BEGIN UPDATE receipt_archive_history_usage SET
+        records=records-EXISTS(SELECT 1 FROM receipt_archive WHERE kind=OLD.kind AND key=OLD.key)+EXISTS(SELECT 1 FROM receipt_archive WHERE kind=NEW.kind AND key=NEW.key),
+        bytes=bytes-COALESCE((SELECT length(CAST(value AS BLOB)) FROM receipt_archive WHERE kind=OLD.kind AND key=OLD.key),0)+COALESCE((SELECT length(CAST(value AS BLOB)) FROM receipt_archive WHERE kind=NEW.kind AND key=NEW.key),0) WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS receipt_history_archive_insert AFTER INSERT ON receipt_archive
+      WHEN EXISTS(SELECT 1 FROM receipt_archive_history WHERE kind=NEW.kind AND key=NEW.key)
+      BEGIN UPDATE receipt_archive_history_usage SET records=records+1,bytes=bytes+length(CAST(NEW.value AS BLOB)) WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS receipt_history_archive_delete AFTER DELETE ON receipt_archive
+      WHEN EXISTS(SELECT 1 FROM receipt_archive_history WHERE kind=OLD.kind AND key=OLD.key)
+      BEGIN UPDATE receipt_archive_history_usage SET records=records-1,bytes=bytes-length(CAST(OLD.value AS BLOB)) WHERE id=1; END;
+      CREATE TRIGGER IF NOT EXISTS receipt_history_archive_update AFTER UPDATE ON receipt_archive
+      BEGIN UPDATE receipt_archive_history_usage SET
+        records=records-EXISTS(SELECT 1 FROM receipt_archive_history WHERE kind=OLD.kind AND key=OLD.key)+EXISTS(SELECT 1 FROM receipt_archive_history WHERE kind=NEW.kind AND key=NEW.key),
+        bytes=bytes-CASE WHEN EXISTS(SELECT 1 FROM receipt_archive_history WHERE kind=OLD.kind AND key=OLD.key) THEN length(CAST(OLD.value AS BLOB)) ELSE 0 END
+          +CASE WHEN EXISTS(SELECT 1 FROM receipt_archive_history WHERE kind=NEW.kind AND key=NEW.key) THEN length(CAST(NEW.value AS BLOB)) ELSE 0 END WHERE id=1; END;").map_err(error)
 }

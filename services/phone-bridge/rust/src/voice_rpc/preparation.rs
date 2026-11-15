@@ -261,45 +261,44 @@ impl Inner {
         thread_id: &JsString,
         cache: &Arc<Mutex<IvyJson>>,
     ) -> IvyResult<Option<IvyJson>> {
-        let value = self
+        let rpc = self.control.current().ok_or_else(|| {
+            IvyError::new(
+                "phone_voice_unavailable",
+                "Codex Voice transport is unavailable.",
+            )
+        })?;
+        let value = rpc
             .call(
                 "thread/read",
                 IvyJson::object([
                     ("threadId", IvyJson::String(thread_id.clone())),
-                    ("includeTurns", true.into()),
+                    ("includeTurns", false.into()),
                 ]),
                 RequestOptions::default(),
+                None,
             )
             .await?;
-        let thread = thread(&value, &self.control)?;
-        let Some(turns) = thread.get("turns").filter(|value| !value.is_null()) else {
-            return Ok(None);
+        require(
+            thread(&value, &self.control)?.get("id") == Some(&thread_id.clone().into()),
+            "phone_voice_task_changed",
+            "Native Voice history belongs to another thread.",
+        )?;
+        let (turn, operation) = {
+            let cache = cache.lock().unwrap();
+            (
+                cache
+                    .get("preparationTurnId")
+                    .and_then(IvyJson::as_js_string)
+                    .cloned(),
+                cache
+                    .required("preparationOperationId")?
+                    .as_js_string()
+                    .cloned()
+                    .ok_or_else(IvyError::internal)?,
+            )
         };
-        let turns = turns.as_array().ok_or_else(IvyError::internal)?;
-        let cache = cache.lock().unwrap();
-        for turn in turns {
-            if cache
-                .get("preparationTurnId")
-                .and_then(IvyJson::as_js_string)
-                .is_some()
-            {
-                if turn.get("id") == cache.get("preparationTurnId") {
-                    return Ok(Some(turn.clone()));
-                }
-            } else {
-                let items = turn
-                    .get("items")
-                    .and_then(IvyJson::as_array)
-                    .ok_or_else(IvyError::internal)?;
-                if items.iter().any(|item| {
-                    item.get("type") == Some(&"userMessage".into())
-                        && item.get("clientId") == cache.get("preparationOperationId")
-                }) {
-                    return Ok(Some(turn.clone()));
-                }
-            }
-        }
-        Ok(None)
+        rpc.preparation_turn(thread_id, turn.as_ref(), &operation)
+            .await
     }
     async fn run(&self, thread_id: &JsString) -> IvyResult<()> {
         let fingerprint = self.control.fingerprint().ok_or_else(IvyError::internal)?;

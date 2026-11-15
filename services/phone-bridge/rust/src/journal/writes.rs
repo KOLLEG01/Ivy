@@ -213,9 +213,7 @@ impl PhoneJournal {
             Ok(db
                 .db
                 .query_row(
-                    "SELECT 1 FROM commands WHERE method='call.archiveVoice' AND
-      (phase!='result' OR json_extract(value,'$.receipt.result.state') IS NOT 'archived') AND
-      json_extract(value,'$.archiveResolution.state') IS NOT 'observed_archived' LIMIT 1",
+                    "SELECT 1 FROM phone_command_facts WHERE active=1 AND archive_pending=1 LIMIT 1",
                     [],
                     |_| Ok(()),
                 )
@@ -266,7 +264,8 @@ impl JournalDb<'_> {
     pub(super) fn save(&self, value: IvyJson) -> IvyResult<IvyJson> {
         validate("Operation", &value)?;
         let encoded = canonical(&value, OUTCOME_BYTES)?;
-        self.db
+        let changed = self
+            .db
             .execute(
                 "UPDATE commands SET phase=?,value=? WHERE operation_id=?",
                 params![
@@ -276,6 +275,9 @@ impl JournalDb<'_> {
                 ],
             )
             .map_err(error)?;
+        if changed != 0 {
+            self.project_command(&value, true)?;
+        }
         Ok(value)
     }
     pub(super) fn sequence_command(
@@ -328,7 +330,6 @@ impl JournalDb<'_> {
     }
     fn submit(&self, intent: &IvyJson) -> IvyResult<()> {
         intent_shape(intent)?;
-        self.compact()?;
         self.transaction(|db| {
             let operation_id = string(intent, "operationId")?;
             if let Some(prior) = db.operation(&operation_id)? {
@@ -364,7 +365,8 @@ impl JournalDb<'_> {
                 if method.starts_with("call.realtime.") || method.starts_with("call.screening.") || method.starts_with("call.desktop.")
                     || ["call.stopVoice", "call.features", "call.windows.connect", "call.codec.upgrade", "call.waiting.end", "call.archiveVoice", "call.createVoice", "call.bindVoice", "call.promptVoice", "call.prepare", "call.claim", "call.audio.prepare", "call.audio.rebind", "call.dial", "call.answer"].contains(&method.as_str()) {
                     let (first, second) = if ["call.dial", "call.answer"].contains(&method.as_str()) {("call.dial", "call.answer")} else {(method.as_str(), method.as_str())};
-                    let exists = db.db.query_row("SELECT operation_id FROM commands WHERE call_id=? AND method IN (?,?) AND COALESCE(json_extract(value,'$.intent.voiceGeneration'),0)=? LIMIT 1", params![call_id.to_utf8()?, first, second, generation(intent)], |_| Ok(())).optional().map_err(error)?.is_some();
+                    let exists = db.call_command(call_id, &first.into(), generation(intent))?.is_some()
+                        || first != second && db.call_command(call_id, &second.into(), generation(intent))?.is_some();
                     require(!exists, "phone_call_conflict", "The original call already has its prepare or connect attempt; a new operation cannot repeat it.")?;
                 }
                 if method == "call.selectVoice" && intent.get("commandSequence").is_some() {
@@ -391,6 +393,7 @@ impl JournalDb<'_> {
             validate("Operation", &value)?;
             let call_id = intent.get("callId").and_then(IvyJson::as_js_string).map(JsString::to_utf8).transpose()?;
             db.db.execute("INSERT INTO commands VALUES (?,?,?,?,?,?)", params![operation_id.to_utf8()?, field(intent, "epoch")?.as_str()?, call_id, method, "submitted", canonical(&value, OUTCOME_BYTES)?]).map_err(error)?;
+            db.project_command(&value, true)?;
             db.set_counter("count", usage.operations + 1.0)?;
             db.set_counter("epochOperations", db.counter("epochOperations")? + 1.0)
         })

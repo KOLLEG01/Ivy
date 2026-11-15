@@ -161,8 +161,46 @@ fn rejected_diagnostic_insert_rolls_back_without_sampling_or_evicting() {
     );
     let store = logs.0.lock().unwrap();
     assert!(store.db.as_ref().unwrap().is_autocommit());
-    assert!(store.sampled.front().unwrap().signature.contains("1"));
+    assert_eq!(
+        store.sampled.front().unwrap().signature.call.get("state"),
+        Some(&1.0.into())
+    );
     drop(store);
+    logs.close().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn identical_samples_refresh_the_interval_without_requerying_storage() {
+    let root = std::env::temp_dir().join(format!("ivy-phone-log-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let logs = PhoneCallLogs::open(&root).unwrap();
+    let call = IvyJson::object([("callId", id(1).into())]);
+    let snapshot = status(0, 0, 0);
+    logs.record(&call, &snapshot).unwrap();
+    {
+        let mut store = logs.0.lock().unwrap();
+        store.sampled.front_mut().unwrap().at -= std::time::Duration::from_millis(5001);
+        store
+            .db
+            .as_ref()
+            .unwrap()
+            .execute_batch("DROP TABLE snapshots;")
+            .unwrap();
+    }
+    logs.record(&call, &snapshot).unwrap();
+    assert!(
+        logs.0.lock().unwrap().sampled.front().unwrap().at.elapsed()
+            < std::time::Duration::from_secs(1)
+    );
+    for _ in 0..100 {
+        logs.record(&call, &snapshot).unwrap();
+    }
+    // A real state change still requires a durable diagnostic write. Its failure
+    // must leave the prior sampling signature and timestamp intact.
+    let at = logs.0.lock().unwrap().sampled.front().unwrap().at;
+    assert!(logs.record(&call, &status(1, 0, 0)).is_err());
+    assert_eq!(logs.0.lock().unwrap().sampled.front().unwrap().at, at);
     logs.close().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }

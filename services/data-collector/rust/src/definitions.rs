@@ -2,7 +2,7 @@
 //! mutations serialize; peer handoff reads must remain possible during a write.
 use crate::{
     adoption::{self, Adoption},
-    definition_journal::{DefinitionJournal, content, id, pin, require, revision},
+    definition_journal::{DefinitionHead, DefinitionJournal, content, id, pin, require, revision},
     engine::Engine,
     model, policy, schema,
 };
@@ -26,7 +26,7 @@ struct Inner {
     journal: Mutex<Option<DefinitionJournal>>,
     serial: tokio::sync::Mutex<()>,
     errors: Mutex<HashMap<String, String>>,
-    observations: Mutex<Option<Vec<IvyJson>>>,
+    observations: Mutex<Option<HashMap<(String, String), IvyJson>>>,
 }
 fn value(document: &IvyJson, name: &str) -> IvyResult<IvyJson> {
     schema::parse_schema(name, content(document)?)
@@ -58,9 +58,10 @@ fn handoff_row(
     expected: f64,
 ) -> IvyResult<IvyJson> {
     let row = store
-        .list(true)?
-        .into_iter()
-        .find(|r| r.get("definition").and_then(|d| d.get("jobId")) == Some(job));
+        .for_job(&model::sqlite_key(job)?)?
+        .map(|r| store.get(&model::text(model::field(&r, "task")?, "id")?, true))
+        .transpose()?
+        .flatten();
     let valid = if let Some(row) = &row {
         let task = model::field(row, "task")?;
         let task_id = model::text(task, "id")?;
@@ -153,12 +154,11 @@ impl Definitions {
         Ok(found.pop())
     }
     async fn observation(&self, job: &IvyJson, node: &IvyJson) -> IvyResult<Option<IvyJson>> {
-        let cached = self.0.observations.lock().unwrap().clone();
-        let items = match cached {
-            Some(items) => items,
-            None => self.journal()?.all("observation").await?,
-        };
-        for document in items {
+        let key = (model::sqlite_key(job)?, model::sqlite_key(node)?);
+        if let Some(items) = &*self.0.observations.lock().unwrap() {
+            return Ok(items.get(&key).cloned());
+        }
+        for document in self.journal()?.all("observation").await? {
             let content = value(&document, "observationDocument")?;
             if content.get("jobId") == Some(job) && content.get("serviceNodeId") == Some(node) {
                 return Ok(Some(document));
@@ -177,9 +177,21 @@ impl Definitions {
     async fn rows(&self, deleted: bool) -> IvyResult<Vec<IvyJson>> {
         self.0.engine.store().call(move |s| s.list(deleted)).await
     }
+    async fn summary(&self, id: &str, deleted: bool) -> IvyResult<Option<IvyJson>> {
+        let id = id.to_owned();
+        self.0
+            .engine
+            .store()
+            .call(move |s| s.summary(&id, deleted))
+            .await
+    }
+    async fn job_row(&self, job: &IvyJson) -> IvyResult<Option<IvyJson>> {
+        let job = model::sqlite_key(job)?;
+        self.0.engine.store().call(move |s| s.for_job(&job)).await
+    }
     async fn find(&self, task_id: &str) -> IvyResult<Option<IvyJson>> {
         if let Some(definition) = self
-            .row(task_id, true)
+            .summary(task_id, true)
             .await?
             .and_then(|r| r.get("definition").cloned())
         {
@@ -194,20 +206,22 @@ impl Definitions {
                 .map(Some);
         }
         let assignments = self.journal()?.all("assignment").await?;
-        for document in self.journal()?.all("definition").await? {
-            let definition = value(&document, "definitionDocument")?;
-            if model::text(model::field(&definition, "task")?, "id")? != task_id {
+        for head in self.journal()?.definition_heads().await? {
+            if head.task_id != task_id {
                 continue;
             }
-            let mut matches =
-                definition.get("homeServiceNodeId") == Some(&self.0.service_node_id.clone().into());
+            let mut matches = head.home_node == self.0.service_node_id.clone().into();
             for assignment in &assignments {
                 let release = value(assignment, "assignmentDocument")?;
-                matches |= release.get("jobId") == Some(id(&document)?)
+                matches |= release.get("jobId") == Some(&head.job_id)
                     && release.get("serviceNodeId") == Some(&self.0.service_node_id.clone().into());
             }
             if matches {
-                return Ok(Some(document));
+                return self
+                    .journal()?
+                    .document("definition", head.job_id, Some(head.revision))
+                    .await
+                    .map(Some);
             }
         }
         Ok(None)
@@ -396,7 +410,7 @@ impl Definitions {
             .call(move |s| {
                 Ok(match id {
                     Some(id) => s
-                        .run(&id)?
+                        .run_status(&id)?
                         .is_some_and(|r| r.get("error") == Some(&"outcome_unknown".into())),
                     None => false,
                 })
@@ -579,11 +593,7 @@ impl Definitions {
             "target_conflict",
             "Handoff belongs to the disabled source instance.",
         )?;
-        let row = self
-            .rows(true)
-            .await?
-            .into_iter()
-            .find(|r| r.get("definition").and_then(|d| d.get("jobId")) == Some(job));
+        let row = self.job_row(job).await?;
         let valid = if let Some(row) = &row {
             let task_id = model::text(model::field(row, "task")?, "id")?;
             let this = self.clone();
@@ -802,19 +812,29 @@ impl Definitions {
         let local = self.row(&model::text(&task, "id")?, true).await?;
         if only_when_idle {
             let row = local.as_ref().ok_or_else(IvyError::internal)?;
-            require(row.get("definition").is_some_and(|d| {
-                d.get("jobId") == Some(&job)
-                    && d.get("revision").and_then(IvyJson::as_f64) == Some(definition_revision)
-            }), "revision_conflict", "Wait for the current definition to be adopted before pausing.")?;
+            require(
+                row.get("definition").is_some_and(|d| {
+                    d.get("jobId") == Some(&job)
+                        && d.get("revision").and_then(IvyJson::as_f64) == Some(definition_revision)
+                }),
+                "revision_conflict",
+                "Wait for the current definition to be adopted before pausing.",
+            )?;
             // Check quiescence and stop automatic admission in one store command,
             // before publishing the disabled assignment. Never signal a worker.
-            self.0.engine.update(IvyJson::object([
-                ("action", "disable".into()),
-                ("id", model::field(&task, "id")?.clone()),
-                ("expectedRevision", model::field(row, "revision")?.clone()),
-                ("operationId", journal.mutation(operation, "idle").await?),
-                ("onlyWhenIdle", true.into()),
-            ]), None).await?;
+            self.0
+                .engine
+                .update(
+                    IvyJson::object([
+                        ("action", "disable".into()),
+                        ("id", model::field(&task, "id")?.clone()),
+                        ("expectedRevision", model::field(row, "revision")?.clone()),
+                        ("operationId", journal.mutation(operation, "idle").await?),
+                        ("onlyWhenIdle", true.into()),
+                    ]),
+                    None,
+                )
+                .await?;
         }
         let prior_value = |key| before.as_ref().and_then(|v| nullish(v.get(key)));
         let local_value = |key| local.as_ref().and_then(|v| nullish(v.get(key)));
@@ -868,11 +888,7 @@ impl Definitions {
     async fn report(&self, document: &IvyJson) -> IvyResult<()> {
         let desired = value(document, "assignmentDocument")?;
         let job = model::field(&desired, "jobId")?;
-        let row = self
-            .rows(true)
-            .await?
-            .into_iter()
-            .find(|r| r.get("definition").and_then(|d| d.get("jobId")) == Some(job));
+        let row = self.job_row(job).await?;
         let accepted = row.as_ref().is_some_and(|r| {
             r.get("definition")
                 .and_then(|d| d.get("assignmentRevision"))
@@ -946,8 +962,10 @@ impl Definitions {
             )
             .await?;
         if let Some(observations) = &mut *self.0.observations.lock().unwrap() {
-            observations.retain(|d| id(d).ok() != id(&saved).ok());
-            observations.push(saved);
+            observations.insert(
+                (model::sqlite_key(job)?, self.0.service_node_id.clone()),
+                saved,
+            );
         }
         Ok(())
     }
@@ -956,7 +974,18 @@ impl Definitions {
         let journal = self.journal()?;
         journal.catalog().await?;
         let assignments = journal.all("assignment").await?;
-        *self.0.observations.lock().unwrap() = Some(journal.all("observation").await?);
+        let mut observations = HashMap::new();
+        for document in journal.all("observation").await? {
+            let observed = content(&document)?;
+            observations.insert(
+                (
+                    model::text(observed, "jobId")?,
+                    model::text(observed, "serviceNodeId")?,
+                ),
+                document,
+            );
+        }
+        *self.0.observations.lock().unwrap() = Some(observations);
         struct Reset(Definitions);
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -972,11 +1001,7 @@ impl Definitions {
             let job = model::field(&desired, "jobId")?;
             let job_key = model::sqlite_key(job)?;
             let result: IvyResult<()> = async {
-                let mut row = self
-                    .rows(true)
-                    .await?
-                    .into_iter()
-                    .find(|r| r.get("definition").and_then(|d| d.get("jobId")) == Some(job));
+                let mut row = self.job_row(job).await?;
                 if row.as_ref().is_none_or(|r| {
                     r.get("definition")
                         .and_then(|d| d.get("assignmentRevision"))
@@ -984,10 +1009,7 @@ impl Definitions {
                 }) || self.0.errors.lock().unwrap().contains_key(&job_key)
                 {
                     self.accept(document).await?;
-                    row =
-                        self.rows(true).await?.into_iter().find(|r| {
-                            r.get("definition").and_then(|d| d.get("jobId")) == Some(job)
-                        });
+                    row = self.job_row(job).await?;
                 }
                 if desired.get("resultObjectId").is_none_or(IvyJson::is_null) {
                     if let Some(result) =
@@ -1021,14 +1043,18 @@ impl Definitions {
             }
             self.report(document).await?;
         }
-        for row in self.rows(false).await? {
+        let by_id: HashMap<_, _> = assignments
+            .iter()
+            .map(|a| Ok((model::sqlite_key(id(a)?)?, a)))
+            .collect::<IvyResult<_>>()?;
+        for row in self.0.engine.store().call(|s| s.summaries(false)).await? {
             let Some(definition) = row.get("definition") else {
                 continue;
             };
-            let Some(assignment) = assignments
-                .iter()
-                .find(|a| id(a).ok() == definition.get("assignmentId"))
-            else {
+            let Some(assignment) = by_id.get(&model::sqlite_key(model::field(
+                definition,
+                "assignmentId",
+            )?)?) else {
                 continue;
             };
             let task = model::field(&row, "task")?;
@@ -1165,67 +1191,93 @@ impl Definitions {
                 ]))
             }
             "tasks" | "task" => {
-                let definitions = self.journal()?.all("definition").await?;
+                let full = if view == "task" {
+                    self.find(&model::text(&input, "id")?).await?
+                } else {
+                    None
+                };
+                let definitions = if view == "task" {
+                    full.iter()
+                        .map(DefinitionHead::from_document)
+                        .collect::<IvyResult<Vec<_>>>()?
+                } else {
+                    self.journal()?.definition_heads().await?
+                };
                 let assignments = self.journal()?.all("assignment").await?;
-                let mut runtime = self
+                let by_job: HashMap<_, _> = assignments
+                    .iter()
+                    .map(|a| Ok((model::sqlite_key(model::field(content(a)?, "jobId")?)?, a)))
+                    .collect::<IvyResult<_>>()?;
+                let counts = self
                     .0
                     .engine
-                    .read(IvyJson::object([("view", "tasks".into())]))
+                    .store()
+                    .call(|s| s.publication_counts())
                     .await?;
+                let mut runtime = if view == "tasks" {
+                    self.0
+                        .engine
+                        .read(IvyJson::object([("view", "tasks".into())]))
+                        .await?
+                } else {
+                    let id = model::text(&input, "id")?;
+                    let maximum = model::field(self.0.engine.settings(), "retention")?.clone();
+                    let local = self
+                        .0
+                        .engine
+                        .store()
+                        .call(move |s| {
+                            s.summary(&id, false)?
+                                .map(|r| {
+                                    crate::cache::ExecutionCache { store: s }.visible(&r, &maximum)
+                                })
+                                .transpose()
+                        })
+                        .await?;
+                    IvyJson::object([("items", IvyJson::Array(local.into_iter().collect()))])
+                };
                 let locals = model::field(&runtime, "items")?
                     .as_array()
                     .ok_or_else(IvyError::internal)?
                     .to_vec();
                 let mut items = Vec::new();
-                for document in definitions {
-                    let definition = value(&document, "definitionDocument")?;
-                    let mut assignment = None;
-                    for candidate in &assignments {
-                        if value(candidate, "assignmentDocument")?.get("jobId")
-                            == Some(id(&document)?)
-                        {
-                            assignment = Some(candidate);
-                            break;
-                        }
-                    }
+                for head in definitions {
+                    let assignment = by_job.get(&model::sqlite_key(&head.job_id)?).copied();
                     let release = assignment
                         .map(|a| value(a, "assignmentDocument"))
                         .transpose()?;
                     let owner = release
                         .as_ref()
                         .and_then(|r| r.get("serviceNodeId"))
-                        .or_else(|| definition.get("homeServiceNodeId"));
+                        .or(Some(&head.home_node));
                     if owner != Some(&self.0.service_node_id.clone().into())
                         || release.as_ref().is_some_and(|r| model::truth(r, "deleted"))
                     {
                         continue;
                     }
-                    let task_id = model::text(model::field(&definition, "task")?, "id")?;
+                    let task_id = head.task_id;
                     let local = locals.iter().find(|r| {
                         r.get("task").and_then(|t| t.get("id")) == Some(&task_id.clone().into())
                     });
-                    let row = self.row(&task_id, false).await?;
-                    let adopted = row.as_ref().and_then(|r| r.get("definition"));
+                    let row = local;
+                    let adopted = row.and_then(|r| r.get("definition"));
                     let mut item = local.cloned().unwrap_or_else(model::object);
-                    let mut task = model::field(&definition, "task")?.clone();
+                    let mut task = if let Some(document) = &full {
+                        self.task(document).await?
+                    } else {
+                        IvyJson::object([("id", task_id.clone().into()), ("name", head.name)])
+                    };
                     task.insert(
                         "enabled",
                         (local.is_some()
                             && row
-                                .as_ref()
                                 .and_then(|r| r.get("task"))
                                 .is_some_and(|t| model::truth(t, "enabled")))
                         .into(),
                     );
-                    if view == "task" {
-                        task.insert(
-                            "script",
-                            model::field(&self.task(&document).await?, "script")?.clone(),
-                        );
-                    }
                     item.insert("task", task);
-                    item.insert("jobId", id(&document)?.clone());
-                    item.insert("revision", revision(&document)?.clone());
+                    item.insert("jobId", head.job_id.clone());
+                    item.insert("revision", head.revision);
                     item.insert(
                         "assignmentRevision",
                         assignment
@@ -1258,19 +1310,9 @@ impl Definitions {
                     );
                     item.insert(
                         "adoptionError",
-                        self.error(&model::sqlite_key(id(&document)?)?),
+                        self.error(&model::sqlite_key(&head.job_id)?),
                     );
-                    let count = self
-                        .0
-                        .engine
-                        .store()
-                        .call(move |s| {
-                            Ok(s.runs("publishing")?
-                                .iter()
-                                .filter(|r| r.get("taskId") == Some(&task_id.clone().into()))
-                                .count())
-                        })
-                        .await?;
+                    let count = counts.get(&task_id).copied().unwrap_or(0);
                     item.insert("pendingPublications", number(count as f64));
                     for (key, default) in [
                         ("status", "draft".into()),
@@ -1298,10 +1340,7 @@ impl Definitions {
                 }
                 for local in locals {
                     let task_id = model::text(model::field(&local, "task")?, "id")?;
-                    if self
-                        .row(&task_id, false)
-                        .await?
-                        .is_none_or(|r| r.get("definition").is_none())
+                    if local.get("definition").is_none()
                         && !items.iter().any(|r| {
                             r.get("task").and_then(|t| t.get("id")) == Some(&task_id.clone().into())
                         })
@@ -1330,7 +1369,7 @@ impl Definitions {
             }
             "result" | "history" => {
                 let task_id = model::text(&input, "id")?;
-                if self.row(&task_id, false).await?.is_none()
+                if self.summary(&task_id, false).await?.is_none()
                     && self.find(&task_id).await?.is_some()
                 {
                     Ok(IvyJson::Null)

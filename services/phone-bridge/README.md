@@ -65,3 +65,53 @@ peer disposal and admission release. A failed transport or media route ends the
 original call and retains its outcome. Use `phone.history`, `phone.operation` and
 `phone.logs` to inspect it. SIP and Windows audio remain independent of idle CLI
 readiness checks.
+
+Native replay receipts retain at most 4,096 original IDs and 16 MiB of result/error
+payloads. Admission reserves a maximum result before invocation, including the
+existing per-call cleanup headroom. First completion exchanges that reservation
+for the exact boxed payload bytes; replay never consumes another reservation.
+Fixed receipt metadata remains bounded by the separate count limit. IPC replies
+carry the usage without changing the original result bytes. With no calls or open
+Voice work or uncommitted native effect receipts, the service rotates at 4,000
+operations or 8 MiB of retained payloads;
+the latter leaves room for 128 maximum cleanup results and one further result.
+Rotation remains necessary: the pipe has no durable receipt-release acknowledgement
+that prevents a delayed duplicate from invoking an evicted operation again.
+
+Journal maintenance runs on its existing worker between commands, in pages of 16
+records with coalesced wakes. It sleeps when no eligible work remains. Terminal,
+unresolved and archive-confirmation facts are computed when a command changes and
+rebuilt from canonical format-8 rows when the exclusive owner opens. Partial call
+pages keep original command/sequence lookups and all unresolved receipts fenced.
+History usage is maintained transactionally by shared SQLite triggers; eviction
+reads one released original at a time and retains its identity hash.
+
+SIP admits at most 16 host response owners and 64 incoming owners, including
+unfinished retirement. Each dialog has separate bounded termination delivery.
+Four pending remote offers retain their own ACK/timeout identity; further offers
+receive 491, and ACKs can retire accepted offers in any order. Four local offers
+include their queued work and accepted ACK owners in the same limit. Admission
+precedes a codec challenge change. Completed work releases capacity; uncertain
+originals and their socket/call fences remain in one host retirement book until
+native process exit, without a suspended task per failure. A full host response
+budget discards new, unstarted requests before application work; matching call
+controls are routed first. SIP-library transport ingress and transaction routing
+remain library-owned; these limits cover PhoneBridge's admitted work.
+
+Announcement synthesis hashes and writes the original response in bounded blocks,
+up to 10 MiB, before committing its existing one-shot receipt. Native screening
+copies and verifies those bytes into a private temporary file before playback.
+It decodes PCM on a separate worker with a 32 KiB source window and a 120 ms bounded
+prefetch buffer, ready with 60 ms before installation. The audio callback only
+copies buffered samples; bridging closes the producer without waiting for disk.
+Media disposal waits for that original worker and its private file to close.
+The original PCM16 mixing, resampling, repeats and pauses remain unchanged.
+
+To split the current format-7 Voice arrays into format-8 rows, stop the instance
+through the owning host CLI and retain a consistent journal backup. Run the exact
+prepared PhoneBridge executable with `--upgrade-voice-storage --config ABSOLUTE_PATH`.
+This command takes the original exclusive journal ownership, validates and converts
+the records atomically, and reports the stored format and row counts. Then deploy
+the prepared candidate through the host CLI. Format-7 binaries cannot read the new
+representation; retain the backup as recovery evidence rather than rolling back
+an older binary over the converted journal.

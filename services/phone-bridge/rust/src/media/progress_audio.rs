@@ -1,4 +1,7 @@
 //! Local call-progress PCM. Normal capture keeps its separate call permit.
+use super::announcement::{
+    AnnouncementCleanup, AnnouncementPlayback, Pcm16Wave, WavError, load_announcement,
+};
 use super::call_audio::CallAudioContext;
 use super::{
     AudioSendHealth, CallAudioError, CallAudioPort, CallAudioRoute, PcmAudioPort, PcmAudioState,
@@ -6,120 +9,10 @@ use super::{
 };
 use std::{
     collections::VecDeque,
-    fs::OpenOptions,
-    io::Read,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WavError {
-    Invalid,
-    Truncated,
-    Layout,
-    Duration,
-    Path,
-    Hash,
-    Io,
-}
-impl std::fmt::Display for WavError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for WavError {}
-/// Original bounded PCM16 RIFF parser, channel mix and linear48k conversion.
-/// The declared RIFF size is intentionally not a second admission authority.
-pub fn parse_announcement(bytes: &[u8]) -> Result<Vec<f32>, WavError> {
-    if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(WavError::Invalid);
-    }
-    let mut rate = 0;
-    let mut channels = 0;
-    let mut data = &[][..];
-    let mut offset = 12;
-    while offset + 8 <= bytes.len() {
-        let id = &bytes[offset..offset + 4];
-        let start = offset + 8;
-        let mut length = u32::from_le_bytes(bytes[offset + 4..start].try_into().unwrap()) as usize;
-        if length == u32::MAX as usize && id == b"data" {
-            length = bytes.len() - start;
-        }
-        if length > bytes.len() - start {
-            return Err(WavError::Truncated);
-        }
-        if id == b"fmt " {
-            if length < 16
-                || u16::from_le_bytes(bytes[start..start + 2].try_into().unwrap()) != 1
-                || u16::from_le_bytes(bytes[start + 14..start + 16].try_into().unwrap()) != 16
-            {
-                return Err(WavError::Layout);
-            }
-            channels = u16::from_le_bytes(bytes[start + 2..start + 4].try_into().unwrap()) as usize;
-            rate = u32::from_le_bytes(bytes[start + 4..start + 8].try_into().unwrap()) as usize;
-        } else if id == b"data" {
-            data = &bytes[start..start + length];
-        }
-        offset = start + length + (length & 1);
-    }
-    if !(1..=8).contains(&channels)
-        || !(8000..=192000).contains(&rate)
-        || data.is_empty()
-        || data.len() % (2 * channels) != 0
-    {
-        return Err(WavError::Layout);
-    }
-    let frames = data.len() / (2 * channels);
-    let samples = (frames as u64) * 48000 / (rate as u64);
-    if samples == 0 || samples > 48000 * 120 {
-        return Err(WavError::Duration);
-    }
-    let mut output = vec![0.0; samples as usize];
-    for (i, sample) in output.iter_mut().enumerate() {
-        let position = i as f64 * rate as f64 / 48000.0;
-        let first = (position as usize).min(frames - 1);
-        let second = (first + 1).min(frames - 1);
-        let mut sum = 0.0;
-        for channel in 0..channels {
-            let a = (first * channels + channel) * 2;
-            let b = (second * channels + channel) * 2;
-            let a = f64::from(i16::from_le_bytes(data[a..a + 2].try_into().unwrap()));
-            let b = f64::from(i16::from_le_bytes(data[b..b + 2].try_into().unwrap()));
-            sum += a + (b - a) * (position - first as f64);
-        }
-        *sample = (sum / channels as f64 / 32768.0) as f32;
-    }
-    Ok(output)
-}
-struct Bytes(Vec<u8>);
-impl Drop for Bytes {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
-pub fn load_announcement(path: &Path, hash: &str) -> Result<Vec<f32>, WavError> {
-    if !path.is_absolute() {
-        return Err(WavError::Path);
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(1);
-    }
-    let mut file = options.open(path).map_err(|_| WavError::Io)?;
-    let length = file.metadata().map_err(|_| WavError::Io)?.len();
-    if !(44..=10_485_760).contains(&length) {
-        return Err(WavError::Layout);
-    }
-    let mut bytes = Bytes(vec![0; length as usize]);
-    file.read_exact(&mut bytes.0).map_err(|_| WavError::Io)?;
-    if ivy_contracts::hash::digest(&bytes.0) != hash {
-        return Err(WavError::Hash);
-    }
-    parse_announcement(&bytes.0)
-}
 fn state(context: CallAudioContext, generation: u64, local: bool) -> PcmAudioState {
     PcmAudioState {
         open: context.live && (local || context.pcm.open),
@@ -170,18 +63,15 @@ struct Waiting {
 }
 pub struct CallWaitingAudio {
     normal: CallAudioPort,
-    samples: Arc<Vec<f32>>,
+    samples: Pcm16Wave<'static>,
     state: Mutex<Waiting>,
 }
 impl CallWaitingAudio {
     pub fn new(normal: CallAudioPort) -> Result<Self, WavError> {
-        static SAMPLES: OnceLock<Result<Arc<Vec<f32>>, WavError>> = OnceLock::new();
+        static SAMPLES: OnceLock<Result<Pcm16Wave<'static>, WavError>> = OnceLock::new();
         let samples = SAMPLES
             .get_or_init(|| {
-                parse_announcement(include_bytes!(
-                    "../../../assets/audio/waiting-marimba.wav"
-                ))
-                .map(Arc::new)
+                Pcm16Wave::parse(include_bytes!("../../../assets/audio/waiting-marimba.wav"))
             })
             .clone()?;
         Ok(Self {
@@ -253,11 +143,11 @@ impl PcmAudioPort for CallWaitingAudio {
                 return 0;
             }
             if waiting.state == 1 {
-                let cycle = self.samples.len() + 96000;
+                let cycle = self.samples.samples + 96000;
                 for sample in output.iter_mut() {
                     let position = (waiting.sample % cycle as u64) as usize;
                     waiting.sample += 1;
-                    *sample = self.samples.get(position).copied().unwrap_or(0.0);
+                    *sample = self.samples.sample(position);
                 }
             } else {
                 capture(context, route, output);
@@ -342,7 +232,7 @@ impl PcmSendPort for CallWaitingAudio {
     }
 }
 struct Screening {
-    samples: Option<Vec<f32>>,
+    samples: Option<AnnouncementPlayback>,
     offset: usize,
     remaining: usize,
     pause: usize,
@@ -350,16 +240,10 @@ struct Screening {
     generation: u64,
     waiting: bool,
 }
-impl Drop for Screening {
-    fn drop(&mut self) {
-        if let Some(samples) = &mut self.samples {
-            samples.fill(0.0);
-        }
-    }
-}
 pub struct ScreeningAudio {
     normal: CallAudioPort,
     state: Mutex<Screening>,
+    cleanup: AnnouncementCleanup,
     waiting_policy: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 impl ScreeningAudio {
@@ -374,13 +258,14 @@ impl ScreeningAudio {
         if !(1..=120).contains(&timeout) || repeats > 3 {
             return Err(WavError::Layout);
         }
-        let samples = load_announcement(path, hash)?;
         let remaining = usize::from(repeats) + 1;
+        let samples = AnnouncementPlayback::new(load_announcement(path, hash)?, remaining)?;
         let pause =
-            (usize::from(timeout) * 48000).saturating_sub(samples.len() * remaining) / remaining;
+            (usize::from(timeout) * 48000).saturating_sub(samples.samples * remaining) / remaining;
         Ok(Self {
             normal,
             waiting_policy: OnceLock::new(),
+            cleanup: samples.cleanup(),
             state: Mutex::new(Screening {
                 samples: Some(samples),
                 offset: 0,
@@ -409,10 +294,12 @@ impl ScreeningAudio {
     }
     pub fn bridge(&self) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(mut samples) = state.samples.take() {
-            samples.fill(0.0);
-        }
+        state.samples.take();
         state.generation += 1;
+    }
+    pub(crate) async fn close(&self) {
+        self.bridge();
+        self.cleanup.wait().await;
     }
 }
 impl PcmAudioPort for ScreeningAudio {
@@ -441,17 +328,23 @@ impl PcmAudioPort for ScreeningAudio {
             if screen.samples.is_none() {
                 capture(context, route, output);
             } else if self.waiting(&screen) {
-                for sample in output.iter_mut() {
-                    if screen.remaining == 0 {
-                        break;
-                    }
+                let mut written = 0;
+                while written < output.len() && screen.remaining > 0 {
                     if screen.pause_remaining > 0 {
-                        screen.pause_remaining -= 1;
+                        let count = screen.pause_remaining.min(output.len() - written);
+                        screen.pause_remaining -= count;
+                        written += count;
                         continue;
                     }
-                    *sample = screen.samples.as_ref().unwrap()[screen.offset];
-                    screen.offset += 1;
-                    if screen.offset == screen.samples.as_ref().unwrap().len() {
+                    let samples = screen.samples.as_ref().unwrap();
+                    let count = (samples.samples - screen.offset).min(output.len() - written);
+                    let count = samples.read(&mut output[written..written + count]);
+                    if count == 0 {
+                        break;
+                    }
+                    screen.offset += count;
+                    written += count;
+                    if screen.offset == screen.samples.as_ref().unwrap().samples {
                         screen.offset = 0;
                         screen.remaining -= 1;
                         screen.pause_remaining = screen.pause;
@@ -503,6 +396,15 @@ impl PcmSendPort for ScreeningAudio {
         })
     }
     fn send_health(&self) -> AudioSendHealth {
-        self.normal.send_health()
+        let screen = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if screen
+            .samples
+            .as_ref()
+            .is_some_and(AnnouncementPlayback::failed)
+        {
+            AudioSendHealth::Failed
+        } else {
+            self.normal.send_health()
+        }
     }
 }

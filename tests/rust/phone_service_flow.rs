@@ -53,6 +53,7 @@ struct Voice {
     models_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     speakers_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     fail_speakers: AtomicBool,
+    detached_ends: Mutex<Vec<Option<i64>>>,
 }
 impl Voice {
     async fn finish(&self, method: &str, mut extra: IvyJson) -> IvyResult<()> {
@@ -117,7 +118,7 @@ impl PhoneFlowVoice for Arc<Voice> {
                 .await
         })
     }
-    fn models(&self) -> FlowFuture<IvyJson> {
+    fn models(&self) -> FlowFuture<Arc<VoiceModels>> {
         let voice = self.clone();
         let gate = self.models_gate.lock().unwrap().clone();
         Box::pin(async move {
@@ -125,10 +126,12 @@ impl PhoneFlowVoice for Arc<Voice> {
                 voice.event("models_wait".into());
                 gate.acquire().await.unwrap().forget();
             }
-            Ok(cases().get("models").unwrap().clone())
+            Ok(Arc::new(VoiceModels::from_wire(
+                cases().get("models").unwrap(),
+            )?))
         })
     }
-    fn speaker_voices(&self) -> FlowFuture<IvyJson> {
+    fn speaker_voices(&self) -> FlowFuture<Arc<VoiceSpeakers>> {
         let voice = self.clone();
         let gate = self.speakers_gate.lock().unwrap().clone();
         Box::pin(async move {
@@ -137,9 +140,14 @@ impl PhoneFlowVoice for Arc<Voice> {
                 gate.acquire().await.unwrap().forget();
             }
             if voice.fail_speakers.load(Ordering::SeqCst) {
-                return Err(IvyError::new("phone_speaker_catalog_invalid", "Fixture failure"));
+                return Err(IvyError::new(
+                    "phone_speaker_catalog_invalid",
+                    "Fixture failure",
+                ));
             }
-            Ok(cases().get("speakers").unwrap().clone())
+            Ok(Arc::new(VoiceSpeakers::from_wire(
+                cases().get("speakers").unwrap(),
+            )?))
         })
     }
     fn speaker_voice(&self, _: &JsString) -> Option<JsString> {
@@ -248,7 +256,12 @@ impl PhoneFlowVoice for Arc<Voice> {
             args.insert("requestHash", hash.into());
             match command {
                 VoiceSelectionCommand::Operation(operation)
-                | VoiceSelectionCommand::Update { operation_id: operation, .. } => { args.insert("operationId", operation.into()); }
+                | VoiceSelectionCommand::Update {
+                    operation_id: operation,
+                    ..
+                } => {
+                    args.insert("operationId", operation.into());
+                }
                 _ => {}
             }
             voice.finish("call.selectVoice", args).await
@@ -261,6 +274,10 @@ impl PhoneFlowVoice for Arc<Voice> {
         ));
         Box::pin(async { Ok(()) })
     }
+    fn detach(&self, call_id: JsString, ended: Option<i64>) -> FlowFuture<()> {
+        self.detached_ends.lock().unwrap().push(ended);
+        self.stop(call_id, None)
+    }
     fn close(&self) -> FlowFuture<()> {
         self.event("close".into());
         Box::pin(async { Ok(()) })
@@ -269,6 +286,7 @@ impl PhoneFlowVoice for Arc<Voice> {
 struct NativeState {
     status: IvyJson,
     errors: u32,
+    hangup_ended_at: Option<IvyJson>,
 }
 struct Fixture {
     root: PathBuf,
@@ -345,7 +363,11 @@ impl Fixture {
         let mut status = cases().get("idle").unwrap().clone();
         status.insert("call", observation);
         status.insert("media", media);
-        let status = Arc::new(Mutex::new(NativeState { status, errors: 0 }));
+        let status = Arc::new(Mutex::new(NativeState {
+            status,
+            errors: 0,
+            hangup_ended_at: None,
+        }));
         let (input, peer) = tokio::io::duplex(65536);
         let (output, read) = tokio::io::duplex(65536);
         let output = Arc::new(tokio::sync::Mutex::new(output));
@@ -385,6 +407,9 @@ impl Fixture {
                         "call.hangup" => {
                             let mut call = state.status.get("call").unwrap().clone();
                             call.insert("state", "local_ended".into());
+                            if let Some(ended) = &state.hangup_ended_at {
+                                call.insert("endedAt", ended.clone());
+                            }
                             state.status.insert("call", call.clone());
                             call
                         }
@@ -455,6 +480,7 @@ impl Fixture {
             models_gate: Mutex::new(None),
             speakers_gate: Mutex::new(None),
             fail_speakers: AtomicBool::new(false),
+            detached_ends: Mutex::new(vec![]),
         });
         let flow = PhoneFlow::new(
             calls,
@@ -502,7 +528,13 @@ impl Fixture {
         let operation = || id(field(step, "operation").unwrap().as_f64().unwrap() as u32);
         match action.as_str() {
             "config" => return self.flow.configuration().await,
-            "catalog" => return self.flow.voice_model_catalog().await,
+            "catalog" => {
+                return self
+                    .flow
+                    .voice_model_catalog()
+                    .await
+                    .map(|view| view.to_wire());
+            }
             "remember" => {
                 self.journal
                     .remember_voice_reasoning(text(step, "effort")?)
@@ -512,7 +544,10 @@ impl Fixture {
             "speaker-state" => {
                 return self
                     .flow
-                    .speaker_voice_state(id(3), cases().get("speakers").unwrap())
+                    .speaker_voice_state(
+                        id(3),
+                        &VoiceSpeakers::from_wire(cases().get("speakers").unwrap()).unwrap(),
+                    )
                     .await;
             }
             "speaker" => {
@@ -617,7 +652,10 @@ impl Fixture {
             }
             "observe" => {
                 let status = self.status.lock().unwrap().status.clone();
-                self.flow.observe(Some(status)).await?;
+                let calls = self.journal.current_calls().await?;
+                self.flow
+                    .observe(&calls, &mut PhoneNativeSnapshot::new(status))
+                    .await?;
             }
             "settle" => until(|| self.flow.0.state.lock().unwrap().work.is_empty()).await,
             _ => panic!("Unknown flow action"),
@@ -632,6 +670,30 @@ impl Fixture {
         self.journal.close().wait().await.unwrap();
         assert!(self.root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(self.root).unwrap();
+    }
+}
+#[tokio::test]
+async fn confirmed_hangup_passes_the_original_native_end_time_to_voice() {
+    for (ended, expected) in [
+        (Some("1970-01-01T00:00:12.345Z"), Some(12_345)),
+        (None, None),
+    ] {
+        let fixture = Fixture::new(&object([])).await;
+        fixture.status.lock().unwrap().hangup_ended_at =
+            Some(ended.map(Into::into).unwrap_or(IvyJson::Null));
+        timed(fixture.flow.hangup("main".into(), id(3)).wait())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.voice.detached_ends.lock().unwrap().as_slice(),
+            &[expected],
+            "Voice must receive the end time from the original native hangup receipt, without inventing a missing time"
+        );
+        timed(fixture.flow.hangup("main".into(), id(3)).wait())
+            .await
+            .unwrap();
+        assert_eq!(fixture.voice.detached_ends.lock().unwrap().len(), 1);
+        fixture.close().await;
     }
 }
 #[tokio::test]
@@ -710,45 +772,103 @@ async fn original_voice_controls_restart_feedback_and_cleanup() {
 #[tokio::test]
 async fn partial_voice_update_replays_its_original_defaults_after_a_newer_selection() {
     let fixture = Fixture::new(&object([])).await;
-    let bridge = crate::service_bridge::PhoneBridge::new(fixture.flow.clone(), fixture.native.clone());
+    let bridge =
+        crate::service_bridge::PhoneBridge::new(fixture.flow.clone(), fixture.native.clone());
     let signal = tokio_util::sync::CancellationToken::new();
-    let original = object([("operationId", id(30).into()), ("callId", id(3).into()),
-        ("reasoningEffort", "ultra".into()), ("voiceId", "ember".into())]);
-    let first = bridge.invoke("update", original.clone(), "other".into(), &signal).await.unwrap();
-    assert_eq!(first.required("intent").unwrap().get("model"), Some(&"gpt-6.1-sol".into()));
-    assert_eq!(fixture.journal.selected_speaker_voice(id(3)).await.unwrap(), Some("ember".into()));
-    bridge.invoke("update", object([("operationId", id(31).into()), ("callId", id(3).into()),
-        ("model", "gpt-6-sol".into())]), "other".into(), &signal).await.unwrap();
+    let original = object([
+        ("operationId", id(30).into()),
+        ("callId", id(3).into()),
+        ("reasoningEffort", "ultra".into()),
+        ("voiceId", "ember".into()),
+    ]);
+    let first = bridge
+        .invoke("update", original.clone(), "other".into(), &signal)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.required("intent").unwrap().get("model"),
+        Some(&"gpt-6.1-sol".into())
+    );
+    assert_eq!(
+        fixture.journal.selected_speaker_voice(id(3)).await.unwrap(),
+        Some("ember".into())
+    );
+    bridge
+        .invoke(
+            "update",
+            object([
+                ("operationId", id(31).into()),
+                ("callId", id(3).into()),
+                ("model", "gpt-6-sol".into()),
+            ]),
+            "other".into(),
+            &signal,
+        )
+        .await
+        .unwrap();
     let events = fixture.voice.events.lock().unwrap().clone();
-    let replay = bridge.invoke("update", original.clone(), "other".into(), &signal).await.unwrap();
+    let replay = bridge
+        .invoke("update", original.clone(), "other".into(), &signal)
+        .await
+        .unwrap();
     equal(&replay, &first, "original partial update");
     assert_eq!(*fixture.voice.events.lock().unwrap(), events);
     let selected = fixture.flow.voice_selection(&id(3)).await.unwrap();
     assert_eq!(selected.model, JsString::from("gpt-6-sol"));
     assert_eq!(selected.reasoning_effort, JsString::from("ultra"));
-    assert!(events.iter().all(|event| !event.starts_with("start:") && !event.starts_with("prepare:")));
-    let mut conflict = original; conflict.insert("voiceId", "cove".into());
-    assert_eq!(bridge.invoke("update", conflict, "other".into(), &signal).await.unwrap_err().code, "mutation_conflict");
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.starts_with("start:") && !event.starts_with("prepare:"))
+    );
+    let mut conflict = original;
+    conflict.insert("voiceId", "cove".into());
+    assert_eq!(
+        bridge
+            .invoke("update", conflict, "other".into(), &signal)
+            .await
+            .unwrap_err()
+            .code,
+        "mutation_conflict"
+    );
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn audio_setup_validates_inventory_through_the_public_service_contract() {
     let fixture = Fixture::new(&object([("unprepared", true.into())])).await;
-    let bridge = crate::service_bridge::PhoneBridge::new(fixture.flow.clone(), fixture.native.clone());
+    let bridge =
+        crate::service_bridge::PhoneBridge::new(fixture.flow.clone(), fixture.native.clone());
     let before = fixture.requests.lock().unwrap().len();
-    let report = bridge.invoke("audioSetup", object([]), "main".into(),
-        &tokio_util::sync::CancellationToken::new()).await.unwrap();
+    let report = bridge
+        .invoke(
+            "audioSetup",
+            object([]),
+            "main".into(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     assert_eq!(report.get("processLoopbackSupported"), Some(&true.into()));
     for route in report.required("routes").unwrap().as_array().unwrap() {
         assert_eq!(route.get("ready"), Some(&false.into()));
-        assert!(route.required("endpoints").unwrap().as_array().unwrap().iter()
-            .all(|endpoint| endpoint.get("state") == Some(&"missing".into())));
+        assert!(
+            route
+                .required("endpoints")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|endpoint| endpoint.get("state") == Some(&"missing".into()))
+        );
     }
     let requests = fixture.requests.lock().unwrap()[before..].to_vec();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].get("method"), Some(&"inventory".into()),
-        "Audio setup may only observe devices, never change them.");
+    assert_eq!(
+        requests[0].get("method"),
+        Some(&"inventory".into()),
+        "Audio setup may only observe devices, never change them."
+    );
     fixture.close().await;
 }
 
@@ -763,12 +883,24 @@ async fn prewarm_loads_speakers_concurrently_and_catalog_failure_keeps_the_task_
     let warming = tokio::spawn(async move { flow.prewarm_voice("main".into()).await });
     until(|| {
         let events = fixture.voice.events.lock().unwrap();
-        events.iter().any(|v| v == "models_wait")
-            && events.iter().any(|v| v == "speakers_wait")
-    }).await;
+        events.iter().any(|v| v == "models_wait") && events.iter().any(|v| v == "speakers_wait")
+    })
+    .await;
     models.add_permits(1);
-    until(|| fixture.voice.events.lock().unwrap().iter().any(|v| v == "prewarm")).await;
-    assert!(!warming.is_finished(), "The catalog is still loading after the task warmed.");
+    until(|| {
+        fixture
+            .voice
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v == "prewarm")
+    })
+    .await;
+    assert!(
+        !warming.is_finished(),
+        "The catalog is still loading after the task warmed."
+    );
     speakers.add_permits(1);
     timed(warming).await.unwrap().unwrap();
 
@@ -776,9 +908,24 @@ async fn prewarm_loads_speakers_concurrently_and_catalog_failure_keeps_the_task_
     *fixture.voice.speakers_gate.lock().unwrap() = None;
     fixture.voice.events.lock().unwrap().clear();
     fixture.voice.fail_speakers.store(true, Ordering::SeqCst);
-    assert_eq!(fixture.flow.prewarm_voice("main".into()).await.unwrap_err().code,
-        "phone_speaker_catalog_invalid");
-    assert!(fixture.voice.events.lock().unwrap().iter().any(|v| v == "prewarm"));
+    assert_eq!(
+        fixture
+            .flow
+            .prewarm_voice("main".into())
+            .await
+            .unwrap_err()
+            .code,
+        "phone_speaker_catalog_invalid"
+    );
+    assert!(
+        fixture
+            .voice
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v == "prewarm")
+    );
     fixture.close().await;
 }
 

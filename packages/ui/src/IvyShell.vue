@@ -386,7 +386,7 @@ onMounted(() => {
           <slot name="context" />
         </div>
         <slot name="status" />
-        <div id="ivy-toolbar-end" class="flex shrink-0 items-center gap-1">
+        <div id="ivy-toolbar-end" class="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
           <StatusBadge
             v-if="connectionTone === 'bad' || connectionTone === 'warning'"
             :label="connection"

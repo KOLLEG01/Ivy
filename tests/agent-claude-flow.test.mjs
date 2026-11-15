@@ -6,6 +6,43 @@ import { fakeSdk } from './fixtures/agent-claude-bridge-fake.mjs';
 const tick = () => new Promise(setImmediate);
 const message = (index = 0) => ({ version: 2, type: 'message', turnId: 'original', message: { index, text: '\ud800😀' } });
 
+test('steering acknowledges the original SDK write during a running query and close rejects unconsumed input', async () => {
+  const { sdk, calls } = fakeSdk();
+  const query = sdk.query, writes = [], unblock = [], written = [];
+  sdk.query = ({ prompt, options }) => query({ options, prompt: (async function* () {
+    for await (const value of prompt) {
+      writes.push(value);
+      yield value;
+      await new Promise(resolve => unblock.push(resolve));
+    }
+  })() });
+  const bridge = session(sdk, frame => written.push(frame), error => { throw error; });
+  const receive = (id, method, messages) => bridge.receive({ version: 2, id, method,
+    params: { turnId: 'original', options: {}, messages } });
+  await receive('start', 'query/start', []);
+  const first = receive('first', 'query/steer', [{ text: 'original input' }]);
+  await tick();
+  assert.deepEqual(writes, [{ text: 'original input' }]);
+  assert.ok(!written.some(frame => frame.id === 'first'), 'a pending transport write is not delivered');
+  unblock.shift()();
+  await first;
+  assert.equal(written.find(frame => frame.id === 'first').result, null);
+  assert.equal(calls[0].closed, 0, 'steering must not wait for a result or end the query');
+  const second = receive('second', 'query/steer', [{ text: 'next input' }]);
+  await tick();
+  const queued = receive('queued', 'query/steer', Array.from({ length: 32 }, (_, index) => ({ index })));
+  await receive('capacity', 'query/steer', [{ text: 'refused before write' }]);
+  assert.equal(written.find(frame => frame.id === 'capacity').error.name, 'native_capacity');
+  await bridge.stop();
+  await Promise.all([second, queued]);
+  assert.match(written.find(frame => frame.id === 'second').error.message, /before consuming/);
+  assert.match(written.find(frame => frame.id === 'queued').error.message, /before consuming/);
+  unblock.shift()();
+  await tick();
+  assert.deepEqual(writes, [{ text: 'original input' }, { text: 'next input' }]);
+  assert.equal(calls[0].closed, 1);
+});
+
 test('SDK event credits keep data ordered while controls and original RPC replies pass', async t => {
   const written = [];
   const flow = eventFlow(frame => written.push(structuredClone(frame)));

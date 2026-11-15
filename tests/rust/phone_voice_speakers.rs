@@ -178,7 +178,7 @@ fn fixture() -> (
 }
 fn read(speakers: &VoiceSpeakerCatalog) -> tokio::task::JoinHandle<IvyResult<IvyJson>> {
     let speakers = speakers.clone();
-    tokio::spawn(async move { speakers.speaker_voices().await })
+    tokio::spawn(async move { speakers.speaker_voices().await.map(|view| view.to_wire()) })
 }
 async fn joined(task: tokio::task::JoinHandle<IvyResult<IvyJson>>) -> IvyResult<IvyJson> {
     tokio::time::timeout(Duration::from_secs(20), task)
@@ -324,9 +324,14 @@ async fn coalesced_cancelled_observer_retains_load_schema_boundaries_and_caller_
     let request = peer.request("config/read").await;
     peer.reply(&request, value(r#"{"config":{}}"#)).await;
     let expected = joined(second).await.unwrap();
-    let mut copy = speakers.speaker_voices().await.unwrap();
+    let shared = speakers.speaker_voices().await.unwrap();
+    assert!(Arc::ptr_eq(
+        &shared,
+        &speakers.speaker_voices().await.unwrap()
+    ));
+    let mut copy = shared.to_wire();
     copy.insert("voices", value("[]"));
-    assert_eq!(speakers.speaker_voices().await.unwrap(), expected);
+    assert_eq!(speakers.speaker_voices().await.unwrap().to_wire(), expected);
     assert_eq!(peer.sent.len(), 2);
     assert_eq!(peer.sent[0].get("params"), Some(&value("{}")));
     assert_eq!(
@@ -356,7 +361,7 @@ async fn cache_expiry_is_strict_completion_time_open_stop_policy_and_clock_rollb
     let first = joined(task).await.unwrap();
     for time in [1000, 68999] {
         now.store(time, Ordering::SeqCst);
-        assert_eq!(speakers.speaker_voices().await.unwrap(), first);
+        assert_eq!(speakers.speaker_voices().await.unwrap().to_wire(), first);
     }
     control.stopping.store(true, Ordering::SeqCst);
     assert_eq!(
@@ -406,7 +411,7 @@ async fn reconnect_uses_current_output_schema_and_preserves_original_unfenced_co
         Some(&IvyJson::Number(2.0))
     );
     drop(calls);
-    assert_eq!(speakers.speaker_voices().await.unwrap(), expected);
+    assert_eq!(speakers.speaker_voices().await.unwrap().to_wire(), expected);
     assert_eq!(next_peer.sent.len(), 1);
     assert!(old.upgrade().is_none());
     let retired = Arc::downgrade(&control.current.lock().unwrap().rpc);
@@ -419,6 +424,43 @@ async fn reconnect_uses_current_output_schema_and_preserves_original_unfenced_co
     let task = read(&speakers);
     reply_catalog(&mut third_peer, value(r#"{"config":{}}"#)).await;
     assert_ne!(joined(task).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn reconnect_during_configuration_completes_original_but_cannot_cache_on_replacement() {
+    let (speakers, control, mut first_peer, _, _) = fixture();
+    let (rpc, mut next_peer, _) = connection(2, false);
+    let retired = Arc::downgrade(&control.current.lock().unwrap().rpc);
+    let first = read(&speakers);
+    let request = first_peer.request(LIST).await;
+    first_peer.reply(&request, voices()).await;
+    let request = first_peer.request("config/read").await;
+    *control.current.lock().unwrap() = rpc;
+    let second = read(&speakers);
+    observers(&control, 2).await;
+    first_peer
+        .reply(
+            &request,
+            value(r#"{"config":{"realtime":{"voice":"ember"}}}"#),
+        )
+        .await;
+    let original = joined(first).await.unwrap();
+    assert_eq!(joined(second).await.unwrap(), original);
+    assert_eq!(original.get("defaultVoiceId"), Some(&"ember".into()));
+    assert!(retired.upgrade().is_none());
+
+    // A new observer must rediscover on the replacement even though the original
+    // completed successfully and its ordinary sixty-second TTL has not expired.
+    let fresh = read(&speakers);
+    reply_catalog(&mut next_peer, value(r#"{"config":{}}"#)).await;
+    let replacement = joined(fresh).await.unwrap();
+    assert_eq!(replacement.get("defaultVoiceId"), Some(&"cove".into()));
+    assert_ne!(replacement, original);
+    assert_eq!(next_peer.sent.len(), 2);
+    assert_eq!(
+        speakers.speaker_voices().await.unwrap().to_wire(),
+        replacement
+    );
 }
 
 #[tokio::test]
@@ -534,7 +576,7 @@ async fn current_cwd_and_voice_are_read_at_original_boundaries_then_retained_by_
     let expected = joined(task).await.unwrap();
     assert_eq!(expected.get("defaultVoiceId"), Some(&"ember".into()));
     control.settings.lock().unwrap().voice = Some("cove".into());
-    assert_eq!(speakers.speaker_voices().await.unwrap(), expected);
+    assert_eq!(speakers.speaker_voices().await.unwrap().to_wire(), expected);
     assert_eq!(peer.sent.len(), 2);
 }
 

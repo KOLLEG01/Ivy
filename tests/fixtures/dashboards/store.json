@@ -755,7 +755,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "epoch:12:😀/nonce",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -840,7 +840,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "epoch:12:nonce",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -985,7 +985,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "op",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -1064,7 +1064,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "op",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -1304,14 +1304,14 @@
         "method": "objects.query",
         "params": {
           "contractKey": "dashboards/dashboard",
-          "contractVersions": [
-            "1.0.0",
-            "1.1.0"
-          ],
           "where": {
             "op": "isNull",
             "field": "object.parentId"
           },
+          "select": [
+            "data:/title",
+            "data:/imageToken"
+          ],
           "limit": 50
         }
       }
@@ -2064,103 +2064,268 @@
     "page": {
       "items": [
         {
-          "objectId": "id0"
+          "objectId": "id0",
+          "revision": 7,
+          "values": {
+            "data:/title": "A0",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id1"
+          "objectId": "id1",
+          "revision": 7,
+          "values": {
+            "data:/title": "A1",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id2"
+          "objectId": "id2",
+          "revision": 7,
+          "values": {
+            "data:/title": "A2",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id3"
+          "objectId": "id3",
+          "revision": 7,
+          "values": {
+            "data:/title": "A3",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id4"
+          "objectId": "id4",
+          "revision": 7,
+          "values": {
+            "data:/title": "A4",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id5"
+          "objectId": "id5",
+          "revision": 7,
+          "values": {
+            "data:/title": "A5",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id6"
+          "objectId": "id6",
+          "revision": 7,
+          "values": {
+            "data:/title": "A6",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id7"
+          "objectId": "id7",
+          "revision": 7,
+          "values": {
+            "data:/title": "A7",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id8"
+          "objectId": "id8",
+          "revision": 7,
+          "values": {
+            "data:/title": "A8",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id9"
+          "objectId": "id9",
+          "revision": 7,
+          "values": {
+            "data:/title": "A9",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id10"
+          "objectId": "id10",
+          "revision": 7,
+          "values": {
+            "data:/title": "A10",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id11"
+          "objectId": "id11",
+          "revision": 7,
+          "values": {
+            "data:/title": "A11",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id12"
+          "objectId": "id12",
+          "revision": 7,
+          "values": {
+            "data:/title": "A12",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id13"
+          "objectId": "id13",
+          "revision": 7,
+          "values": {
+            "data:/title": "A13",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id14"
+          "objectId": "id14",
+          "revision": 7,
+          "values": {
+            "data:/title": "A14",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id15"
+          "objectId": "id15",
+          "revision": 7,
+          "values": {
+            "data:/title": "A15",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id16"
+          "objectId": "id16",
+          "revision": 7,
+          "values": {
+            "data:/title": "A16",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id17"
+          "objectId": "id17",
+          "revision": 7,
+          "values": {
+            "data:/title": "A17",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id18"
+          "objectId": "id18",
+          "revision": 7,
+          "values": {
+            "data:/title": "A18",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id19"
+          "objectId": "id19",
+          "revision": 7,
+          "values": {
+            "data:/title": "A19",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id20"
+          "objectId": "id20",
+          "revision": 7,
+          "values": {
+            "data:/title": "A20",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id21"
+          "objectId": "id21",
+          "revision": 7,
+          "values": {
+            "data:/title": "A21",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id22"
+          "objectId": "id22",
+          "revision": 7,
+          "values": {
+            "data:/title": "A22",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id23"
+          "objectId": "id23",
+          "revision": 7,
+          "values": {
+            "data:/title": "A23",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id24"
+          "objectId": "id24",
+          "revision": 7,
+          "values": {
+            "data:/title": "A24",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id25"
+          "objectId": "id25",
+          "revision": 7,
+          "values": {
+            "data:/title": "A25",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id26"
+          "objectId": "id26",
+          "revision": 7,
+          "values": {
+            "data:/title": "A26",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id27"
+          "objectId": "id27",
+          "revision": 7,
+          "values": {
+            "data:/title": "A27",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id28"
+          "objectId": "id28",
+          "revision": 7,
+          "values": {
+            "data:/title": "A28",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id29"
+          "objectId": "id29",
+          "revision": 7,
+          "values": {
+            "data:/title": "A29",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id30"
+          "objectId": "id30",
+          "revision": 7,
+          "values": {
+            "data:/title": "A30",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id31"
+          "objectId": "id31",
+          "revision": 7,
+          "values": {
+            "data:/title": "A31",
+            "data:/imageToken": null
+          }
         },
         {
-          "objectId": "id32"
+          "objectId": "id32",
+          "revision": 7,
+          "values": {
+            "data:/title": "A32",
+            "data:/imageToken": null
+          }
         }
       ],
       "nextCursor": "next"
@@ -2170,214 +2335,16 @@
         "method": "objects.query",
         "params": {
           "contractKey": "dashboards/dashboard",
-          "contractVersions": [
-            "1.0.0",
-            "1.1.0"
-          ],
           "where": {
             "op": "isNull",
             "field": "object.parentId"
           },
+          "select": [
+            "data:/title",
+            "data:/imageToken"
+          ],
           "limit": 33,
           "cursor": "cursor"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id0"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id1"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id2"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id3"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id4"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id5"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id6"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id7"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id8"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id9"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id10"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id11"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id12"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id13"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id14"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id15"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id16"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id17"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id18"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id19"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id20"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id21"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id22"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id23"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id24"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id25"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id26"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id27"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id28"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id29"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id30"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id31"
-        }
-      },
-      {
-        "method": "objects.read",
-        "params": {
-          "objectId": "id32"
         }
       }
     ],
@@ -2663,15 +2630,15 @@
         "method": "objects.query",
         "params": {
           "contractKey": "dashboards/dashboard",
-          "contractVersions": [
-            "1.0.0",
-            "1.1.0"
-          ],
           "where": {
             "op": "eq",
             "field": "object.parentId",
             "value": "root"
           },
+          "select": [
+            "data:/title",
+            "data:/imageToken"
+          ],
           "limit": 50
         }
       }
@@ -2732,7 +2699,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "op",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -2812,7 +2779,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "op",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -2892,7 +2859,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "op",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",
@@ -2972,7 +2939,7 @@
         "method": "objects.write",
         "params": {
           "mutationId": "op",
-          "contractVersion": "1.1.0",
+          "contractVersion": "1.2.0",
           "references": {},
           "content": {
             "encoding": "json",

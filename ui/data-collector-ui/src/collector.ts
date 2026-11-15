@@ -56,6 +56,7 @@ export interface TaskRow {
   lastRunAt: string | null;
   retentionWarning: string | null;
   resultObjectId: string | null;
+  resultRevision?: number | null;
 }
 export interface TasksView {
   items: TaskRow[];

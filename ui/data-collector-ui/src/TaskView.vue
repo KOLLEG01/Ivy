@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { CircleAlert, Pencil, Play } from "@lucide/vue";
 import {
   Alert,
@@ -49,58 +49,93 @@ const task = ref<Task | null>(null),
   history = ref<Operation.RevisionMetadata[]>([]),
   cursor = ref<string | null>(null),
   revision = ref(""),
-  loading = ref(false),
+  resultLoading = ref(false),
+  historyLoading = ref(false),
   error = ref(""),
   enlarged = ref<{ src: string; name: string } | null>(null);
+const loading = computed(() => resultLoading.value || historyLoading.value);
 const id = () => props.row.task.id;
-async function load(more = false) {
-  loading.value = true;
-  error.value = "";
+let alive = true,
+  definitionRequest = 0,
+  resultRequest = 0,
+  historyRequest = 0;
+onUnmounted(() => {
+  alive = false;
+});
+const failure = (cause: unknown) => {
+  if (alive)
+    error.value = cause instanceof Error ? cause.message : String(cause);
+};
+async function loadDefinition() {
+  const request = ++definitionRequest;
   try {
-    if (!more && props.row.jobId) {
-      const definitions = await read<Operation.ObjectsHistoryResult>(
-        props.node,
-        { view: "definitionHistory", jobId: props.row.jobId },
-      );
-      definitionHistory.value = definitions.items;
-    }
-    if (!more)
-      task.value = (
-        await read<{ task: Task }>(props.node, { view: "task", id: id() })
-      ).task;
-    result.value = await read<Operation.ObjectRead | null>(props.node, {
+    const [full, definitions] = await Promise.all([
+      read<{ task: Task }>(props.node, { view: "task", id: id() }),
+      props.row.jobId
+        ? read<Operation.ObjectsHistoryResult>(props.node, {
+            view: "definitionHistory",
+            jobId: props.row.jobId,
+          })
+        : null,
+    ]);
+    if (!alive || request !== definitionRequest) return;
+    task.value = full.task;
+    definitionHistory.value = definitions?.items ?? [];
+  } catch (cause) {
+    if (request === definitionRequest) failure(cause);
+  }
+}
+async function loadResult() {
+  const request = ++resultRequest;
+  resultLoading.value = true;
+  try {
+    const value = await read<Operation.ObjectRead | null>(props.node, {
       view: "result",
       id: id(),
       ...(revision.value ? { revision: Number(revision.value) } : {}),
     });
+    if (alive && request === resultRequest) result.value = value;
+  } catch (cause) {
+    if (request === resultRequest) failure(cause);
+  } finally {
+    if (alive && request === resultRequest) resultLoading.value = false;
+  }
+}
+async function loadHistory(more = false) {
+  const request = ++historyRequest;
+  historyLoading.value = true;
+  try {
     const page = await read<Operation.ObjectsHistoryResult | null>(props.node, {
       view: "history",
       id: id(),
       ...(more && cursor.value ? { cursor: cursor.value } : {}),
     });
+    if (!alive || request !== historyRequest) return;
     history.value = more
       ? [...history.value, ...(page?.items ?? [])]
       : (page?.items ?? []);
     cursor.value = page?.nextCursor ?? null;
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    if (request === historyRequest) failure(cause);
   } finally {
-    loading.value = false;
+    if (alive && request === historyRequest) historyLoading.value = false;
   }
+}
+async function load(more = false) {
+  error.value = "";
+  if (more) return loadHistory(true);
+  await Promise.all([loadDefinition(), loadResult(), loadHistory()]);
 }
 onMounted(() => void load());
 watch(
   () => props.row.revision,
-  () => void load(),
+  () => void loadDefinition(),
 );
-watch(revision, () => void load());
-// A finished run publishes a new result; follow it unless an older revision is pinned.
-watch(
-  () => [props.row.status, props.row.lastRunAt],
-  ([status], previous) => {
-    if (!revision.value && previous && !working(String(status))) void load();
-  },
-);
+watch(revision, () => void loadResult());
+watch([() => props.row.resultObjectId, () => props.row.resultRevision], () => {
+  if (!revision.value) void loadResult();
+  void loadHistory();
+});
 const images = computed(() => {
   const value =
     result.value?.content.encoding === "json"
@@ -340,6 +375,10 @@ const images = computed(() => {
             @update:open="enlarged = $event ? enlarged : null"
           />
           <JsonTree
+            :show-full-label="
+              tr('Vollständigen Wert anzeigen', 'Show full value')
+            "
+            :show-preview-label="tr('Vorschau anzeigen', 'Show preview')"
             :value="result.content.value"
             :label="tr('Ergebnis', 'Result')"
             :open-depth="2"

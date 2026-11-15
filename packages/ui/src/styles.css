@@ -388,11 +388,12 @@
   top: var(--ivy-mobile-app-bar-height, 0px);
   z-index: 20;
   display: flex;
-  height: 3rem;
+  min-height: 3rem;
+  flex-wrap: wrap;
   flex-shrink: 0;
   align-items: center;
   gap: 0.5rem;
-  padding: 0 0.75rem;
+  padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--border);
   background: var(--background);
 }

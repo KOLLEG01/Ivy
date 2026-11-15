@@ -1,6 +1,5 @@
 //! Hive-backed dashboard persistence. Mutation receipts remain owned by Hive.
 use crate::{sources, validation};
-use futures_util::{StreamExt, stream::FuturesUnordered};
 use ivy_contracts::{IvyError, IvyJson as J, IvyResult, JsString, json};
 use ivy_sdk::rpc::{RequestOptions, RpcClient};
 use sha2::{Digest, Sha256};
@@ -68,7 +67,7 @@ impl DashboardStore {
         if object.get("contractKey") != Some(&"dashboards/dashboard".into())
             || object.get("parentId") != Some(&self.root)
             || object.get("effectivelyArchived").and_then(J::as_bool) == Some(true)
-            || !["1.0.0", "1.1.0"].contains(&version.as_str())
+            || !["1.0.0", "1.1.0", "1.2.0"].contains(&version.as_str())
             || content.get("encoding") != Some(&"json".into())
         {
             return Err(IvyError::new(
@@ -121,11 +120,11 @@ impl DashboardStore {
         };
         let mut params = J::object([
             ("contractKey", "dashboards/dashboard".into()),
-            (
-                "contractVersions",
-                J::Array(vec!["1.0.0".into(), "1.1.0".into()]),
-            ),
             ("where", scope),
+            (
+                "select",
+                J::Array(vec!["data:/title".into(), "data:/imageToken".into()]),
+            ),
             ("limit", J::Number(f64::from(limit))),
         ]);
         if let Some(cursor) = cursor.filter(|s| !s.0.is_empty()) {
@@ -136,35 +135,26 @@ impl DashboardStore {
             .request("objects.query", params, RequestOptions::default())
             .await?;
         let mut rows = Vec::new();
-        for chunk in page
+        for item in page
             .required("items")?
             .as_array()
             .ok_or_else(IvyError::internal)?
-            .chunks(16)
         {
-            let mut pending = FuturesUnordered::new();
-            for (index, item) in chunk.iter().enumerate() {
-                let store = self.clone();
-                let id = item
-                    .required("objectId")?
-                    .as_js_string()
-                    .ok_or_else(IvyError::internal)?
-                    .clone();
-                pending.push(tokio::spawn(async move { (index, store.read(id).await) }));
-            }
-            let mut batch = vec![J::Null; chunk.len()];
-            while let Some(row) = pending.next().await {
-                let (index, row) = row.map_err(|_| IvyError::internal())?;
-                let row = row?;
-                batch[index] = J::object([
-                    ("id", row.required("id")?.clone()),
-                    ("revision", row.required("revision")?.clone()),
-                    ("title", row.required("value")?.required("title")?.clone()),
-                    ("url", row.required("url")?.clone()),
-                    ("imageUrl", row.required("imageUrl")?.clone()),
-                ]);
-            }
-            rows.extend(batch);
+            let id = item
+                .required("objectId")?
+                .as_js_string()
+                .ok_or_else(IvyError::internal)?;
+            let values = item.required("values")?;
+            rows.push(J::object([
+                ("id", J::String(id.clone())),
+                ("revision", item.required("revision")?.clone()),
+                ("title", values.required("data:/title")?.clone()),
+                ("url", self.url(id)?),
+                (
+                    "imageUrl",
+                    self.image_url(id, values.get("data:/imageToken").unwrap_or(&J::Null))?,
+                ),
+            ]));
         }
         Ok(J::object([
             ("items", J::Array(rows)),
@@ -184,7 +174,7 @@ impl DashboardStore {
         }
         let mut params = J::object([
             ("mutationId", J::String(operation.clone())),
-            ("contractVersion", "1.1.0".into()),
+            ("contractVersion", "1.2.0".into()),
             ("references", J::Object(vec![])),
             (
                 "content",
@@ -266,6 +256,10 @@ impl DashboardStore {
         ]))
     }
     pub async fn data(&self, value: &J) -> IvyResult<J> {
+        self.data_with_options(value, RequestOptions::default())
+            .await
+    }
+    pub async fn data_with_options(&self, value: &J, options: RequestOptions) -> IvyResult<J> {
         let selectors = value
             .required("sources")?
             .as_object()
@@ -275,6 +269,14 @@ impl DashboardStore {
                 let selector = if let Some(id) = source.get("objectId") {
                     sources::Source::Object(
                         id.as_js_string().ok_or_else(IvyError::internal)?.clone(),
+                    )
+                } else if let Some(ids) = source.get("objectIds") {
+                    sources::Source::Objects(
+                        ids.as_array()
+                            .ok_or_else(IvyError::internal)?
+                            .iter()
+                            .map(|id| id.as_js_string().cloned().ok_or_else(IvyError::internal))
+                            .collect::<IvyResult<Vec<_>>>()?,
                     )
                 } else {
                     sources::Source::Contract {
@@ -292,6 +294,6 @@ impl DashboardStore {
                 Ok((name.clone(), selector))
             })
             .collect::<IvyResult<Vec<_>>>()?;
-        sources::snapshot(self.client.clone(), &selectors, RequestOptions::default()).await
+        sources::snapshot(self.client.clone(), &selectors, options).await
     }
 }

@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
 import { buildInstructions } from './build-instructions.mjs';
 import { rustRootInputFingerprint } from './rust-root-inputs.mjs';
+import { compilerEnvironment } from './compiler-environment.mjs';
 
 export const rustBackendTargets = Object.freeze(Object.fromEntries([
   ['x86_64-pc-windows-msvc', 'win32-x64'],
@@ -20,7 +21,7 @@ function within(root, path) {
 }
 function runCargo(args, options) {
   const result = spawnSync(process.env.IVY_CARGO ?? 'cargo', args, {
-    ...options, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+    ...options, env: compilerEnvironment(options.env), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {

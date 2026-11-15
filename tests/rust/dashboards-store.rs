@@ -134,15 +134,9 @@ async fn original_store_values_errors_and_rpc_transcripts() {
 }
 
 #[tokio::test]
-async fn list_reads_sixteen_concurrently_before_starting_next_batch() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Batched {
-        starts: AtomicUsize,
-        active: AtomicUsize,
-        peak: AtomicUsize,
-        barrier: tokio::sync::Barrier,
-    }
-    impl RpcClient for Batched {
+async fn list_uses_one_projection_without_loading_html_bodies() {
+    struct Projection;
+    impl RpcClient for Projection {
         fn request<'a>(
             &'a self,
             method: &'a str,
@@ -150,81 +144,53 @@ async fn list_reads_sixteen_concurrently_before_starting_next_batch() {
             _: RequestOptions,
         ) -> RequestFuture<'a> {
             Box::pin(async move {
-                if method == "objects.query" {
-                    return Ok(J::object([
-                        (
-                            "items",
-                            J::Array(
-                                (0..33)
-                                    .map(|i| J::object([("objectId", format!("id{i}").into())]))
-                                    .collect(),
-                            ),
-                        ),
-                        ("nextCursor", J::Null),
-                    ]));
-                }
-                let n = self.starts.fetch_add(1, Ordering::SeqCst);
-                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-                self.peak.fetch_max(active, Ordering::SeqCst);
-                if n < 32 {
-                    self.barrier.wait().await;
-                }
-                tokio::task::yield_now().await;
-                self.active.fetch_sub(1, Ordering::SeqCst);
-                let id = params.required("objectId")?.clone();
+                assert_eq!(
+                    method, "objects.query",
+                    "listing must not read complete definitions"
+                );
+                assert_eq!(
+                    params.required("select")?,
+                    &J::Array(vec!["data:/title".into(), "data:/imageToken".into()])
+                );
                 Ok(J::object([
                     (
-                        "object",
-                        J::object([
-                            ("contractKey", "dashboards/dashboard".into()),
-                            ("parentId", J::Null),
-                            ("effectivelyArchived", J::Bool(false)),
-                        ]),
+                        "items",
+                        J::Array(
+                            (0..33)
+                                .map(|i| {
+                                    J::object([
+                                        ("objectId", format!("id{i}").into()),
+                                        ("revision", J::Number(1.0)),
+                                        (
+                                            "values",
+                                            J::object([
+                                                ("data:/title", format!("id{i}").into()),
+                                                ("data:/imageToken", J::Null),
+                                            ]),
+                                        ),
+                                    ])
+                                })
+                                .collect(),
+                        ),
                     ),
-                    (
-                        "revision",
-                        J::object([
-                            ("contractVersion", "1.0.0".into()),
-                            ("revision", J::Number(1.0)),
-                        ]),
-                    ),
-                    (
-                        "content",
-                        J::object([
-                            ("encoding", "json".into()),
-                            (
-                                "value",
-                                J::object([
-                                    ("title", id),
-                                    ("html", "x".into()),
-                                    ("sources", J::Object(vec![])),
-                                ]),
-                            ),
-                        ]),
-                    ),
+                    ("nextCursor", J::Null),
                 ]))
             })
         }
     }
-    let client = Arc::new(Batched {
-        starts: AtomicUsize::new(0),
-        active: AtomicUsize::new(0),
-        peak: AtomicUsize::new(0),
-        barrier: tokio::sync::Barrier::new(16),
-    });
-    let store =
-        DashboardStore::new(client.clone(), None, "https://example.test/", "node".into()).unwrap();
-    let value = tokio::time::timeout(std::time::Duration::from_secs(2), store.list(None, 50))
-        .await
-        .unwrap()
-        .unwrap();
+    let store = DashboardStore::new(
+        Arc::new(Projection),
+        None,
+        "https://example.test/",
+        "node".into(),
+    )
+    .unwrap();
+    let value = store.list(None, 50).await.unwrap();
     let rows = value.required("items").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 33);
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(row.required("title").unwrap(), &J::from(format!("id{i}")));
     }
-    assert_eq!(client.starts.load(Ordering::SeqCst), 33);
-    assert_eq!(client.peak.load(Ordering::SeqCst), 16);
 }
 
 #[tokio::test]

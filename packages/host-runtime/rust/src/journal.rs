@@ -7,6 +7,8 @@ use ivy_store::{rusqlite::{Connection, OptionalExtension, Params, params}, sqlit
 use std::{collections::{BTreeMap, BTreeSet}, fs, ops::{Deref, DerefMut}, path::PathBuf, sync::{Arc, Mutex, Weak}, time::Duration};
 #[path = "journal_policy_import.rs"]
 mod policy_import_records;
+#[path = "journal_stopped_owner.rs"]
+mod stopped_owner;
 
 const TERMINAL: [&str; 4] = ["succeeded", "rolled_back", "failed", "needs_attention"];
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;

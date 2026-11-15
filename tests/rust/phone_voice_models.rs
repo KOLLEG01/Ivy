@@ -156,7 +156,7 @@ fn fixture() -> (
 }
 fn read(models: &VoiceModelCatalog) -> tokio::task::JoinHandle<IvyResult<IvyJson>> {
     let models = models.clone();
-    tokio::spawn(async move { models.models().await })
+    tokio::spawn(async move { models.models().await.map(|view| view.to_wire()) })
 }
 async fn joined(task: tokio::task::JoinHandle<IvyResult<IvyJson>>) -> IvyResult<IvyJson> {
     tokio::time::timeout(Duration::from_secs(20), task)
@@ -215,11 +215,13 @@ async fn pages_coalesce_retain_cancelled_observers_and_copy_utf16_results() {
     );
     assert!(expected.as_array().unwrap()[0].get("hidden").is_none());
     assert!(expected.as_array().unwrap()[0].get("extra").is_none());
-    let mut changed = models.models().await.unwrap();
+    let shared = models.models().await.unwrap();
+    assert!(Arc::ptr_eq(&shared, &models.models().await.unwrap()));
+    let mut changed = shared.to_wire();
     if let IvyJson::Array(items) = &mut changed {
         items.clear();
     }
-    assert_eq!(models.models().await.unwrap(), expected);
+    assert_eq!(models.models().await.unwrap().to_wire(), expected);
     assert_eq!(peer.sent.len(), 2);
     assert_eq!(
         peer.sent[0].get("params"),
@@ -259,7 +261,7 @@ async fn cache_expires_from_completion_at_exact_boundary_and_open_always_runs() 
     let first = joined(task).await.unwrap();
     for time in [1000, 64_999] {
         now.store(time, Ordering::SeqCst);
-        assert_eq!(models.models().await.unwrap(), first);
+        assert_eq!(models.models().await.unwrap().to_wire(), first);
     }
     control.stopping.store(true, Ordering::SeqCst);
     assert_eq!(models.models().await.unwrap_err().code, "service_not_ready");
@@ -322,6 +324,7 @@ async fn reconnect_fences_inflight_load_uses_new_page_connection_and_retries_wit
         )
         .await;
     let expected = joined(retry).await.unwrap();
+    let retained_view = models.models().await.unwrap();
     let previous = Arc::downgrade(&control.current.lock().unwrap().rpc);
     // A cached result is also invalidated by a replacement identity with identical catalog bytes.
     let (rpc, mut third_peer, _) = connection(None);
@@ -330,6 +333,7 @@ async fn reconnect_fences_inflight_load_uses_new_page_connection_and_retries_wit
         previous.upgrade().is_none(),
         "Cached identity must not retain the retired RPC actor/catalog"
     );
+    assert_eq!(retained_view.to_wire(), expected);
     let task = read(&models);
     let request = third_peer.request().await;
     third_peer.reply(&request, page(vec![], None)).await;

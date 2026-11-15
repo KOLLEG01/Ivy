@@ -3,6 +3,10 @@ use super::{
     CallError, CallObservation, CallOutcome, Dialog, DialogRequest, FinalPhase, HostedSipMedia,
     SipEndpoint, SipHostCall, SipHostError, endpoint::DialogFlow, server::ServerExchange,
 };
+use super::{
+    queue::{self, Priority},
+    retirement::Retirements,
+};
 use rsipstack::{
     sip::{Header, Method, Request, StatusCode, headers::*, prelude::*},
     transaction::Transaction,
@@ -92,8 +96,9 @@ impl Identity {
 #[derive(Clone)]
 pub(super) struct IncomingInvite {
     control: Arc<Control>,
-    commands: mpsc::Sender<Transaction>,
-    upgrades: mpsc::UnboundedSender<()>,
+    commands: queue::Sender<Transaction>,
+    upgrades: mpsc::Sender<tokio::sync::OwnedSemaphorePermit>,
+    upgrade_slots: Arc<tokio::sync::Semaphore>,
     identity: Option<Identity>,
     observation: watch::Receiver<CallObservation>,
     done: watch::Receiver<Option<Result<(), CallError>>>,
@@ -106,6 +111,8 @@ impl IncomingInvite {
         mut transaction: Transaction,
         endpoint: Arc<SipEndpoint>,
         ring_seconds: u8,
+        retirements: Arc<Retirements>,
+        incoming_slot: tokio::sync::OwnedSemaphorePermit,
     ) -> Self {
         if let Ok(to) = transaction.original.to_header().cloned() {
             if to.tag().ok().flatten().is_none() {
@@ -138,8 +145,9 @@ impl IncomingInvite {
         let (observations, observation) = watch::channel(initial);
         let (finished, done) = watch::channel(None);
         let (release_ready, released) = watch::channel(None);
-        let (commands, receiver) = mpsc::channel(8);
-        let (upgrades, upgrade_rx) = mpsc::unbounded_channel();
+        let (commands, receiver) = queue::channel(8, 4);
+        let (upgrades, upgrade_rx) = mpsc::channel(4);
+        let upgrade_slots = Arc::new(tokio::sync::Semaphore::new(4));
         let mut actor = IncomingActor {
             original,
             transaction: Some(transaction),
@@ -163,6 +171,8 @@ impl IncomingInvite {
             dialog: None,
             reinvite: std::collections::VecDeque::new(),
             failed_controls: vec![],
+            retirements,
+            _incoming_slot: incoming_slot,
         };
         tokio::spawn(async move {
             let result = actor.run(ring_seconds).await;
@@ -186,23 +196,30 @@ impl IncomingInvite {
             actor.current.quiescent = result.is_ok();
             actor.current.closed = result.is_ok();
             let mut ended = actor.current;
-            ended.ended_at=actor.observations.borrow().ended_at.or_else(||Some(chrono::Utc::now().timestamp_millis()));
+            ended.ended_at = actor
+                .observations
+                .borrow()
+                .ended_at
+                .or_else(|| Some(chrono::Utc::now().timestamp_millis()));
             let observations = actor.observations.clone();
+            let original = actor.original.clone();
             if result.is_ok() {
                 drop(actor);
                 observations.send_replace(ended);
                 finished.send_replace(Some(Ok(())));
+                original.incoming_completed();
             } else {
+                let retirements = actor.retirements.clone();
+                retirements.incoming_failed(actor);
                 observations.send_replace(ended);
                 finished.send_replace(Some(Err(CallError::CleanupUnconfirmed)));
-                pending::<()>().await;
-                drop(actor);
             }
         });
         Self {
             control,
             commands,
             upgrades,
+            upgrade_slots,
             identity,
             observation,
             done,
@@ -213,8 +230,25 @@ impl IncomingInvite {
     pub fn request_hangup(&self) {
         self.control.stop();
     }
-    pub fn request_upgrade(&self) -> Result<(), SipHostError> {
-        self.upgrades.send(()).map_err(|_| SipHostError::NotReady)
+    pub fn request_upgrade(&self, before: impl FnOnce()) -> Result<(), SipHostError> {
+        let intent = self.control.intent.lock().unwrap();
+        if intent.ending || self.done.borrow().is_some() {
+            return Err(SipHostError::NotReady);
+        }
+        // Count queued and already accepted ACK owners. Reserve every fallible
+        // admission before changing the original media's codec challenge.
+        let slot = self
+            .upgrade_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SipHostError::OperationConflict)?;
+        let queued = self
+            .upgrades
+            .try_reserve()
+            .map_err(|_| SipHostError::NotReady)?;
+        before();
+        queued.send(slot);
+        Ok(())
     }
     pub fn request_answer(
         &self,
@@ -223,6 +257,9 @@ impl IncomingInvite {
         self.control.answer(before)
     }
     pub fn deliver_control(&self, transaction: Transaction) -> Result<(), Transaction> {
+        if self.done.borrow().is_some() {
+            return Err(transaction);
+        }
         if !matches!(
             transaction.original.method,
             Method::Bye | Method::Options | Method::Invite
@@ -233,9 +270,12 @@ impl IncomingInvite {
         {
             return Err(transaction);
         }
-        self.commands
-            .try_send(transaction)
-            .map_err(|e| e.into_inner())
+        let priority = if transaction.original.method == Method::Bye {
+            Priority::Control
+        } else {
+            Priority::Ordinary
+        };
+        self.commands.try_send(transaction, priority)
     }
     pub fn observation(&self) -> CallObservation {
         let mut current = *self.observation.borrow();
@@ -320,15 +360,18 @@ struct Negotiation {
     server: ServerExchange,
     deadline: Instant,
 }
-struct IncomingActor {
+pub(super) struct IncomingActor {
     original: SipHostCall,
     transaction: Option<Transaction>,
     exchange: Option<ServerExchange>,
     endpoint: Arc<SipEndpoint>,
     control: Arc<Control>,
-    commands: mpsc::Receiver<Transaction>,
-    upgrades: mpsc::UnboundedReceiver<()>,
-    outbound: JoinSet<Result<(), super::SipIoError>>,
+    commands: queue::Receiver<Transaction>,
+    upgrades: mpsc::Receiver<tokio::sync::OwnedSemaphorePermit>,
+    outbound: JoinSet<(
+        Result<(), super::SipIoError>,
+        tokio::sync::OwnedSemaphorePermit,
+    )>,
     renegotiating: Arc<Mutex<bool>>,
     release_ready: watch::Sender<Option<Result<(), CallError>>>,
     local_sequence: u32,
@@ -343,6 +386,8 @@ struct IncomingActor {
     dialog: Option<Dialog>,
     reinvite: std::collections::VecDeque<Negotiation>,
     failed_controls: Vec<Transaction>,
+    retirements: Arc<Retirements>,
+    _incoming_slot: tokio::sync::OwnedSemaphorePermit,
 }
 fn unknown<T>(_: T) -> CallError {
     CallError::CleanupUnconfirmed
@@ -359,8 +404,11 @@ fn sdp(request: &Request) -> Option<&str> {
 }
 impl IncomingActor {
     fn publish(&self) {
-        let mut current=self.current;
-        current.ended_at=self.observations.borrow().ended_at.or_else(||(current.ending||current.outcome.is_some()&&!current.active).then(||chrono::Utc::now().timestamp_millis()));
+        let mut current = self.current;
+        current.ended_at = self.observations.borrow().ended_at.or_else(|| {
+            (current.ending || current.outcome.is_some() && !current.active)
+                .then(|| chrono::Utc::now().timestamp_millis())
+        });
         self.observations.send_replace(current);
     }
     fn end(&mut self) {
@@ -398,7 +446,10 @@ impl IncomingActor {
         self.media = self.original.hosted_media();
         let request = self.transaction.as_ref().unwrap().original.clone();
         let flow = DialogFlow::from_server(self.transaction.as_ref().unwrap());
-        self.exchange = Some(ServerExchange::start(self.transaction.take().unwrap()));
+        self.exchange = Some(ServerExchange::start(
+            self.transaction.take().unwrap(),
+            self.retirements.clone(),
+        ));
         if self.ending() {
             return self.finish_response(StatusCode::Decline).await;
         }
@@ -554,10 +605,13 @@ impl IncomingActor {
                     .reply_control(transaction, StatusCode::CallTransactionDoesNotExist)
                     .await;
             }
+            if self.reinvite.len() >= 4 {
+                return self.reply_control(transaction, StatusCode::from(491)).await;
+            }
             // The original incoming SDK accepts stale/overlapping offers. Its
             // bodyless re-INVITE returns 406; the outgoing policy is separate.
             let request = transaction.original.clone();
-            let server = ServerExchange::start(transaction);
+            let server = ServerExchange::start(transaction, self.retirements.clone());
             let body =
                 sdp(&request).and_then(|body| self.media.as_ref().unwrap().negotiate_offer(body));
             if let Some(body) = body {
@@ -658,6 +712,7 @@ impl IncomingActor {
         loop {
             if self.ending() && !stopping {
                 stopping = true;
+                self.upgrades.close();
                 self.end();
                 if self.established && !self.remote_ended {
                     self.bye = Some(
@@ -695,7 +750,7 @@ impl IncomingActor {
             tokio::select! {
                 _ = self.control.changed.notified()=>(),
                 upgrade=self.upgrades.recv(),if !stopping=>{
-                    if upgrade.is_none(){return Err(CallError::CleanupUnconfirmed);}
+                    let Some(upgrade)=upgrade else{return Err(CallError::CleanupUnconfirmed);};
                     let media=self.media.as_ref().unwrap().clone();
                     let Some(body)=media.initial_offer() else {continue;};
                     self.local_sequence=self.local_sequence.max(self.identity.as_ref().unwrap().sequence as u32).checked_add(1).ok_or(CallError::CleanupUnconfirmed)?;
@@ -708,10 +763,10 @@ impl IncomingActor {
                     *self.renegotiating.lock().unwrap_or_else(|p|p.into_inner())=true;
                     let endpoint=self.endpoint.clone();let stopped=self.control.stopped.clone();let renegotiating=self.renegotiating.clone();
                     let flow=flow.clone();
-                    self.outbound.spawn(async move {super::reinvite_client::run(endpoint,invite,&flow,media,stopped,renegotiating).await});
+                    self.outbound.spawn(async move {let result=super::reinvite_client::run(endpoint,invite,&flow,media,stopped,renegotiating).await;(result,upgrade)});
                 },
                 completed=self.outbound.join_next(),if !self.outbound.is_empty()=>{
-                    if !matches!(completed,Some(Ok(Ok(())))){return Err(CallError::CleanupUnconfirmed);}
+                    if !matches!(completed,Some(Ok((Ok(()),_)))){return Err(CallError::CleanupUnconfirmed);}
                 },
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
                 result=async{self.media_start.as_mut().unwrap().await},if self.media_start.is_some()=>self.media_started(result),
@@ -721,14 +776,20 @@ impl IncomingActor {
                         self.bye.take().unwrap().retire().await.map_err(unknown)?;
                     }
                 },
-                event=async{self.reinvite.front_mut().unwrap().server.next().await},if !self.reinvite.is_empty()=>{
-                    let pending=self.reinvite.front().unwrap();
+                event=std::future::poll_fn(|cx|{
+                    for(index,pending)in self.reinvite.iter_mut().enumerate(){
+                        if let std::task::Poll::Ready(event)=pending.server.poll_next(cx){return std::task::Poll::Ready((index,event));}
+                    }
+                    std::task::Poll::Pending
+                }),if !self.reinvite.is_empty()=>{
+                    let(index,event)=event;
+                    let pending=&self.reinvite[index];
                     match event {
                         Some(ack) if ack.method==Method::Ack=>{
                             let id=self.identity.as_ref().unwrap();
                             let sequence=ack.cseq_header().and_then(|h|h.seq()).ok().and_then(|s|i32::try_from(s).ok()).ok_or(CallError::CleanupUnconfirmed)?;
                             if !id.matches(&ack)||sequence!=pending.sequence{continue;}
-                            let pending=self.reinvite.pop_front().unwrap();pending.server.close().await?;
+                            let pending=self.reinvite.remove(index).unwrap();pending.server.close().await?;
                         },
                         Some(cancel) if cancel.method==Method::Cancel=>{pending.server.reply(StatusCode::RequestTerminated,vec![],None).await?;self.end();},
                         Some(_)=>(),None=>return Err(CallError::CleanupUnconfirmed),

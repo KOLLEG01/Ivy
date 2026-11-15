@@ -2,7 +2,6 @@
 //! health publication and identity-bound control-file shutdown.
 use crate::{
     browser::{BrowserOptions, BrowserOwner},
-    browser_path::{BrowserPaths, Platform},
     cdp::RenderInput,
     handlers::Handlers,
     store::DashboardStore,
@@ -14,13 +13,12 @@ use ivy_sdk::{
     service::{ServiceClient, ServiceOptions},
 };
 use std::{
-    collections::BTreeMap,
     ffi::OsString,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -33,23 +31,41 @@ struct HealthWrite {
     detail: JsString,
     generation: Option<u64>,
     reply: Option<oneshot::Sender<IvyResult<()>>>,
+    stop: bool,
+}
+#[derive(Default)]
+struct HealthPending {
+    write: Mutex<Option<HealthWrite>>,
+    notify: Notify,
+    closed: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
-struct HealthQueue(mpsc::UnboundedSender<HealthWrite>);
+struct HealthQueue(Arc<HealthPending>);
 impl HealthQueue {
     fn new(health: Arc<HealthFile>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<HealthWrite>();
+        let pending = Arc::new(HealthPending::default());
+        let worker = pending.clone();
         tokio::spawn(async move {
-            while let Some(write) = rx.recv().await {
-                let result = health
-                    .write(write.ready, write.detail, write.generation)
-                    .await;
-                if let Some(reply) = write.reply {
-                    let _ = reply.send(result);
+            loop {
+                worker.notify.notified().await;
+                loop {
+                    let write = worker.write.lock().unwrap().take();
+                    let Some(write) = write else {
+                        break;
+                    };
+                    let result = health
+                        .write(write.ready, write.detail, write.generation)
+                        .await;
+                    if let Some(reply) = write.reply {
+                        let _ = reply.send(result);
+                    }
+                    if write.stop {
+                        return;
+                    }
                 }
             }
         });
-        Self(tx)
+        Self(pending)
     }
     fn enqueue(
         &self,
@@ -57,19 +73,48 @@ impl HealthQueue {
         detail: JsString,
         generation: Option<u64>,
     ) -> IvyResult<oneshot::Receiver<IvyResult<()>>> {
+        self.submit(ready, detail, generation, false)
+    }
+    fn submit(
+        &self,
+        ready: bool,
+        detail: JsString,
+        generation: Option<u64>,
+        stop: bool,
+    ) -> IvyResult<oneshot::Receiver<IvyResult<()>>> {
+        use std::sync::atomic::Ordering;
+        let mut pending = self.0.write.lock().unwrap();
+        if self.0.closed.load(Ordering::Acquire) {
+            return Err(IvyError::internal());
+        }
+        if stop {
+            self.0.closed.store(true, Ordering::Release);
+        }
         let (tx, rx) = oneshot::channel();
-        self.0
-            .send(HealthWrite {
-                ready,
-                detail,
-                generation,
-                reply: Some(tx),
-            })
-            .map_err(|_| IvyError::internal())?;
+        let write = HealthWrite {
+            ready,
+            detail,
+            generation,
+            reply: Some(tx),
+            stop,
+        };
+        // A bounded latest-state slot replaces obsolete writes. Publication stays
+        // sequential; awaited shutdown is acknowledged only after its disk write.
+        if let Some(previous) = pending.replace(write) {
+            if let Some(reply) = previous.reply {
+                let _ = reply.send(Err(IvyError::internal()));
+            }
+        }
+        self.0.notify.notify_one();
         Ok(rx)
     }
     async fn write(&self, ready: bool, detail: &str, generation: Option<u64>) -> IvyResult<()> {
         self.enqueue(ready, detail.into(), generation)?
+            .await
+            .map_err(|_| IvyError::internal())?
+    }
+    async fn stop(&self) -> IvyResult<()> {
+        self.submit(false, "Dashboards stopped.".into(), None, true)?
             .await
             .map_err(|_| IvyError::internal())?
     }
@@ -108,11 +153,11 @@ impl DashboardRuntime {
             runtime.0.service.stop().await;
             // Each cleanup runs even if a previous step failed.
             let browser = runtime.0.browser.close().await;
-            let health = runtime
-                .0
-                .health
-                .write(false, "Dashboards stopped.", None)
-                .await;
+            if browser.is_ok() {
+                runtime.0.handlers.confirm_retirement();
+                runtime.0.handlers.idle().await;
+            }
+            let health = runtime.0.health.stop().await;
             let value = browser.and(health);
             *result = Some(value.clone());
             runtime.0.stopped.cancel();
@@ -172,36 +217,8 @@ pub async fn start(config: InstanceConfig) -> IvyResult<DashboardRuntime> {
         ));
     }
     let (root, executable) = settings(value.required("settings")?)?;
-    let environment: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .collect();
-    let cwd = std::env::current_dir().map_err(|_| IvyError::internal())?;
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)
-        .ok_or_else(IvyError::internal)?;
-    let package = config.artifact_root().join("node_modules/playwright-core");
-    let browser_path = BrowserPaths {
-        platform: if cfg!(windows) {
-            Platform::Windows
-        } else if cfg!(target_os = "macos") {
-            Platform::Mac
-        } else {
-            Platform::Linux
-        },
-        arm64: cfg!(target_arch = "aarch64"),
-        home: &home,
-        cwd: &cwd,
-        playwright_package: &package,
-        environment: &environment,
-    }
-    .resolve(executable.as_deref())
-    .ok_or_else(IvyError::internal)?;
     let browser = BrowserOwner::new(BrowserOptions {
-        executable: if browser_path.is_absolute() {
-            browser_path
-        } else {
-            cwd.join(browser_path)
-        },
+        executable: executable.unwrap_or_default(),
         artifact_root: config.artifact_root().into(),
         temporary_root: std::env::temp_dir(),
         job_launcher: None,
@@ -211,10 +228,7 @@ pub async fn start(config: InstanceConfig) -> IvyResult<DashboardRuntime> {
         let renderer = renderer.clone();
         Box::pin(async move {
             renderer
-                .render(
-                    RenderInput::new(&html, &data, output.width, output.height, output.mode)?,
-                    cancel,
-                )
+                .render(RenderInput::owned(html, data, output)?, cancel)
                 .await
         })
     }));
@@ -236,12 +250,8 @@ pub async fn start(config: InstanceConfig) -> IvyResult<DashboardRuntime> {
         ("buildId", value.required("buildId")?.clone()),
         ("hiveProtocol", J::Number(1.0)),
     ]);
-    let (reconcile_browser, reconcile_handlers, reconcile_gate, reconcile_base) = (
-        browser.clone(),
-        handlers.clone(),
-        gate.clone(),
-        base.clone(),
-    );
+    let (reconcile_handlers, reconcile_gate, reconcile_base) =
+        (handlers.clone(), gate.clone(), base.clone());
     let mut options = ServiceOptions::new(
         base,
         Arc::new(move || {
@@ -251,8 +261,7 @@ pub async fn start(config: InstanceConfig) -> IvyResult<DashboardRuntime> {
         identity,
         Arc::new(|| Box::pin(async { Ok(crate::registry()) })),
         Arc::new(move |connection| {
-            let (browser, handlers, gate, root, base, node) = (
-                reconcile_browser.clone(),
+            let (handlers, gate, root, base, node) = (
                 reconcile_handlers.clone(),
                 reconcile_gate.clone(),
                 root.clone(),
@@ -270,9 +279,6 @@ pub async fn start(config: InstanceConfig) -> IvyResult<DashboardRuntime> {
                         )
                         .await?;
                 }
-                browser.start().await.map_err(|_| {
-                    IvyError::new("dependency_unavailable", "Chromium startup failed.")
-                })?;
                 let current = gate.lock().unwrap();
                 if current.closed || current.epoch != epoch || connection.signal().is_cancelled() {
                     return Err(IvyError::internal());
@@ -289,49 +295,24 @@ pub async fn start(config: InstanceConfig) -> IvyResult<DashboardRuntime> {
     );
     options.handlers = handlers.map();
     options.heartbeat = Duration::from_secs(2);
-    let (ready_browser, ready_health, ready_gate) = (browser.clone(), health.clone(), gate.clone());
+    let (ready_health, ready_gate) = (health.clone(), gate.clone());
     options.readiness = Some(Arc::new(move |connection| {
-        let (browser, health, gate) = (
-            ready_browser.clone(),
-            ready_health.clone(),
-            ready_gate.clone(),
-        );
+        let (health, gate) = (ready_health.clone(), ready_gate.clone());
         Box::pin(async move {
-            let epoch = gate.lock().unwrap().epoch;
-            if !browser.ready() {
-                let reply = {
-                    let current = gate.lock().unwrap();
-                    if current.closed
-                        || current.epoch != epoch
-                        || connection.signal().is_cancelled()
-                    {
-                        return Err(IvyError::internal());
-                    }
-                    health.enqueue(
-                        false,
-                        "Dashboard image renderer unavailable.".into(),
-                        Some(connection.generation()),
-                    )?
-                };
-                reply.await.map_err(|_| IvyError::internal())??;
-                browser.start().await.map_err(|_| {
-                    IvyError::new("dependency_unavailable", "Chromium startup failed.")
-                })?;
-            }
             let reply = {
                 let current = gate.lock().unwrap();
-                if current.closed || current.epoch != epoch || connection.signal().is_cancelled() {
+                if current.closed || connection.signal().is_cancelled() {
                     return Err(IvyError::internal());
                 }
                 health.enqueue(
-                    browser.ready(),
-                    "Dashboard storage and image renderer ready.".into(),
+                    true,
+                    "Dashboard storage ready.".into(),
                     Some(connection.generation()),
                 )?
             };
             reply.await.map_err(|_| IvyError::internal())??;
             Ok(J::object([
-                ("ready", browser.ready().into()),
+                ("ready", true.into()),
                 ("diagnostics", J::Array(vec![])),
             ]))
         })

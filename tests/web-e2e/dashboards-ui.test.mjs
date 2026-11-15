@@ -13,9 +13,6 @@ test(
   { timeout: 120000 },
   async (t) => {
     const f = await fixture(t);
-    const browserSession = await f.browser.newBrowserCDPSession();
-    const { arguments: [browserExecutable] } = await browserSession.send('Browser.getBrowserCommandLine');
-    await browserSession.detach();
     const config = {
       schemaVersion: 1,
       componentId: "dashboards",
@@ -25,7 +22,7 @@ test(
       publicBaseUrl: f.base + "/",
       dataRoot: join(f.root, "dashboards"),
       credential: fixtureToken,
-      settings: { chromiumExecutable: browserExecutable },
+      settings: { chromiumExecutable: join(f.root, "missing-chromium") },
     };
     const service = await startNativeService(config);
     t.after(() => service.close());
@@ -48,7 +45,7 @@ test(
     });
     await f.page.goto(f.base + "/ui/dashboards-ui/");
     await expect.poll(() => liveSubscriptions).toBeGreaterThan(0);
-    const writes = [];
+    const writes = [], snapshots = [];
     await f.page.route("**/api/v1/rpc", (route) => {
       const request = route.request().postDataJSON();
       if (request.method === "tools.call") {
@@ -59,6 +56,8 @@ test(
           });
         if (request.params.qualifiedName === "dashboards.save")
           writes.push(request.params.arguments);
+        if (request.params.qualifiedName === "dashboards.data")
+          snapshots.push(request.params.arguments);
       }
       return route.continue();
     });
@@ -79,6 +78,10 @@ test(
       await f.page
         .getByLabel(/^(Title|Titel)$/, { exact: true })
         .fill("Dashboard " + width);
+      await f.page.getByRole("tab", { name: /^(Image template|Bildvorlage)$/ }).click();
+      await f.page.getByLabel(/^(SVG image template|SVG-Bildvorlage)$/).fill(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100"><rect width="120" height="100" fill="#246"/></svg>',
+      );
       await f.page
         .getByRole("tab", { name: /^(Metadata & PNG|Metadaten & PNG)$/ })
         .click();
@@ -136,6 +139,9 @@ test(
       rejected.searchParams.set("id", "another-dashboard");
       assert.equal((await fetch(rejected)).status, 404);
       await expect(save).toBeEnabled();
+      const preview = f.page.locator("iframe");
+      await preview.evaluate((frame) => { frame.dataset.retained = "yes"; });
+      const priorSnapshots = snapshots.length;
       await f.page
         .getByLabel(/^(Title|Titel)$/, { exact: true })
         .fill("Updated " + width);
@@ -156,6 +162,9 @@ test(
       await expect(save).toBeEnabled();
       assert.equal(writes.at(-1).id, id);
       assert.equal(writes.at(-1).expectedRevision, 1);
+      await expect.poll(() => snapshots.length).toBeGreaterThan(priorSnapshots);
+      assert.ok(snapshots.at(-1).htmlHash);
+      await expect(preview).toHaveAttribute("data-retained", "yes");
       await expect(open).toHaveAttribute("href", url);
       const unchanged = await fetch(endpoint, {
         headers: { "If-None-Match": etag },

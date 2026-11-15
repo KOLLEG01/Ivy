@@ -5,7 +5,7 @@
     {
       "namespace": "dashboards",
       "description": "HTML dashboards and images",
-      "guideMarkdown": "Use dashboard_list/read/save/delete for CRUD and dashboard_render for PNG images. Keep operationId for retries. HTML runs without Hive credentials or network access. Register dashboard.onUpdate(async ({data, output}) => {...}); data maps source names to object content (or arrays for contractKey sources). output contains mode (interactive/image), width, height and colorMode (color/grayscale/monochrome). Use inline CSS/JS and data URLs. Return a promise from onUpdate for asynchronous drawing. The dashboard refreshes every refreshSeconds (0 disables refresh, minimum 5). Frameless HTML URLs require the normal Hive login. Set imageToken to a random URL-safe token to enable imageUrl: a direct PNG URL requiring no Hive login. It accepts width, height and colorMode. Responses include X-Dashboard-Refresh-Seconds and URL-encoded JSON X-Dashboard-Metadata, including on 304. Additional metadata is editable on the dashboard; imageToken=null disables public image access.",
+      "guideMarkdown": "Use dashboard_list/read/save/delete for CRUD and dashboard_render for PNG images. Keep operationId for retries. HTML runs without Hive credentials or network access. Register dashboard.onUpdate(async ({data, output}) => {...}); data maps source names to object content (or arrays for contractKey sources). output contains mode (interactive/image), width, height and colorMode (color/grayscale/monochrome). Use inline CSS/JS and data URLs. Return a promise from onUpdate for asynchronous drawing. The dashboard refreshes every refreshSeconds (0 disables refresh, minimum 5). Frameless HTML URLs require the normal Hive login. Set imageToken to a random URL-safe token to enable imageUrl: a direct PNG URL requiring no Hive login. It accepts width, height and colorMode. Responses include X-Dashboard-Refresh-Seconds and URL-encoded JSON X-Dashboard-Metadata, including on 304. Additional metadata is editable on the dashboard; imageToken=null disables public image access. Optional image: {svg} selects direct PNG rendering without Chromium. SVG uses escaped Handlebars bindings to data, output and now. Helpers: number(value,digits,locale), finite(value), integer(value), date(value,format,timeZone,locale), sameMonth(value,now), stale(value,now,seconds). Mark text with id, font-size and data-fit-width to shrink to its shaped width. External SVG resources are blocked. Native template errors fail that request without falling back to HTML.",
       "tools": [
         {
           "namespace": "dashboards",
@@ -142,6 +142,24 @@
                             "contractKey"
                           ],
                           "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "objectIds": {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 100,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          },
+                          "required": [
+                            "objectIds"
+                          ],
+                          "additionalProperties": false
                         }
                       ]
                     }
@@ -171,6 +189,20 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "image": {
+                    "type": "object",
+                    "properties": {
+                      "svg": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500000
+                      }
+                    },
+                    "required": [
+                      "svg"
+                    ],
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -282,6 +314,10 @@
               "id": {
                 "type": "string",
                 "minLength": 1
+              },
+              "htmlHash": {
+                "type": "string",
+                "maxLength": 128
               }
             },
             "required": [
@@ -389,6 +425,13 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 128
+              },
+              "head": {
+                "type": "boolean"
+              },
+              "ifNoneMatch": {
+                "type": "string",
+                "maxLength": 8192
               }
             },
             "required": [
@@ -633,6 +676,175 @@
         }
       },
       "specMarkdown": "HTML dashboard with named Hive sources, refresh interval, JSON metadata and optional scoped PNG access token."
+    },
+    {
+      "key": "dashboards/dashboard",
+      "version": "1.2.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "dashboards"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "all"
+        }
+      },
+      "jsonSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "html": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500000
+          },
+          "sources": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "objectId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "objectId"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "contractKey": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "limit": {
+                      "default": 50,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 100
+                    }
+                  },
+                  "required": [
+                    "contractKey"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "objectIds": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 100,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "required": [
+                    "objectIds"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "refreshSeconds": {
+            "default": 5,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400
+          },
+          "metadata": {
+            "default": {},
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {
+              "$ref": "#/$defs/__schema0"
+            }
+          },
+          "imageToken": {
+            "default": null,
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{32,128}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "image": {
+            "type": "object",
+            "properties": {
+              "svg": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500000
+              }
+            },
+            "required": [
+              "svg"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "title",
+          "html",
+          "sources"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "__schema0": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/__schema0"
+                }
+              },
+              {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": {
+                  "$ref": "#/$defs/__schema0"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "specMarkdown": "HTML dashboards with optional declarative SVG image templates. See the Dashboards specification for data bindings, output options and render-time helpers."
     }
   ],
   "requiredContracts": [
@@ -640,10 +852,11 @@
       "key": "dashboards/dashboard",
       "readVersions": [
         "1.0.0",
-        "1.1.0"
+        "1.1.0",
+        "1.2.0"
       ],
       "writeVersions": [
-        "1.1.0"
+        "1.2.0"
       ]
     }
   ]

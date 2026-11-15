@@ -1,3 +1,4 @@
+use crate::voice_rpc::VoiceModels;
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,23 +29,14 @@ impl VoiceSelection {
 
     /// Validate against the advertised catalog, including models unknown to this
     /// build. Stable keypad aliases are not the catalog's allowlist.
-    pub fn validate(&self, models: &IvyJson) -> IvyResult<()> {
-        let model = models
-            .as_array()
-            .ok_or_else(IvyError::internal)?
-            .iter()
-            .find(|item| item.get("model").and_then(IvyJson::as_js_string) == Some(&self.model));
+    pub fn validate(&self, models: &VoiceModels) -> IvyResult<()> {
+        let model = models.entries.iter().find(|item| item.model == self.model);
         let supported = match model {
             None => false,
             Some(model) => model
-                .get("supportedReasoningEfforts")
-                .and_then(IvyJson::as_array)
-                .ok_or_else(IvyError::internal)?
+                .supported_reasoning_efforts
                 .iter()
-                .any(|item| {
-                    item.get("reasoningEffort").and_then(IvyJson::as_js_string)
-                        == Some(&self.reasoning_effort)
-                }),
+                .any(|item| item.reasoning_effort == self.reasoning_effort),
         };
         if supported {
             Ok(())

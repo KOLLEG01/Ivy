@@ -1,9 +1,10 @@
 use super::incoming::{normalize, outcome, receive};
 use super::*;
-use rsipstack::sip::{Method, prelude::*};
+use rsipstack::sip::{Method, Response, SipMessage, prelude::*};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_answer_dto_global_lookup_and_outgoing_attempt_precedence_match_original() {
+    let started_at = chrono::Utc::now().timestamp_millis();
     let (owner, _, routes, params) = actual_owner(42000, 42998);
     let remaining = Arc::new(Remaining::default());
     remaining.close_gate.release();
@@ -69,7 +70,7 @@ async fn native_answer_dto_global_lookup_and_outgoing_attempt_precedence_match_o
             ("steps", n(steps.len())),
         ]),
     );
-    super::dial::compare(&rows, &original, &steps);
+    super::dial::compare_current_calls(&rows, &original, &steps, started_at);
     assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
     assert!(remaining.methods.lock().unwrap().is_empty());
     handler.shutdown().await.unwrap();
@@ -118,8 +119,30 @@ pub(super) async fn send(
     .await
     .unwrap();
 }
+async fn ending_request(
+    peer: &UdpSocket,
+    original: &Response,
+    scenario: &str,
+) -> (rsipstack::sip::Request, std::net::SocketAddr) {
+    loop {
+        let mut bytes = [0; 8192];
+        let (count, remote) =
+            tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+        match SipMessage::try_from(std::str::from_utf8(&bytes[..count]).unwrap()).unwrap() {
+            SipMessage::Request(request) => return (request, remote),
+            // Failure callbacks can delay the original ACK. Only the exact
+            // original final response may repeat before its BYE arrives.
+            SipMessage::Response(response) => assert_eq!(response, *original, "{scenario}"),
+        }
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn original_native_answers_keep_original_media_ack_controls_and_saved_receipts() {
+    let started_at = chrono::Utc::now().timestamp_millis();
+    let mut metadata_checked = 0;
     for scenario in [
         "initial_connected",
         "delayed_connected",
@@ -428,7 +451,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 } else {
                     4000
                 }),
-                crate::sip_host::received(&peer),
+                ending_request(&peer, &final_response, trace_scenario),
             )
             .await
             {
@@ -586,6 +609,16 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 ("physicalAudioOpens", n(0)),
             ]),
         );
+        metadata_checked += super::dial::extend_current_calls(
+            &mut expected,
+            &actual,
+            started_at,
+            chrono::Utc::now().timestamp_millis(),
+        );
         assert_eq!(actual, expected, "{scenario}");
     }
+    assert!(
+        metadata_checked > 0,
+        "Native end metadata was not exercised"
+    );
 }

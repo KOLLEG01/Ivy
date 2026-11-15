@@ -75,7 +75,10 @@ async function perform(work: () => Promise<void>) {
 }
 async function refresh() {
   if (!node.value) return;
-  const view = await read<TasksView>(node.value, { view: "tasks" });
+  const selected = node.value;
+  const request = ++refreshRequest;
+  const view = await read<TasksView>(selected, { view: "tasks" });
+  if (stopped || selected !== node.value || request !== refreshRequest) return;
   rows.value = view.items;
   limits.value = view.limits;
   loaded.value = true;
@@ -87,11 +90,17 @@ watch(
     editing.value = null;
     if (name === "edit" && id && node.value)
       void perform(async () => {
-        const full = await read<TaskRow & { task: Task }>(node.value, {
+        const selected = node.value;
+        const full = await read<TaskRow & { task: Task }>(selected, {
           view: "task",
           id,
         });
-        editing.value = { task: full.task, revision: full.revision };
+        if (
+          selected === node.value &&
+          section.value === name &&
+          taskId.value === id
+        )
+          editing.value = { task: full.task, revision: full.revision };
       });
   },
   { immediate: true },
@@ -146,7 +155,8 @@ const changeNode = () => {
 
 // Runs finish in the background; poll quickly while one is active and slowly otherwise.
 let timer: ReturnType<typeof setTimeout> | undefined,
-  stopped = false;
+  stopped = false,
+  refreshRequest = 0;
 const poll = () => {
   if (stopped) return;
   timer = setTimeout(

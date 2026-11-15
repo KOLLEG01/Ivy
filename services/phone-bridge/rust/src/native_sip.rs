@@ -1093,8 +1093,9 @@ impl NativeSipOperations {
             return Ok(retained(async move { Ok(json) }));
         }
         let mut negotiated = media.negotiations();
-        media.challenge_codecs(false);
-        expected.0.original.request_codec_upgrade()?;
+        expected.0.original.request_codec_upgrade(|| {
+            media.challenge_codecs(false);
+        })?;
         let original = expected.clone();
         Ok(retained(async move {
             if tokio::time::timeout(std::time::Duration::from_secs(5), negotiated.changed())

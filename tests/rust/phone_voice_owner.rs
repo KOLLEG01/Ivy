@@ -12,9 +12,120 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, DuplexStream};
+#[path = "../fixtures/phone-voice-history.rs"]
+mod history_pages;
 
 fn value(source: &str) -> IvyJson {
     parse(source, 4 * 1024 * 1024).unwrap()
+}
+
+#[test]
+fn transcript_keeps_order_and_deduplication_after_prefix_eviction() {
+    let mut history = Transcript::from_items(&[]).unwrap();
+    for n in 0..1000 {
+        history
+            .segment(
+                &format!("segment-{n}").into(),
+                object([
+                    ("role", "user".into()),
+                    ("text", format!("line-{n}").into()),
+                ]),
+            )
+            .unwrap();
+    }
+    let saved = history.snapshot();
+    assert_eq!(saved.len(), 126);
+    assert_eq!(saved[0].get("text"), Some(&"line-874".into()));
+    assert_eq!(saved[125].get("text"), Some(&"line-999".into()));
+    for n in [800, 999] {
+        history
+            .segment(
+                &format!("segment-{n}").into(),
+                object([("role", "assistant".into()), ("text", "replayed".into())]),
+            )
+            .unwrap();
+    }
+    equal(
+        &IvyJson::Array(history.snapshot()),
+        &IvyJson::Array(saved),
+        "duplicate segments cannot resurrect an evicted prefix",
+    );
+}
+
+#[test]
+fn transcript_enforces_utf8_bytes_and_oversized_latest_entry_semantics() {
+    let entry = |text: String| object([("role", "user".into()), ("text", text.into())]);
+    let mut history = Transcript::from_items(&[entry("old".into())]).unwrap();
+    history.push(entry("🙂".repeat(6000))).unwrap();
+    assert_eq!(history.snapshot().len(), 1);
+    history.push(entry("!".into())).unwrap();
+    assert_eq!(history.snapshot(), vec![entry("!".into())]);
+    history
+        .segment(&"large".into(), entry("x".repeat(24_001)))
+        .unwrap();
+    assert!(history.snapshot().is_empty());
+    history.push(entry("continued".into())).unwrap();
+    history
+        .segment(&"large".into(), entry("duplicate".into()))
+        .unwrap();
+    assert_eq!(history.snapshot(), vec![entry("continued".into())]);
+}
+
+#[test]
+fn delivered_notices_retire_with_the_request_and_ignore_late_replaced_identities() {
+    let mut state = State {
+        input_epoch: "original-epoch".into(),
+        ..State::default()
+    };
+    for n in 0..1000 {
+        let request = NativeRequest {
+            id: 7.0.into(),
+            method: "item/tool/requestUserInput".into(),
+            params: object([
+                ("threadId", "original-thread".into()),
+                ("turnId", format!("turn-{n}").into()),
+            ]),
+        };
+        let token = Inner::token_for(&state.input_epoch, &request)
+            .unwrap()
+            .to_utf8()
+            .unwrap();
+        state
+            .pending_inputs
+            .push((request.id.clone(), PendingInput::new(request.clone())));
+        state.notice_delivered(&request, &token).unwrap();
+        let pending = &mut state.pending_inputs[0].1;
+        pending.replace(request.clone());
+        assert_eq!(
+            pending.notified.as_deref(),
+            Some(token.as_str()),
+            "duplicate native delivery keeps its confirmed notice"
+        );
+        let mut replacement = request.clone();
+        replacement
+            .params
+            .insert("turnId", "next-original-turn".into());
+        pending.replace(replacement.clone());
+        state.notice_delivered(&request, &token).unwrap();
+        assert!(
+            state.pending_inputs[0].1.notified.is_none(),
+            "late delivery cannot mark a reused native ID"
+        );
+        let replacement_token = Inner::token_for(&state.input_epoch, &replacement)
+            .unwrap()
+            .to_utf8()
+            .unwrap();
+        state.input_epoch = format!("next-epoch-{n}").into();
+        state
+            .notice_delivered(&replacement, &replacement_token)
+            .unwrap();
+        assert!(
+            state.pending_inputs[0].1.notified.is_none(),
+            "late old-connection delivery cannot mark the new owner"
+        );
+        state.pending_inputs.clear();
+        assert!(state.pending_inputs.is_empty());
+    }
 }
 fn object<const N: usize>(fields: [(&str, IvyJson); N]) -> IvyJson {
     IvyJson::object(fields)
@@ -604,15 +715,20 @@ async fn task_sessions_recovery_reservations_and_archival_preserve_receipts() {
                         result = object([("thread", thread(&created_id, &cwd, "idle", &[]))]);
                     }
                     "thread/read" => {
-                        result = object([(
-                            "thread",
-                            thread(
-                                &thread_id,
-                                &cwd,
-                                "idle",
-                                turns.get(&thread_id).map_or(&[], |v| v.as_slice()),
-                            ),
-                        )])
+                        result = object([("thread", thread(&thread_id, &cwd, "idle", &[]))])
+                    }
+                    "thread/turns/list" => {
+                        result =
+                            history_pages::turns(turns.get(&thread_id).map_or(&[], Vec::as_slice));
+                    }
+                    "thread/items/list" => {
+                        let turn = turns
+                            .get(&thread_id)
+                            .unwrap()
+                            .iter()
+                            .find(|turn| turn.get("id") == params.get("turnId"))
+                            .unwrap();
+                        result = history_pages::items(turn);
                     }
                     "thread/resume"
                         if peer_name == "continuation-missing" && thread_id == id(100) =>
@@ -1021,5 +1137,174 @@ async fn task_sessions_recovery_reservations_and_archival_preserve_receipts() {
         drop(writer);
         timed(server).await.unwrap();
         journal.close().wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pending_archives_share_pages_preserve_original_receipts_and_yield_to_a_call() {
+    for mode in ["missing", "repeated-cursor", "incoming-call"] {
+        let root = Root::new();
+        let journal = PhoneJournal::open(root.options()).await.unwrap();
+        journal.begin_epoch(id(900)).await.unwrap();
+        let reference = value(include_str!(
+            "../fixtures/phone-journal-voice-owner-cases.json"
+        ));
+        let mut native = reference.as_array().unwrap()[0]
+            .get("payload")
+            .unwrap()
+            .get("settings")
+            .unwrap()
+            .clone();
+        native.insert("projectId", IvyJson::Null);
+        let cwd = native.get("cwd").unwrap().clone();
+        let (connector, mut peers, schemas) = connector_fixture(vec![Plan::with_catalog(value(
+            include_str!("../../specs/native/codex-0.159.2/catalog.json"),
+        ))]);
+        let voice = PhoneCodexVoice::new(
+            VoiceControlSettings {
+                native,
+                artifact_root: "artifacts".into(),
+                data_root: "owned-data".into(),
+                credential: None,
+                paths: node_path::Context {
+                    style: node_path::Style::native(),
+                    cwd: node_path::from_native(&root.0),
+                },
+            },
+            journal.clone(),
+            connector,
+            schemas,
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        timed(voice.0.control.open().wait()).await.unwrap();
+        let mut peer = timed(peers.recv()).await.unwrap();
+        let fingerprint = voice.0.fingerprint().unwrap();
+        let mut originals = Vec::new();
+        for number in 100..=104 {
+            journal
+                .remember_codex_task(&fingerprint, id(number))
+                .await
+                .unwrap();
+            let task = object([
+                ("threadId", id(number).into()),
+                ("operationId", IvyJson::Null),
+            ]);
+            journal
+                .begin_codex_archive(&fingerprint, task, id(number + 300))
+                .await
+                .unwrap();
+            originals.push(object([
+                ("threadId", id(number).into()),
+                ("operationId", id(number + 300).into()),
+            ]));
+        }
+        journal
+            .retain_task(
+                "prepared-phone-voice",
+                object([
+                    ("fingerprint", fingerprint.clone().into()),
+                    ("threadId", id(103).into()),
+                    ("creationOperationId", IvyJson::Null),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let operation = voice.archive();
+        let first = peer.request().await;
+        assert_eq!(first.get("method"), Some(&"thread/list".into()));
+        let params = first.get("params").unwrap();
+        assert_eq!(params.get("archived"), Some(&true.into()));
+        assert_eq!(params.get("useStateDbOnly"), Some(&true.into()));
+        assert_eq!(params.get("cwd"), Some(&cwd));
+        assert!(params.get("cursor").is_none());
+        peer.reply(
+            &first,
+            object([
+                (
+                    "data",
+                    IvyJson::Array(vec![
+                        thread(&id(100), &cwd, "idle", &[]),
+                        thread(&id(999), &cwd, "idle", &[]),
+                    ]),
+                ),
+                ("nextCursor", "page-2".into()),
+            ]),
+        )
+        .await;
+        let second = peer.request().await;
+        assert_eq!(second.get("method"), Some(&"thread/list".into()));
+        assert_eq!(
+            second.get("params").unwrap().get("cursor"),
+            Some(&"page-2".into())
+        );
+        if mode == "incoming-call" {
+            journal.admit_call(incoming(0, &id(900))).await.unwrap();
+        }
+        let rows = if mode == "repeated-cursor" {
+            vec![thread(&id(101), &cwd, "idle", &[])]
+        } else {
+            vec![
+                thread(&id(101), &cwd, "idle", &[]),
+                thread(&id(102), &cwd, "idle", &[]),
+                thread(&id(103), &cwd, "idle", &[]),
+            ]
+        };
+        peer.reply(
+            &second,
+            object([
+                ("data", IvyJson::Array(rows)),
+                (
+                    "nextCursor",
+                    if mode == "repeated-cursor" {
+                        "page-2".into()
+                    } else {
+                        IvyJson::Null
+                    },
+                ),
+            ]),
+        )
+        .await;
+        timed(operation.wait()).await.unwrap();
+        let finished = match mode {
+            "missing" => 3,
+            "repeated-cursor" => 2,
+            _ => 1,
+        };
+        let remaining = journal
+            .codex_archive_page(&fingerprint, "", 16)
+            .await
+            .unwrap();
+        equal(
+            &IvyJson::Array(remaining),
+            &IvyJson::Array(originals[finished..].to_vec()),
+            &format!("{mode}: unresolved IDs keep their original operation"),
+        );
+        let saved = fingerprint.clone();
+        let retained: Vec<IvyJson> = journal.fixture_db(move |db| {
+            let mut query = db.prepare("SELECT value FROM receipt_archive WHERE kind='codex-voice-archive' AND key LIKE ? ORDER BY key").unwrap();
+            Ok(query.query_map([format!("{saved}:%")], |row| row.get::<_, String>(0)).unwrap().map(|row| value(&row.unwrap())).collect())
+        }).await.unwrap();
+        equal(
+            &IvyJson::Array(retained),
+            &IvyJson::Array(originals[..finished].to_vec()),
+            &format!("{mode}: only original positive receipts are retained"),
+        );
+        timed(voice.close().wait()).await.unwrap();
+        drop(peer);
+        journal.close().wait().await.unwrap();
+        let reopened = PhoneJournal::open(root.options()).await.unwrap();
+        equal(
+            &IvyJson::Array(
+                reopened
+                    .codex_archive_page(&fingerprint, "", 16)
+                    .await
+                    .unwrap(),
+            ),
+            &IvyJson::Array(originals[finished..].to_vec()),
+            &format!("{mode}: restart cannot repeat unresolved archival"),
+        );
+        reopened.close().wait().await.unwrap();
     }
 }

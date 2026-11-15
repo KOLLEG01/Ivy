@@ -23,6 +23,8 @@ function choices(value, fallback, allowed) {
 }
 
 function runtimeAssets(component, root, os) {
+  if (component === 'data-collector') return [{ path: 'services/data-collector/worker.mjs',
+    bytes: readFileSync(regular(root, resolve(root, 'services/data-collector/rust/assets/worker.mjs'))) }];
   if (component === 'host-executor') {
     const assets = (os.includes('win32') ? ['install-windows.ps1', 'bootstrap-maintenance-windows.ps1', 'windows-principal.ps1'] : []).map(name => {
       const path = 'packages/host-runtime/assets/' + name;

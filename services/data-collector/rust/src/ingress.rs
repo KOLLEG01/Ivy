@@ -133,12 +133,10 @@ async fn handle(
         })
         .await?;
     if request.method() != "POST" || row.is_none() {
-        http::drain(request.into_body());
-        return Ok(http::empty(401));
+        return Ok(http::close_response(http::empty(401)));
     }
     if closed.is_cancelled() {
-        http::drain(request.into_body());
-        return Ok(http::empty(503));
+        return Ok(http::close_response(http::empty(503)));
     }
     let input = match http::body(request.into_body(), crate::policy::INPUT_BYTES).await {
         Ok(input) => input,

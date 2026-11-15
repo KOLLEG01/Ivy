@@ -1,4 +1,148 @@
 use ivy_store::{receipts::*, rusqlite::Connection};
+
+fn assert_history_usage(db: &Connection) -> (i64, i64) {
+    let derived: (i64, i64) = db
+        .query_row(
+            "SELECT records,bytes FROM receipt_archive_history_usage WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let canonical: (i64, i64) = db
+        .query_row(
+            "SELECT count(*),COALESCE(sum(length(CAST(a.value AS BLOB))),0)
+         FROM receipt_archive_history h JOIN receipt_archive a ON a.kind=h.kind AND a.key=h.key",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(derived, canonical);
+    derived
+}
+
+#[test]
+fn history_usage_initializes_once_and_follows_other_writers_and_rollback() {
+    use ivy_store::rusqlite::{OpenFlags, params};
+    let uri = format!(
+        "file:ivy-history-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_URI;
+    let db = Connection::open_with_flags(&uri, flags).unwrap();
+    // An existing canonical database, before the derived counter was introduced.
+    db.execute_batch("CREATE TABLE receipt_archive(kind TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(kind,key)) STRICT;
+      CREATE TABLE receipt_archive_usage(id INTEGER PRIMARY KEY,records INTEGER NOT NULL,bytes INTEGER NOT NULL) STRICT;
+      CREATE TABLE receipt_archive_history(sequence INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,key TEXT NOT NULL,UNIQUE(kind,key));
+      INSERT INTO receipt_archive VALUES('k','a','α'),('k','b','😀');
+      INSERT INTO receipt_archive_usage SELECT 1,count(*),sum(length(CAST(value AS BLOB))) FROM receipt_archive;
+      INSERT INTO receipt_archive_history(kind,key) VALUES('k','a');").unwrap();
+    let archive = ReceiptArchive::new(&db, ReceiptLimits::default()).unwrap();
+    assert_eq!(assert_history_usage(&db), (1, 2));
+    // This writer never creates the new helper. The shared SQLite triggers must
+    // still maintain the counter; no per-connection cache is authoritative.
+    let other = Connection::open_with_flags(&uri, flags).unwrap();
+    other
+        .execute(
+            "INSERT INTO receipt_archive_history(kind,key) VALUES('k','b')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(assert_history_usage(&db), (2, 6));
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    other
+        .execute("INSERT INTO receipt_archive VALUES('k','c',?)", ["😀α"])
+        .unwrap();
+    other
+        .execute(
+            "INSERT INTO receipt_archive_history(kind,key) VALUES('k','c')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(assert_history_usage(&other), (3, 12));
+    other.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(assert_history_usage(&db), (2, 6));
+    other
+        .execute(
+            "UPDATE receipt_archive_history SET key='orphan' WHERE key='b'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(assert_history_usage(&db), (1, 2));
+    other
+        .execute(
+            "INSERT INTO receipt_archive VALUES(?,?,?)",
+            params!["k", "orphan", "old owner"],
+        )
+        .unwrap();
+    assert_eq!(assert_history_usage(&db), (2, 11));
+    other
+        .execute("DELETE FROM receipt_archive WHERE key='orphan'", [])
+        .unwrap();
+    other
+        .execute("DELETE FROM receipt_archive_history WHERE key='orphan'", [])
+        .unwrap();
+    assert_eq!(assert_history_usage(&db), (1, 2));
+    archive.release("k", "b").unwrap();
+    assert_eq!(assert_history_usage(&other), (2, 6));
+    ReceiptArchive::new(&other, ReceiptLimits::default()).unwrap();
+    assert_eq!(assert_history_usage(&db), (2, 6));
+}
+
+#[test]
+fn history_limit_reduction_retires_originals_in_order_with_utf8_bytes() {
+    let db = Connection::open_in_memory().unwrap();
+    let large = ReceiptArchive::new(
+        &db,
+        ReceiptLimits {
+            count: 512,
+            bytes: 1024 * 1024,
+        },
+    )
+    .unwrap();
+    let text = |n| format!(r#"{{"phase":"done","blob":"{}","n":{n}}}"#, "😀".repeat(60));
+    for n in 0..256 {
+        large.retain("op", &n.to_string(), &text(n)).unwrap();
+        large.release("op", &n.to_string()).unwrap();
+    }
+    assert_eq!(assert_history_usage(&db).0, 256);
+    let small = ReceiptArchive::new(
+        &db,
+        ReceiptLimits {
+            count: 3,
+            bytes: 700,
+        },
+    )
+    .unwrap();
+    small.release("op", "255").unwrap();
+    assert_eq!(
+        assert_history_usage(&db),
+        (2, (text(254).len() + text(255).len()) as i64)
+    );
+    assert_eq!(small.status().unwrap().records, 2);
+    assert_eq!(small.read("op", "0").unwrap_err().code, "operation_expired");
+    assert_eq!(small.read("op", "254").unwrap(), Some(text(254)));
+    assert_eq!(small.read("op", "255").unwrap(), Some(text(255)));
+    assert_eq!(
+        small.retain("op", "0", &text(0)).unwrap_err().code,
+        "operation_expired"
+    );
+    assert_eq!(
+        small.retain("op", "0", "changed").unwrap_err().code,
+        "receipt_archive_conflict"
+    );
+    db.execute_batch("BEGIN").unwrap();
+    let zero = ReceiptArchive::new(&db, ReceiptLimits { count: 0, bytes: 0 }).unwrap();
+    zero.release("op", "255").unwrap();
+    assert_eq!(assert_history_usage(&db), (0, 0));
+    db.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        assert_history_usage(&db),
+        (2, (text(254).len() + text(255).len()) as i64)
+    );
+    assert_eq!(small.read("op", "255").unwrap(), Some(text(255)));
+}
 #[path = "store-sqlite-compat.rs"]
 mod sqlite_compat;
 #[path = "store-mechanics.rs"]

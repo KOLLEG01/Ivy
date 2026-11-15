@@ -21,7 +21,10 @@ import { parseArgs } from "node:util";
 // The only external effects are append-only marker files inside this fixture.
 const { values } = parseArgs({
   options: Object.fromEntries(
-    ["collector", "hive", "report"].map((key) => [key, { type: "string" }]),
+    ["collector", "hive", "report", "ffmpeg"].map((key) => [
+      key,
+      { type: "string" },
+    ]),
   ),
 });
 for (const key of ["collector", "hive", "report"])
@@ -72,6 +75,7 @@ const report = {
   processes: [],
   nativeProcesses: [],
   operations: [],
+  phases: [],
 };
 const reportPath = resolve(values.report);
 await writeFile(reportPath, JSON.stringify(report) + "\n", {
@@ -120,6 +124,7 @@ await atomicJson(configPath, {
   buildId: build.buildId,
   credential: token,
   settings: {
+    concurrency: 3,
     rootName: "Isolated acceptance results",
     secrets: { INPUT: "isolated-input-token" },
     ingress: { host: "127.0.0.1", port: ingressPort },
@@ -241,11 +246,11 @@ async function openHive() {
         signal: AbortSignal.timeout(15000),
       });
       const value = await response.json();
-      assert.equal(response.status, 200, JSON.stringify(value.error));
       if (value.error)
         throw Object.assign(Error(value.error.message), {
           code: value.error.data?.code,
         });
+      assert.equal(response.status, 200);
       return value.result;
     },
   };
@@ -336,9 +341,9 @@ async function update(input) {
   await atomicJson(reportPath, report);
   return call("update", { ...input, operationId }, operationId);
 }
-async function push(sequence, key) {
+async function push(sequence, key, id = "input") {
   const response = await fetch(
-    `http://127.0.0.1:${ingressPort}/tasks/input/run`,
+    `http://127.0.0.1:${ingressPort}/tasks/${id}/run`,
     {
       method: "POST",
       headers: {
@@ -359,7 +364,7 @@ export default async ({config,state,input,signal}) => {
   const count=(typeof state==='number'?state:0)+1;
   await appendFile(config.marker, JSON.stringify({count,input,tag:config.tag})+'\\n');
   await delay(config.waitMs, undefined, {signal});
-  return {data:{count,input,tag:config.tag},state:count,events:[{name:'observed',payload:{count,tag:config.tag}}]};
+  return {data:{count,input,tag:config.tag,blob:'x'.repeat(config.payloadBytes??0)},state:count,events:[{name:'observed',payload:{count,tag:config.tag}}]};
 };`;
 const task = (id) => ({
   id,
@@ -374,11 +379,166 @@ const task = (id) => ({
     marker: join(root, id + ".jsonl"),
     tag: 1,
     waitMs: id === "periodic" ? 1500 : 0,
+    payloadBytes: id === "input" ? 196608 : 0,
   },
   secretNames: [],
   ...(id === "input" ? { inputSecretName: "INPUT" } : {}),
   retention: { maximumCount: 1000, maximumAgeDays: 7, maximumBytes: 104857600 },
 });
+async function phase(name) {
+  report.phases.push({ name, at: new Date().toISOString(), pid: child.pid });
+  await atomicJson(reportPath, report);
+}
+async function install(value, enabled = false) {
+  const saved = await update({
+    action: "save",
+    expectedRevision: 0,
+    task: value,
+  });
+  await update({
+    action: "activate",
+    jobId: saved.jobId,
+    definitionRevision: 1,
+    expectedRevision: 0,
+    enabled,
+  });
+  await until(() => row(value.id), value.id + " accepted definition");
+  return saved;
+}
+const heldScript = `import {appendFile,access} from 'node:fs/promises';
+import {setTimeout as delay} from 'node:timers/promises';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
+export default async ({config,signal}) => {
+  const ffmpeg=config.ffmpeg?spawn(config.ffmpeg,['-nostdin','-hide_banner','-loglevel','error','-re','-f','lavfi','-i','testsrc=size=64x64:rate=5','-f','null','-'],{stdio:'ignore',windowsHide:true}):null;
+  if(ffmpeg){await once(ffmpeg,'spawn');await delay(300);if(ffmpeg.exitCode!==null)throw Error('FFmpeg exited early');}
+  await appendFile(config.marker,JSON.stringify({phase:'start',pid:process.pid,ppid:process.ppid,ffmpegPid:ffmpeg?.pid,at:Date.now()})+'\\n');
+  while(!(await access(config.gate).then(()=>true,()=>false)))await delay(50,undefined,{signal});
+  if(ffmpeg){const closed=once(ffmpeg,'close');ffmpeg.kill();await closed;}
+  await appendFile(config.marker,JSON.stringify({phase:'end',pid:process.pid,at:Date.now()})+'\\n');
+  return {data:{pid:process.pid}};
+};`;
+function held(id, extra = {}) {
+  return {
+    ...task(id),
+    script: heldScript,
+    intervalSeconds: 0,
+    timeoutSeconds: 60,
+    config: {
+      marker: join(root, id + ".jsonl"),
+      gate: join(root, id + ".gate"),
+      ...extra,
+    },
+  };
+}
+async function alive(pid) {
+  if (process.platform === "linux") {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+    if (!stat || stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z "))
+      return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    throw error;
+  }
+}
+async function slotsAndTrees() {
+  await phase("idle");
+  await delay(5000);
+  const ffmpeg = values.ffmpeg ? resolve(values.ffmpeg) : undefined;
+  await install(held("slot-1", { ffmpeg }));
+  await install({ ...held("slot-2"), inputSecretName: "INPUT" }, true);
+  const scheduled = await install({ ...held("slot-3"), intervalSeconds: 10 });
+  await install(held("slot-4"));
+  const first = await update({ action: "run", id: "slot-1" });
+  const second = await push(1, "slot-input", "slot-2");
+  await update({
+    action: "activate",
+    jobId: scheduled.jobId,
+    definitionRevision: 1,
+    expectedRevision: 1,
+    enabled: true,
+  });
+  await until(
+    async () =>
+      (await Promise.all([1, 2, 3].map((n) => markers("slot-" + n)))).every(
+        (rows) => rows.length === 1,
+      ),
+    "three actual workers",
+  );
+  const fourth = await update({ action: "run", id: "slot-4" });
+  await assert.rejects(
+    update({ action: "run", id: "slot-1" }),
+    (error) => error.code === "task_busy",
+  );
+  await phase("three-slots");
+  await delay(5000);
+  assert.equal((await markers("slot-4")).length, 0);
+  const queued = runs("queued").find((run) => run.id === fourth.runId);
+  assert.ok(queued, "fourth run stays in SQLite without a worker");
+  assert.equal(queued.workerJobName ?? null, null);
+  assert.equal(runs("running").length, 3);
+  await writeFile(join(root, "slot-1.gate"), "release");
+  await until(
+    async () => (await markers("slot-4")).length === 1,
+    "fourth worker replaces the first",
+  );
+  for (const n of [2, 3, 4])
+    await writeFile(join(root, `slot-${n}.gate`), "release");
+  await until(
+    () => active() === 0 && runs("publishing").length === 0,
+    "all controlled workers finish",
+  );
+  await update({ action: "disable", id: "slot-3", expectedRevision: 1 });
+  report.slots = {
+    first,
+    second,
+    fourth,
+    workers: await Promise.all(
+      [1, 2, 3, 4].map(async (n) => ({
+        id: "slot-" + n,
+        markers: await markers("slot-" + n),
+      })),
+    ),
+  };
+  if (!ffmpeg) return;
+  for (const action of ["timeout", "cancel"]) {
+    const id = "tree-" + action;
+    await install(
+      {
+        ...held(id, { ffmpeg }),
+        timeoutSeconds: action === "timeout" ? 2 : 60,
+      },
+      true,
+    );
+    const accepted = await update({ action: "run", id });
+    await until(
+      async () => (await markers(id)).length === 1,
+      "FFmpeg tree starts",
+    );
+    const marker = (await markers(id))[0];
+    assert.ok(await alive(marker.pid));
+    assert.ok(await alive(marker.ffmpegPid));
+    if (action === "cancel")
+      await update({ action: "disable", id, expectedRevision: 1 });
+    await until(
+      () =>
+        runs(action === "cancel" ? "cancelled" : "failed").some(
+          (run) => run.id === accepted.runId,
+        ),
+      "tree " + action,
+    );
+    await until(
+      async () =>
+        !(await alive(marker.pid)) && !(await alive(marker.ffmpegPid)),
+      "owned Node and FFmpeg terminated",
+    );
+    (report.trees ??= []).push({ action, runId: accepted.runId, ...marker });
+  }
+}
 try {
   await openHive();
   await launch();
@@ -386,6 +546,8 @@ try {
   db = new DatabaseSync(join(dataRoot, "data-collector.sqlite"), {
     readOnly: true,
   });
+  await slotsAndTrees();
+  await phase("ordinary");
   const saved = {};
   for (const id of ["periodic", "input"]) {
     saved[id] = await update({
@@ -407,8 +569,10 @@ try {
       (await markers("periodic")).length >= 1 && runs("running").length > 0,
     "an actual worker starts online",
   );
+  await delay(5000);
   await server.close();
   server = null;
+  await phase("outage");
   const before = (await markers("periodic")).length;
   const firstInput = await push(1, "input-one");
   assert.deepEqual(await push(1, "input-one"), firstInput);
@@ -439,6 +603,26 @@ try {
     () => row("input").state === 2 && active() === 0,
     "HTTP input executes while Hive stays unavailable",
   );
+  for (let sequence = 3; sequence <= 130; sequence++) {
+    await push(sequence, "backlog-" + sequence);
+    await until(
+      () =>
+        row("input").state === sequence &&
+        !db
+          .prepare(
+            "SELECT 1 FROM runs WHERE task_id='input' AND status IN ('queued','running') LIMIT 1",
+          )
+          .get(),
+      "durable backlog input " + sequence,
+    );
+  }
+  assert.ok(
+    db
+      .prepare("SELECT COUNT(*) AS count FROM runs WHERE status='publishing'")
+      .get().count >= 130,
+  );
+  await phase("backlog-held");
+  await delay(5000);
   report.offline = {
     periodicBeforeRestart: beforeRestart,
     periodicAfterRestart: row("periodic").state,
@@ -447,21 +631,32 @@ try {
   };
   await openHive();
   await ready();
+  await phase("backlog-drain");
   await until(
     () => runs("publishing").length === 0 && active() === 0,
     "outbox drains after Hive epoch change",
+    180000,
   );
   const selected = await read({
     view: "definition",
     jobId: saved.periodic.jobId,
   });
-  await update({
-    action: "activate",
-    jobId: saved.periodic.jobId,
-    definitionRevision: 1,
-    expectedRevision: selected.assignment.revision.revision,
-    enabled: false,
-  });
+  await until(async () => {
+    try {
+      await update({
+        action: "activate",
+        jobId: saved.periodic.jobId,
+        definitionRevision: 1,
+        expectedRevision: selected.assignment.revision.revision,
+        enabled: false,
+        onlyWhenIdle: true,
+      });
+      return true;
+    } catch (error) {
+      if (error.code === "task_busy") return false;
+      throw error;
+    }
+  }, "pause automatic admission without cancelling a marker write");
   await until(
     () => active() === 0 && runs("publishing").length === 0,
     "periodic acceptance fixture is paused",
@@ -477,18 +672,29 @@ try {
     const result = await read({ view: "result", id });
     assert.equal(result.content.value.data.count, effects.length);
   }
-  const events = await client.request("events.read", {
-    afterSequence: 0,
-    filter: { topics: ["data-collector.event"] },
-    limit: 100,
-  });
+  const events = { items: [] };
+  let afterSequence = 0;
+  while (true) {
+    const page = await client.request("events.read", {
+      afterSequence,
+      filter: { topics: ["data-collector.event"] },
+      limit: 100,
+    });
+    events.items.push(...page.items);
+    if (!page.hasMore) break;
+    assert.ok(page.throughSequence > afterSequence);
+    afterSequence = page.throughSequence;
+  }
   const completed = runs("succeeded");
-  assert.equal(events.items.length, completed.length);
+  const emitting = completed.filter((run) =>
+    ["periodic", "input"].includes(run.taskId),
+  );
+  assert.equal(events.items.length, emitting.length);
   assert.equal(
     new Set(
       events.items.map((e) => e.payload.runId + ":" + e.payload.eventIndex),
     ).size,
-    completed.length,
+    emitting.length,
   );
   assert.ok(
     pendingBeforeRestart.every((id) => completed.some((r) => r.id === id)),
@@ -593,11 +799,19 @@ try {
   );
   assert.equal(row("periodic").task.enabled, false);
   report.checks = [
+    "three actual workers from schedule, manual and HTTP; fourth has no worker until a slot opens",
+    "same-job overlap rejected",
+    ...(values.ffmpeg
+      ? [
+          "dynamic FFmpeg child, timeout and cancellation retire the complete process tree",
+        ]
+      : []),
     "real interval worker",
     "in-flight completion during Hive outage",
     "subsequently due offline runs",
     "full collector process restart while Hive unavailable",
     "authenticated offline HTTP and durable idempotency",
+    "at least 130 durable pending results and multi-page event recovery",
     "ordered result and event recovery without external marker replay",
     "draft / activation / complete rollback",
     "lost SQLite cache fences resumption; explicit stopped-worker recovery",

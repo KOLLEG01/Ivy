@@ -7,6 +7,9 @@ pub const FRAME_BYTES: usize = 65_536;
 pub const ORDINARY_SLOTS: usize = 32;
 pub const CONTROL_SLOTS: usize = 48;
 pub const MAX_RECEIPTS: usize = 4096;
+pub const MAX_RECEIPT_RESULT_BYTES: usize = FRAME_BYTES - 512;
+pub const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CLEANUP_RECEIPTS: usize = 128;
 pub const LATE_READ_SLOTS: usize = 64;
 pub const LATE_EFFECT_SLOTS: usize = 64;
 
@@ -160,9 +163,12 @@ pub fn has_receipt_capacity(
     if !(1..=MAX_RECEIPTS).contains(&capacity) {
         return false;
     }
-    let required = cleanup_slots.min(128);
-    let reserve = required
+    retained < capacity - receipt_reserve(method, capacity, cleanup_slots)
+}
+
+pub(crate) fn receipt_reserve(method: &str, capacity: usize, cleanup_slots: usize) -> usize {
+    cleanup_slots
+        .min(MAX_CLEANUP_RECEIPTS)
         .saturating_sub(if is_cleanup(method) { 4 } else { 0 })
-        .min(capacity - 1);
-    retained < capacity - reserve
+        .min(capacity - 1)
 }

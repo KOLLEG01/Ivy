@@ -44,16 +44,14 @@ async fn failed_launch_removes_only_its_profile_and_remains_unready() {
         job_launcher: None,
     });
     for _ in 0..2 {
-        assert!(owner.start().await.is_err());
+        let error = owner
+            .render(input("<p>unavailable</p>"), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "dependency_unavailable");
         assert!(!owner.ready());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
-    let error = owner
-        .render(input("<p>unavailable</p>"), CancellationToken::new())
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "internal_error");
-    assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
     owner.close().await.unwrap();
     std::fs::remove_dir(root).unwrap();
 }
@@ -62,8 +60,7 @@ async fn failed_launch_removes_only_its_profile_and_remains_unready() {
 #[ignore = "requires pinned isolated Chromium and the built Windows job launcher"]
 async fn owned_browser_cancellation_busy_shutdown_and_restart() {
     let (owner, root) = fixture();
-    owner.start().await.unwrap();
-    assert!(owner.ready());
+    assert!(!owner.ready());
     let clone = owner.clone();
     let request = tokio::spawn(async move {
         clone
@@ -105,43 +102,24 @@ async fn owned_browser_cancellation_busy_shutdown_and_restart() {
     .unwrap();
     assert_eq!(&success[..8], b"\x89PNG\r\n\x1a\n");
 
-    // Browser.close through an independent CDP connection simulates browser loss
-    // while preserving the host owner's process/descendant proof.
-    let profile = std::fs::read_dir(&root)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let active = std::fs::read_to_string(profile.join("DevToolsActivePort")).unwrap();
-    let lines: Vec<_> = active.lines().collect();
-    let (mut browser, mut handler) =
-        chromiumoxide::Browser::connect(format!("ws://127.0.0.1:{}{}", lines[0], lines[1]))
-            .await
-            .unwrap();
-    let pump = tokio::spawn(async move {
-        use futures_util::StreamExt;
-        while handler.next().await.is_some() {}
-    });
-    let _ = browser.close().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while owner.ready() {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
-    pump.abort();
-    owner.start().await.unwrap();
-    assert!(owner.ready());
-    assert!(
-        !profile.exists(),
-        "retired profile removed before replacement"
-    );
+    assert!(!owner.ready());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    // Every following export starts and retires a fresh owned browser tree.
+    let bytes = owner
+        .render(input("<p>second export</p>"), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert!(!owner.ready());
     owner.close().await.unwrap();
     owner.close().await.unwrap();
     assert!(!owner.ready());
-    assert!(owner.start().await.is_err());
+    assert!(
+        owner
+            .render(input("<p>closed</p>"), CancellationToken::new())
+            .await
+            .is_err()
+    );
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     std::fs::remove_dir(root).unwrap();
 }
@@ -151,7 +129,11 @@ async fn owned_browser_cancellation_busy_shutdown_and_restart() {
 async fn shutdown_owns_an_abandoned_launch_and_active_render() {
     let (owner, root) = fixture();
     let clone = owner.clone();
-    let start = tokio::spawn(async move { clone.start().await });
+    let start = tokio::spawn(async move {
+        clone
+            .render(input("<p>abandoned launch</p>"), CancellationToken::new())
+            .await
+    });
     tokio::time::sleep(Duration::from_millis(10)).await;
     start.abort();
     owner.close().await.unwrap();
@@ -159,7 +141,6 @@ async fn shutdown_owns_an_abandoned_launch_and_active_render() {
     std::fs::remove_dir(root).unwrap();
 
     let (owner, root) = fixture();
-    owner.start().await.unwrap();
     let clone = owner.clone();
     let render = tokio::spawn(async move {
         clone

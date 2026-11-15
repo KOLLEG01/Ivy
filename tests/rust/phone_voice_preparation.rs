@@ -2,6 +2,8 @@ use super::*;
 use crate::voice_rpc::control::tests::{Peer, Plan, fixture, hooks};
 use ivy_contracts::json::{canonical, parse};
 use std::sync::{OnceLock, Weak};
+#[path = "../fixtures/phone-voice-history.rs"]
+mod history_pages;
 
 const THREAD: &str = "10000000-0000-4000-8000-000000000001";
 const TURN: &str = "10000000-0000-4000-8000-000000000002";
@@ -200,6 +202,41 @@ fn read_reply(journal: &Journal, turn: Option<IvyJson>) -> IvyJson {
         ]),
     )])
 }
+async fn reply_read(peer: &mut Peer, read: &IvyJson, journal: &Journal, turn: Option<IvyJson>) {
+    assert_eq!(
+        read.get("params").unwrap().get("includeTurns"),
+        Some(&false.into())
+    );
+    peer.reply(read, read_reply(journal, None)).await;
+    let page = peer.request().await;
+    assert_eq!(page.get("method"), Some(&"thread/turns/list".into()));
+    assert_eq!(
+        page.required("params").unwrap().get("itemsView"),
+        Some(&"notLoaded".into())
+    );
+    assert_eq!(
+        page.required("params").unwrap().get("limit"),
+        Some(&16.0.into())
+    );
+    peer.reply(
+        &page,
+        history_pages::turns(&turn.iter().cloned().collect::<Vec<_>>()),
+    )
+    .await;
+    if let Some(turn) = turn.filter(|t| t.get("status") == Some(&"completed".into())) {
+        let page = peer.request().await;
+        assert_eq!(page.get("method"), Some(&"thread/items/list".into()));
+        assert_eq!(
+            page.required("params").unwrap().get("turnId"),
+            turn.get("id")
+        );
+        assert_eq!(
+            page.required("params").unwrap().get("limit"),
+            Some(&16.0.into())
+        );
+        peer.reply(&page, history_pages::items(&turn)).await;
+    }
+}
 fn normalize(value: &IvyJson, new_id: Option<&JsString>) -> IvyJson {
     match value {
         IvyJson::String(text) if Some(text) == new_id => "$new-operation".into(),
@@ -237,6 +274,7 @@ async fn preparation_recovery_and_durable_boundaries_over_native_rpc() {
         let work = preparation.prepare(THREAD.into());
         let mut calls = vec![];
         let mut reads = 0;
+        let mut selected = None;
         for _ in expected.get("calls").unwrap().as_array().unwrap() {
             let request = peer.request().await;
             let method = request.get("method").unwrap().as_str().unwrap();
@@ -272,8 +310,13 @@ async fn preparation_recovery_and_durable_boundaries_over_native_rpc() {
                             assert_eq!(journal.attempts.lock().unwrap().len(), 2);
                         }
                     }
-                    read_reply(&journal, if mode == "unknown" { None } else { Some(turn) })
+                    selected = if mode == "unknown" { None } else { Some(turn) };
+                    read_reply(&journal, None)
                 }
+                "thread/turns/list" => {
+                    history_pages::turns(&selected.iter().cloned().collect::<Vec<_>>())
+                }
+                "thread/items/list" => history_pages::items(selected.as_ref().unwrap()),
                 "turn/start" => {
                     assert_eq!(journal.attempts.lock().unwrap().len(), 1);
                     assert_eq!(
@@ -352,8 +395,7 @@ async fn completed_negative_readiness_is_refreshed_on_the_same_task() {
     );
     negative.insert("items", IvyJson::Array(items));
     assert!(preparation_not_ready(&negative));
-    peer.reply(&read, read_reply(&journal, Some(negative)))
-        .await;
+    reply_read(&mut peer, &read, &journal, Some(negative)).await;
 
     let start = peer.request().await;
     assert_eq!(start.get("method"), Some(&"turn/start".into()));
@@ -385,8 +427,7 @@ async fn completed_negative_readiness_is_refreshed_on_the_same_task() {
     let read = peer.request().await;
     let mut positive = ready(&journal);
     positive.insert("id", next_turn);
-    peer.reply(&read, read_reply(&journal, Some(positive.clone())))
-        .await;
+    reply_read(&mut peer, &read, &journal, Some(positive.clone())).await;
     timed(work.wait()).await.unwrap();
     timed(joined.wait()).await.unwrap();
     assert_eq!(journal.attempts.lock().unwrap().len(), 2);
@@ -395,8 +436,7 @@ async fn completed_negative_readiness_is_refreshed_on_the_same_task() {
     let reused = preparation.prepare(THREAD.into());
     let read = peer.request().await;
     assert_eq!(read.get("method"), Some(&"thread/read".into()));
-    peer.reply(&read, read_reply(&journal, Some(positive)))
-        .await;
+    reply_read(&mut peer, &read, &journal, Some(positive)).await;
     timed(reused.wait()).await.unwrap();
     assert_eq!(journal.attempts.lock().unwrap().len(), 2);
     timed(control.close(Box::pin(async { Ok(()) })).wait())
@@ -489,8 +529,7 @@ async fn dropped_observers_keep_the_original_early_completion_and_acknowledgemen
     let read = peer.request().await;
     assert_eq!(read.get("method"), Some(&"thread/read".into()));
     assert_eq!(journal.attempts.lock().unwrap().len(), 2);
-    peer.reply(&read, read_reply(&journal, Some(ready(&journal))))
-        .await;
+    reply_read(&mut peer, &read, &journal, Some(ready(&journal))).await;
     timed(observer.wait()).await.unwrap();
     assert!(preparation.0.state.lock().unwrap().pending.is_empty());
     timed(control.close(Box::pin(async { Ok(()) })).wait())
@@ -517,7 +556,7 @@ async fn lost_unacknowledged_preparation_is_reconciled_and_never_started_again()
     let mut next = timed(peers.recv()).await.unwrap();
     let read = next.request().await;
     assert_eq!(read.get("method"), Some(&"thread/read".into()));
-    next.reply(&read, read_reply(&journal, None)).await;
+    reply_read(&mut next, &read, &journal, None).await;
     assert_eq!(
         timed(second.wait()).await.err().unwrap().code,
         "phone_voice_prepare_unknown"

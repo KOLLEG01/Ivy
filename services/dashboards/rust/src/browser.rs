@@ -13,7 +13,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -31,9 +31,8 @@ struct Running {
 type Observation = Option<(Arc<CdpRenderer>, Completion)>;
 struct Inner {
     options: BrowserOptions,
-    running: Mutex<Option<Running>>,
+    running: Arc<Mutex<Option<Running>>>,
     observation: SyncMutex<Observation>,
-    render_slot: Arc<Semaphore>,
     closed: AtomicBool,
     shutdown: CancellationToken,
 }
@@ -44,9 +43,8 @@ impl BrowserOwner {
     pub fn new(options: BrowserOptions) -> Self {
         Self(Arc::new(Inner {
             options,
-            running: Mutex::new(None),
+            running: Arc::new(Mutex::new(None)),
             observation: SyncMutex::new(None),
-            render_slot: Arc::new(Semaphore::new(1)),
             closed: AtomicBool::new(false),
             shutdown: CancellationToken::new(),
         }))
@@ -61,54 +59,39 @@ impl BrowserOwner {
                 .as_ref()
                 .is_some_and(|(renderer, process)| renderer.ready() && process.current().is_none())
     }
-    pub async fn start(&self) -> IvyResult<()> {
-        let owner = self.clone();
-        tokio::spawn(async move {
-            let mut running = owner.0.running.lock().await;
-            owner.ensure(&mut running).await.map(|_| ())
-        })
-        .await
-        .map_err(|_| IvyError::internal())?
-    }
     pub async fn render(
         &self,
         input: RenderInput,
         cancel: CancellationToken,
     ) -> IvyResult<Vec<u8>> {
-        let permit = self
+        let mut running = self
             .0
-            .render_slot
+            .running
             .clone()
-            .try_acquire_owned()
+            .try_lock_owned()
             .map_err(|_| RenderError::Busy.into_ivy())?;
+        let cancel = cancel.child_token();
+        let _cancel_on_drop = cancel.clone().drop_guard();
         let owner = self.clone();
-        let (mut tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _permit = permit;
-            let mut running = owner.0.running.lock().await;
             let result = async {
                 if cancel.is_cancelled() || tx.is_closed() {
                     return Err(IvyError::internal());
                 }
                 // Host ownership errors are internal renderer failures on the
                 // existing public surface, not new command/process error codes.
-                let renderer = owner
-                    .ensure(&mut running)
+                let renderer = owner.ensure(&mut running, &cancel).await?;
+                renderer
+                    .render(input, &cancel)
                     .await
-                    .map_err(|_| IvyError::internal())?;
-                tokio::select! {
-                    biased;
-                    _=tx.closed()=>Err(IvyError::internal()),
-                    _=owner.0.shutdown.cancelled()=>Err(IvyError::internal()),
-                    result=renderer.render(input, &cancel)=>result.map_err(RenderError::into_ivy),
-                }
+                    .map_err(RenderError::into_ivy)
             }
             .await;
-            // The CDP lease owns its context after a dropped render observation.
-            // Keep admission until that lease has actually disposed the context.
-            if let Some(current) = running.as_ref().and_then(|r| r.renderer.as_ref()) {
-                current.idle().await;
-            }
+            // A render owns a whole process tree, not a warm shared browser.
+            // Keep the request's render admission until retirement is confirmed.
+            let cleanup = owner.retire(&mut running).await;
+            let result = cleanup.and(result);
             let _ = tx.send(result);
         });
         rx.await.map_err(|_| IvyError::internal())?
@@ -118,6 +101,9 @@ impl BrowserOwner {
     pub async fn close(&self) -> IvyResult<()> {
         self.0.closed.store(true, Ordering::Release);
         self.0.shutdown.cancel();
+        if let Some((renderer, _)) = self.0.observation.lock().unwrap().as_ref() {
+            renderer.cancel();
+        }
         let owner = self.clone();
         tokio::spawn(async move {
             let mut running = owner.0.running.lock().await;
@@ -126,7 +112,11 @@ impl BrowserOwner {
         .await
         .map_err(|_| IvyError::internal())?
     }
-    async fn ensure(&self, running: &mut Option<Running>) -> IvyResult<Arc<CdpRenderer>> {
+    async fn ensure(
+        &self,
+        running: &mut Option<Running>,
+        cancel: &CancellationToken,
+    ) -> IvyResult<Arc<CdpRenderer>> {
         if self.0.closed.load(Ordering::Acquire) {
             return Err(IvyError::internal());
         }
@@ -135,6 +125,17 @@ impl BrowserOwner {
         }
         self.retire(running).await?;
         let options = &self.0.options;
+        let executable = if options.executable.as_os_str().is_empty() {
+            crate::browser_path::resolve_runtime(&options.artifact_root)?
+        } else {
+            options.executable.clone()
+        };
+        if !executable.is_file() {
+            return Err(IvyError::new(
+                "dependency_unavailable",
+                "Chromium is unavailable for this HTML image request.",
+            ));
+        }
         let profile = options
             .temporary_root
             .join(format!("ivy-dashboards-{}", uuid::Uuid::new_v4()));
@@ -158,7 +159,7 @@ impl BrowserOwner {
         let process = process::spawn(
             &command,
             &options.artifact_root,
-            &BTreeMap::from([("$chromium".into(), options.executable.clone())]),
+            &BTreeMap::from([("$chromium".into(), executable)]),
             LaunchContext {
                 job_launcher: options.job_launcher.clone(),
                 environment: browser_environment(),
@@ -209,6 +210,7 @@ impl BrowserOwner {
             }
         };
         let result = tokio::select! {
+            _=cancel.cancelled()=>Err(IvyError::new("cancelled", "Image request cancelled.")),
             _=self.0.shutdown.cancelled()=>Err(IvyError::internal()),
             result=tokio::time::timeout(Duration::from_secs(30),connect)=>result.unwrap_or_else(|_|Err(IvyError::internal())),
         };

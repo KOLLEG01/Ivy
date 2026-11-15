@@ -51,7 +51,9 @@ impl Inner {
     }
     async fn archive_protected(&self, id: &JsString) -> IvyResult<bool> {
         self.works.initialize().await?;
-        if self.works.protected(id)||self.works.observation(id).is_some() {return Ok(true);}
+        if self.works.protected(id) || self.works.observation(id).is_some() {
+            return Ok(true);
+        }
         let fingerprint = self.fingerprint()?;
         Ok(self
             .journal
@@ -122,12 +124,26 @@ impl Inner {
                 .codex_archive_page(&fingerprint, "", 16)
                 .await?;
         }
+        match self.archive_pending(&fingerprint, &tasks).await {
+            Ok(false) => return Ok(()),
+            Ok(true) => (),
+            Err(cause) => self.archive_issue(None, &cause),
+        }
         for task in tasks {
             if !self.archive_idle().await? {
                 return Ok(());
             }
             let id = text(&task, "threadId")?;
             self.state.lock().unwrap().archive_cursor = id.to_utf8()?;
+            // Pending original operations were reconciled together above. A
+            // missing observation never admits another thread/archive request.
+            if task
+                .get("operationId")
+                .and_then(IvyJson::as_js_string)
+                .is_some()
+            {
+                continue;
+            }
             if self.archive_protected(&id).await? {
                 continue;
             }
@@ -140,19 +156,23 @@ impl Inner {
         }
         Ok(())
     }
-    async fn archive_task(
-        &self,
-        fingerprint: &str,
-        task: &IvyJson,
-        id: &JsString,
-    ) -> IvyResult<bool> {
-        if task
-            .get("operationId")
-            .and_then(IvyJson::as_js_string)
-            .is_some()
-        {
+    async fn archive_pending(&self, fingerprint: &str, tasks: &[IvyJson]) -> IvyResult<bool> {
+        let mut pending = BTreeMap::new();
+        for task in tasks {
+            if task
+                .get("operationId")
+                .and_then(IvyJson::as_js_string)
+                .is_none()
+            {
+                continue;
+            }
+            let id = text(task, "threadId")?;
+            if !self.archive_protected(&id).await? {
+                pending.insert(id, task);
+            }
+        }
+        if !pending.is_empty() {
             let mut cursor: Option<JsString> = None;
-            let mut confirmed = false;
             let mut cursors = BTreeSet::new();
             loop {
                 if !self.archive_idle().await? {
@@ -177,14 +197,37 @@ impl Inner {
                 let page = self
                     .archive_call("thread/list", params, Default::default())
                     .await?;
-                if field(&page, "data")?
+                let rows = field(&page, "data")?
                     .as_array()
-                    .ok_or_else(IvyError::internal)?
-                    .iter()
-                    .any(|v| v.get("id") == Some(&id.clone().into()))
-                {
-                    confirmed = true;
-                    break;
+                    .ok_or_else(IvyError::internal)?;
+                require(
+                    rows.len() <= 100,
+                    "phone_voice_archive_unknown",
+                    "Codex archival page exceeds its requested bound.",
+                )?;
+                for row in rows {
+                    let Some(id) = row.get("id").and_then(IvyJson::as_js_string) else {
+                        continue;
+                    };
+                    let Some(task) = pending.get(id) else {
+                        continue;
+                    };
+                    if !self.archive_idle().await? {
+                        return Ok(false);
+                    }
+                    if self.archive_protected(id).await? {
+                        continue;
+                    }
+                    // Finish only the retained original operation. Confirmed
+                    // progress survives a later bad page or arriving call.
+                    self.journal
+                        .finish_codex_archive(fingerprint, (**task).clone())
+                        .await?;
+                    self.forget_selection(id);
+                    pending.remove(id);
+                }
+                if pending.is_empty() {
+                    return Ok(true);
                 }
                 cursor = page
                     .get("nextCursor")
@@ -205,12 +248,7 @@ impl Inner {
                     _ => break,
                 }
             }
-            if confirmed {
-                self.journal
-                    .finish_codex_archive(fingerprint, task.clone())
-                    .await?;
-                self.forget_selection(id);
-            } else {
+            for id in pending.keys() {
                 self.archive_issue(
                     Some(id),
                     &IvyError::new(
@@ -219,8 +257,15 @@ impl Inner {
                     ),
                 );
             }
-            return Ok(true);
         }
+        Ok(true)
+    }
+    async fn archive_task(
+        &self,
+        fingerprint: &str,
+        task: &IvyJson,
+        id: &JsString,
+    ) -> IvyResult<bool> {
         let observed = self.thread(
             &self
                 .archive_call(

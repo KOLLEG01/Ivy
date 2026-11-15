@@ -58,7 +58,7 @@ pub(crate) struct BackendResources {
     pub(crate) journal: Arc<Mutex<NativeJournal>>,
     pub(crate) readiness: BackendReadiness,
     pub(crate) closing: Arc<AtomicBool>,
-    pub(crate) retiring: AtomicBool,
+    pub(crate) retiring: Arc<AtomicBool>,
     pub(crate) interactions: Slot<NativeInteractions>,
     pub(crate) handlers: Slot<HandlerSet>,
     pub(crate) failure: Arc<Mutex<Option<JsString>>>,

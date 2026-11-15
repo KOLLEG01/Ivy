@@ -983,6 +983,43 @@ async fn audio_waiting_and_feedback_pcm_preserve_capture_and_receive_isolation()
     );
 }
 
+#[tokio::test]
+async fn audio_embedded_waiting_pcm_preserves_the_complete_original_cycle() {
+    let route = Arc::new(Route::new());
+    let port = CallAudioPort::new(CALL.into(), Arc::new(Factory::routes(vec![route]))).unwrap();
+    port.prepare(settings(), None, CancellationToken::new())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    port.grant_authority().unwrap();
+    let waiting = CallWaitingAudio::new(port.clone()).unwrap();
+    waiting.begin().unwrap();
+    let generation = waiting.state().generation;
+    let mut output = [0.0_f32; 960];
+    let mut bytes = Vec::with_capacity(384000 * 4);
+    for _ in 0..400 {
+        assert_eq!(waiting.read_captured(&mut output, generation), output.len());
+        for sample in output {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    // Independent PCM16 oracle: the original six seconds followed by its two
+    // seconds of silence, encoded as little-endian f32 at the existing gain.
+    assert_eq!(
+        ivy_contracts::hash::digest(bytes),
+        "sha256:9468da07a483ea13adebf12c05eb76747a73d52202aa1195553e4c884dd142f2"
+    );
+    let first_cycle = parse_announcement(include_bytes!(
+        "../../services/phone-bridge/assets/audio/waiting-marimba.wav"
+    ))
+    .unwrap();
+    waiting.read_captured(&mut output, generation);
+    assert_eq!(&output, &first_cycle[..960]);
+    waiting.end().unwrap();
+    port.close().wait().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audio_screening_repeats_pause_and_bridge_preserve_capture_authority() {
     let bytes = wav(11025, 2, 41);

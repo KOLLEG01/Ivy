@@ -50,6 +50,11 @@ impl AudioQueue {
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
+    /// The realtime owner holds its authority lock until a decoded packet is
+    /// admitted. Revocation discards those unobserved writes and their counters.
+    pub(crate) fn restore_dropped(&mut self, prior: u64) {
+        self.dropped = prior;
+    }
     pub fn underruns(&self) -> u64 {
         self.underruns
     }

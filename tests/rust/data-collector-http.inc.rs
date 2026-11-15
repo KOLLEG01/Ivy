@@ -1,8 +1,5 @@
 use super::{Database, json};
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
-    json::parse,
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use ivy_data_collector::{
     engine::{Engine, RegisterJob, Runner},
     ingress::Ingress,
@@ -42,7 +39,7 @@ impl Runner for NoRunner {
         _: IvyJson,
         _: CancellationToken,
         _: RegisterJob,
-    ) -> ServiceFuture<IvyJson> {
+    ) -> ServiceFuture<model::Output> {
         Box::pin(async { panic!("HTTP does not start a worker directly") })
     }
     fn stopped(&self, _: String, _: String) -> ServiceFuture<bool> {

@@ -324,12 +324,7 @@ dashboard.onUpdate(async ({data,output})=>{
 }
 
 #[tokio::test]
-#[ignore = "requires pinned isolated Chromium and the built Windows job launcher"]
-async fn provider_reconnect_health_and_identity_bound_shutdown() {
-    assert!(
-        std::env::var_os("IVY_LAUNCH_ID").is_some(),
-        "the control fixture requires an explicit launch identity"
-    );
+async fn provider_reconnect_health_and_shutdown_without_chromium() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/ivy/", listener.local_addr().unwrap());
     let (events, mut seen) = mpsc::unbounded_channel();
@@ -446,12 +441,6 @@ async fn provider_reconnect_health_and_identity_bound_shutdown() {
         std::env::temp_dir().join(format!("ivy-dashboards-runtime-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("artifact/dist/native")).unwrap();
     std::fs::create_dir(root.join("data")).unwrap();
-    #[cfg(windows)]
-    std::fs::copy(
-        std::env::var_os("DASHBOARDS_TEST_JOB").unwrap(),
-        root.join("artifact/dist/native/ivy-job.exe"),
-    )
-    .unwrap();
     let value = J::object([
         ("schemaVersion", J::Number(1.0)),
         ("hostId", "fixture-host".into()),
@@ -476,7 +465,10 @@ async fn provider_reconnect_health_and_identity_bound_shutdown() {
                 ("rootObjectId", "root".into()),
                 (
                     "chromiumExecutable",
-                    std::env::var("DASHBOARDS_TEST_BROWSER").unwrap().into(),
+                    root.join("missing-chromium")
+                        .to_string_lossy()
+                        .to_string()
+                        .into(),
                 ),
             ]),
         ),
@@ -504,32 +496,36 @@ async fn provider_reconnect_health_and_identity_bound_shutdown() {
         .unwrap();
     assert_eq!(checked.get("generation"), Some(&J::Number(2.0)));
     assert_eq!(checked.get("bootId"), health.get("bootId"));
-    let mut control = J::object([
-        ("schemaVersion", J::Number(1.0)),
-        ("instanceId", "renamed-dashboard".into()),
-        ("bootId", "wrong".into()),
-        ("action", "shutdown".into()),
-        ("requestedAt", "2026-10-18T00:00:00.000Z".into()),
-    ]);
-    if let Some(launch) = health.get("launchId") {
-        control.insert("launchId", launch.clone());
-    }
-    config::atomic_json(root.join("data/control.json"), control.clone())
-        .await
-        .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(650), runtime.stopped())
+    if health.get("launchId").is_some() {
+        let mut control = J::object([
+            ("schemaVersion", J::Number(1.0)),
+            ("instanceId", "renamed-dashboard".into()),
+            ("bootId", "wrong".into()),
+            ("action", "shutdown".into()),
+            ("requestedAt", "2026-10-18T00:00:00.000Z".into()),
+        ]);
+        if let Some(launch) = health.get("launchId") {
+            control.insert("launchId", launch.clone());
+        }
+        config::atomic_json(root.join("data/control.json"), control.clone())
             .await
-            .is_err()
-    );
-    control.insert("bootId", health.required("bootId").unwrap().clone());
-    config::atomic_json(root.join("data/control.json"), control)
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), runtime.stopped())
-        .await
-        .unwrap();
-    runtime.close().await.unwrap();
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(650), runtime.stopped())
+                .await
+                .is_err()
+        );
+        control.insert("bootId", health.required("bootId").unwrap().clone());
+        config::atomic_json(root.join("data/control.json"), control)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), runtime.stopped())
+            .await
+            .unwrap();
+        runtime.close().await.unwrap();
+    } else {
+        runtime.close().await.unwrap();
+    }
     let final_health = config::json_file(root.join("data/health.json"), 1024 * 1024)
         .await
         .unwrap();

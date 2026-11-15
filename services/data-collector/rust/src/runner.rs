@@ -290,7 +290,7 @@ impl TaskRunner {
         input: IvyJson,
         signal: CancellationToken,
         register: RegisterJob,
-    ) -> IvyResult<IvyJson> {
+    ) -> IvyResult<model::Output> {
         let node = self.node().await?;
         let id = model::text(&task, "id")?;
         let job_name = if cfg!(windows) {
@@ -304,8 +304,19 @@ impl TaskRunner {
         let cwd = self.directory(&id)?;
         fs::create_dir_all(&cwd).await.map_err(io_error)?;
         let dependencies = model::field(&task, "dependencies")?;
-        let hash = digest(stringify(dependencies, usize::MAX)?.as_bytes());
-        let installed = fs::read_to_string(cwd.join("dependencies.sha256"))
+        let source = text_bytes(model::field(&task, "script")?)?;
+        let mut fingerprint = Sha256::new();
+        fingerprint.update((source.len() as u64).to_le_bytes());
+        fingerprint.update(&source);
+        fingerprint.update(stringify(dependencies, usize::MAX)?.as_bytes());
+        let hash: String = fingerprint
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let prepared = cwd.join("revisions").join(&hash);
+        fs::create_dir_all(&prepared).await.map_err(io_error)?;
+        let installed = fs::read_to_string(prepared.join("ready"))
             .await
             .unwrap_or_default();
         if installed != hash {
@@ -315,9 +326,12 @@ impl TaskRunner {
                 ("type", "module".into()),
                 ("dependencies", dependencies.clone()),
             ]);
-            fs::write(cwd.join("package.json"), stringify(&package, usize::MAX)?)
-                .await
-                .map_err(io_error)?;
+            fs::write(
+                prepared.join("package.json"),
+                stringify(&package, usize::MAX)?,
+            )
+            .await
+            .map_err(io_error)?;
             if !dependencies
                 .as_object()
                 .ok_or_else(IvyError::internal)?
@@ -343,24 +357,15 @@ impl TaskRunner {
                     ]
                     .map(OsString::from),
                 );
-                self.execute(&cwd, args, 120000, &signal, &[], job_name.as_ref())
+                self.execute(&prepared, args, 120000, &signal, &[], job_name.as_ref())
                     .await?;
-            } else if !installed.is_empty() {
-                remove_async(cwd.join("node_modules")).await?;
             }
-            fs::write(cwd.join("dependencies.sha256"), hash)
+            write_private(&prepared.join("task.mjs"), &source).await?;
+            fs::write(prepared.join("ready"), &hash)
                 .await
                 .map_err(io_error)?;
         }
         remove_async(cwd.join("result.json")).await?;
-        write_private(
-            &cwd.join("task.mjs"),
-            &text_bytes(model::field(&task, "script")?)?,
-        )
-        .await?;
-        fs::write(cwd.join("worker.mjs"), policy::WORKER)
-            .await
-            .map_err(io_error)?;
         let mut secrets = model::object();
         if let Some(IvyJson::Array(names)) = task.get("secretNames") {
             for name in names {
@@ -420,7 +425,10 @@ impl TaskRunner {
                 &cwd,
                 vec![
                     format!("--max-old-space-size={memory}").into(),
-                    "worker.mjs".into(),
+                    self.artifact_root
+                        .join("dist/services/data-collector/worker.mjs")
+                        .into_os_string(),
+                    prepared.join("task.mjs").into_os_string(),
                 ],
                 timeout_ms,
                 &signal,
@@ -437,7 +445,7 @@ impl TaskRunner {
             let bytes = fs::read(&result_path).await.map_err(io_error)?;
             let output = parse(&String::from_utf8_lossy(&bytes), usize::MAX)
                 .map_err(|_| IvyError::internal())?;
-            let output = schema::parse_schema("outputSchema", &output)?;
+            let output = model::Output::parse(&output)?;
             remove_async(result_path).await?;
             Ok(output)
         }
@@ -456,7 +464,7 @@ impl Runner for TaskRunner {
         input: IvyJson,
         signal: CancellationToken,
         register: RegisterJob,
-    ) -> ServiceFuture<IvyJson> {
+    ) -> ServiceFuture<model::Output> {
         // Runner futures are 'static; retain the immutable launch configuration.
         let runner = Self {
             work_root: self.work_root.clone(),

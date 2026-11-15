@@ -6,6 +6,10 @@ use super::{
     endpoint::DialogFlow,
     invite::{bounded_secret, protected},
 };
+use super::{
+    queue::{self, Priority},
+    retirement::Retirements,
+};
 use rsipstack::{
     dialog::authenticate::{Credential, handle_client_authenticate},
     sip::{
@@ -22,8 +26,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until},
 };
@@ -153,14 +158,16 @@ impl Identity {
 enum Command {
     Hangup(oneshot::Sender<()>),
     Close(oneshot::Sender<Result<(), CallError>>),
-    Control(Transaction),
+    Control(Transaction, OwnedSemaphorePermit),
 }
 
 /// Clones observe/control one actor; abandoning a command waiter cannot abort
 /// signalling or release the original call's cleanup fence.
 #[derive(Clone)]
 pub struct DelayedInvite {
-    commands: mpsc::Sender<Command>,
+    commands: queue::Sender<Command>,
+    response_slots: Arc<Semaphore>,
+    control_slots: Arc<Semaphore>,
     hangup: CancellationToken,
     observation: watch::Receiver<CallObservation>,
     identity: watch::Receiver<Option<Identity>>,
@@ -211,7 +218,10 @@ impl DelayedInvite {
             ),
         }?;
         let hangup = CancellationToken::new();
-        let (commands, receiver) = mpsc::channel(8);
+        let (commands, receiver) = queue::channel(8, 4);
+        let response_slots = Arc::new(Semaphore::new(8));
+        let control_slots = Arc::new(Semaphore::new(2));
+        let retirements = endpoint.retirements();
         let (identity, identity_rx) = watch::channel(None);
         let initial = CallObservation {
             ended_at: None,
@@ -247,6 +257,7 @@ impl DelayedInvite {
             initial_ack: false,
             media_start: None,
             replies: JoinSet::new(),
+            retirements,
             commands: receiver,
             hangup: hangup.clone(),
             hangup_seen: false,
@@ -272,6 +283,8 @@ impl DelayedInvite {
         });
         Ok(Self {
             commands,
+            response_slots,
+            control_slots,
             hangup,
             observation,
             identity: identity_rx,
@@ -290,7 +303,12 @@ impl DelayedInvite {
             return Ok(());
         }
         let (reply, received) = oneshot::channel();
-        if self.commands.send(Command::Hangup(reply)).await.is_err() {
+        if self
+            .commands
+            .send(Command::Hangup(reply), Priority::Control)
+            .await
+            .is_err()
+        {
             return if self.observation().closed {
                 Ok(())
             } else {
@@ -344,10 +362,22 @@ impl DelayedInvite {
         {
             return Err(transaction);
         }
+        let priority = if transaction.original.method == Method::Bye {
+            Priority::Control
+        } else {
+            Priority::Ordinary
+        };
+        let slots = match priority {
+            Priority::Control => &self.control_slots,
+            Priority::Ordinary => &self.response_slots,
+        };
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            return Err(transaction);
+        };
         self.commands
-            .try_send(Command::Control(transaction))
-            .map_err(|error| match error.into_inner() {
-                Command::Control(transaction) => transaction,
+            .try_send(Command::Control(transaction, slot), priority)
+            .map_err(|error| match error {
+                Command::Control(transaction, _) => transaction,
                 _ => unreachable!(),
             })
     }
@@ -368,7 +398,12 @@ impl DelayedInvite {
             return self.wait_stopped().await;
         }
         let (reply, result) = oneshot::channel();
-        if self.commands.send(Command::Close(reply)).await.is_err() {
+        if self
+            .commands
+            .send(Command::Close(reply), Priority::Control)
+            .await
+            .is_err()
+        {
             return if self.observation().closed {
                 self.wait_stopped().await
             } else {
@@ -435,8 +470,9 @@ struct CallActor {
     ack: Option<JoinHandle<(ClientExchange, bool)>>,
     initial_ack: bool,
     media_start: Option<JoinHandle<bool>>,
-    replies: JoinSet<bool>,
-    commands: mpsc::Receiver<Command>,
+    replies: JoinSet<(Transaction, OwnedSemaphorePermit, bool)>,
+    retirements: Arc<Retirements>,
+    commands: queue::Receiver<Command>,
     hangup: CancellationToken,
     hangup_seen: bool,
     remote_ended: bool,
@@ -460,7 +496,11 @@ async fn next(exchange: &mut Option<ClientExchange>) -> Result<Response, SipIoEr
 impl CallActor {
     fn observation(&self) -> CallObservation {
         CallObservation {
-            ended_at: self.observations.borrow().ended_at.or_else(||(self.lifecycle.is_ending() || self.lifecycle.outcome().is_some()&&!self.lifecycle.is_active()).then(||chrono::Utc::now().timestamp_millis())),
+            ended_at: self.observations.borrow().ended_at.or_else(|| {
+                (self.lifecycle.is_ending()
+                    || self.lifecycle.outcome().is_some() && !self.lifecycle.is_active())
+                .then(|| chrono::Utc::now().timestamp_millis())
+            }),
             outcome: self.lifecycle.outcome(),
             phase: self.lifecycle.phase(),
             active: self.lifecycle.is_active(),
@@ -752,7 +792,7 @@ impl CallActor {
         }
         Ok(())
     }
-    fn control(&mut self, mut transaction: Transaction) {
+    fn control(&mut self, mut transaction: Transaction, slot: OwnedSemaphorePermit) {
         let request = &transaction.original;
         if !self
             .identity
@@ -797,14 +837,15 @@ impl CallActor {
             200
         };
         self.replies.spawn(async move {
-            transaction
+            let success = transaction
                 .reply(if status == 200 {
                     StatusCode::OK
                 } else {
                     StatusCode::from(500)
                 })
                 .await
-                .is_ok()
+                .is_ok();
+            (transaction, slot, success)
         });
     }
     async fn retire(&mut self) -> Result<(), SipIoError> {
@@ -831,9 +872,12 @@ impl CallActor {
             }
             tokio::select! {
                 biased;
+                _ = self.hangup.cancelled(), if !self.hangup_seen => {
+                    self.stop();
+                }
                 command = self.commands.recv(), if self.commands_open => {
                     match command {
-                        Some(Command::Control(transaction)) => self.control(transaction),
+                        Some(Command::Control(transaction, slot)) => self.control(transaction, slot),
                         Some(Command::Hangup(reply)) => {
                             self.stop(); self.publish(); let _ = reply.send(());
                         }
@@ -846,9 +890,6 @@ impl CallActor {
                         }
                         None => { self.commands_open = false; self.hangup.cancel(); }
                     }
-                }
-                _ = self.hangup.cancelled(), if !self.hangup_seen => {
-                    self.stop();
                 }
                 _ = async { match self.ring_deadline { Some(deadline) => sleep_until(deadline).await, None => pending().await } } => {
                     self.ring_deadline = None; let actions = self.lifecycle.ring_deadline(); self.apply(actions);
@@ -876,7 +917,11 @@ impl CallActor {
                     let actions = self.lifecycle.media_started(result.unwrap_or(false), self.media.is_closed()).unwrap_or_else(|_| vec![CallAction::Uncertain]); self.apply(actions);
                 }
                 result = self.replies.join_next(), if !self.replies.is_empty() => {
-                    if !matches!(result, Some(Ok(true))) { self.fail(); }
+                    match result {
+                        Some(Ok((original, slot, true))) => { drop(original); drop(slot); }
+                        Some(Ok((original, slot, false))) => { self.retirements.response_failed(original, slot); self.fail(); }
+                        _ => self.fail(),
+                    }
                 }
                 result = next(&mut self.current), if self.listen_invite && self.current.is_some() => {
                     match result { Ok(response) => if self.invite_response(response).await.is_err() { self.listen_invite = false; self.fail(); }, Err(_) => { self.listen_invite = false; self.fail(); } }

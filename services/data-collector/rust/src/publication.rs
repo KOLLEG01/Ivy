@@ -2,7 +2,7 @@
 //! One mutable publisher belongs to the engine's retained publication future;
 //! its request cancellation must be signalled before that future is joined.
 use crate::{model, policy, store_owner::StoreOwner};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome, json::canonical};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome};
 use ivy_sdk::{
     operation_ids::scoped_operation_id,
     rpc::{RequestOptions, RpcClient},
@@ -110,11 +110,17 @@ impl Publisher {
         options: RequestOptions,
         closing: &CancellationToken,
     ) -> IvyResult<()> {
-        let pending = self.store.call(|s| s.runs("publishing")).await?;
-        for mut run in pending {
+        loop {
             if closing.is_cancelled() || options.cancellation.is_cancelled() {
                 break;
             }
+            let Some(mut run) = self
+                .store
+                .call(|s| Ok(s.next_runs("publishing", 1)?.pop()))
+                .await?
+            else {
+                break;
+            };
             if let Err(error) = self
                 .publish(&mut run, client.clone(), options.clone())
                 .await
@@ -133,7 +139,19 @@ impl Publisher {
                     text.extend(error.code_js().0);
                     run.insert("error", IvyJson::String(ivy_contracts::JsString(text)));
                 }
-                self.store.call(move |s| s.save_run(&run)).await?;
+                self.store
+                    .call(move |s| {
+                        if model::text(&run, "status")? == "publishing" {
+                            s.publication_progress(
+                                &model::sqlite_key(model::field(&run, "id")?)?,
+                                model::number(&run, "eventIndex")? as usize,
+                                model::field(&run, "error")?.clone(),
+                            )
+                        } else {
+                            s.save_run(&run)
+                        }
+                    })
+                    .await?;
                 break;
             }
         }
@@ -163,9 +181,7 @@ impl Publisher {
             .transpose()?
             .unwrap_or(&[])
             .len();
-        for index in 0..event_count {
-            canonical(&policy::event_content(run, index)?, policy::EVENT_BYTES)?;
-        }
+        policy::validate_publication(run, &self.maximum_retention)?;
         let task_id = model::text(run, "taskId")?;
         let row = self.task(&task_id).await?;
         let root =
@@ -223,6 +239,12 @@ impl Publisher {
             .and_then(|v| v.get("content"))
             .filter(|v| v.get("encoding") == Some(&"json".into()))
             .and_then(|v| v.get("value"));
+        let mut result_revision = current
+            .as_ref()
+            .and_then(|v| v.get("revision"))
+            .and_then(|v| v.get("revision"))
+            .cloned()
+            .unwrap_or(IvyJson::Null);
         if previous.and_then(|v| v.get("runId")) != run.get("id") {
             // Run identities may contain UTF-16 strings which cannot be a Rust str.
             let mut label: Vec<u16> = "result:".encode_utf16().collect();
@@ -263,18 +285,17 @@ impl Publisher {
                 .request("objects.write", params, options.clone())
                 .await?;
             binding = Some(model::text(model::field(&written, "object")?, "id")?);
+            result_revision =
+                model::field(model::field(&written, "revision")?, "revision")?.clone();
         }
         let id = task_id.clone();
         self.store
             .call(move |s| {
-                let mut latest = s
-                    .get(&id, false)?
-                    .ok_or_else(|| IvyError::new("not_found", "Collector task not found."))?;
-                latest.insert(
-                    "resultObjectId",
-                    binding.map(IvyJson::from).unwrap_or(IvyJson::Null),
-                );
-                s.save(&latest)
+                s.bind_result(
+                    &id,
+                    &binding.ok_or_else(IvyError::internal)?,
+                    &result_revision,
+                )
             })
             .await?;
         let mut index = model::number(run, "eventIndex")? as usize;
@@ -302,25 +323,13 @@ impl Publisher {
                 .await?;
             index += 1;
             run.insert("eventIndex", IvyJson::Number(index as f64));
-            let saved = run.clone();
-            self.store.call(move |s| s.save_run(&saved)).await?;
+            let id = model::sqlite_key(model::field(run, "id")?)?;
+            self.store
+                .call(move |s| s.publication_progress(&id, index, IvyJson::Null))
+                .await?;
         }
-        let saved = run.clone();
-        let id = task_id.clone();
-        self.store
-            .call(move |s| {
-                let row = s
-                    .get(&id, false)?
-                    .ok_or_else(|| IvyError::new("not_found", "Collector task not found."))?;
-                let mut saved = saved;
-                saved.insert("status", "succeeded".into());
-                saved.insert("error", IvyJson::Null);
-                s.transaction(|s| {
-                    s.save(&row)?;
-                    s.save_run(&saved)
-                })
-            })
-            .await?;
+        let id = model::sqlite_key(model::field(run, "id")?)?;
+        self.store.call(move |s| s.finish_publication(&id)).await?;
         self.retain(&task_id, client, options).await
     }
 

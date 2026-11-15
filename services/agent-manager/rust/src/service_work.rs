@@ -8,12 +8,17 @@ use std::{
 };
 use tokio::sync::watch;
 
+#[cfg(test)]
+#[path = "../../../../tests/rust/agent-service-work.rs"]
+mod tests;
+
 #[path = "service_run.rs"]
 pub(crate) mod run;
 pub use run::AgentRun;
 #[derive(Clone, Copy)]
 enum HandlerKind {
     Request,
+    Read,
     Answer,
     Control,
     Invoke,
@@ -247,6 +252,11 @@ impl AgentWork {
     pub fn handler(&self, handler: ToolHandler) -> ToolHandler {
         self.wrap(handler, HandlerKind::Request)
     }
+    /// Original-state queries remain available while native work drains. They
+    /// settle with answers before the native owner and its storage can retire.
+    pub(crate) fn read_handler(&self, handler: ToolHandler) -> ToolHandler {
+        self.wrap(handler, HandlerKind::Read)
+    }
     /// Answers to an existing native input remain admissible while calls drain.
     pub fn reply_handler(&self, handler: ToolHandler) -> ToolHandler {
         self.wrap(handler, HandlerKind::Answer)
@@ -260,7 +270,12 @@ impl AgentWork {
     fn wrap(&self, handler: ToolHandler, kind: HandlerKind) -> ToolHandler {
         let owner = self.clone();
         Arc::new(move |args, context| {
-            let reply = matches!(kind, HandlerKind::Answer);
+            let reply = matches!(kind, HandlerKind::Answer | HandlerKind::Read)
+                || (matches!(kind, HandlerKind::Invoke)
+                    && args
+                        .get("method")
+                        .and_then(IvyJson::as_js_string)
+                        .is_some_and(ivy_contracts::native_contract::is_read_only_native_method));
             let control = matches!(kind, HandlerKind::Answer | HandlerKind::Control)
                 || (matches!(kind, HandlerKind::Invoke)
                     && args

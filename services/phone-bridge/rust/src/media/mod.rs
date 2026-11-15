@@ -1,3 +1,4 @@
+pub(crate) mod announcement;
 mod audio_frame;
 mod call_audio;
 mod codec_owner;
@@ -45,6 +46,7 @@ pub(crate) use session::ScreeningPreparationError;
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub use windows_route::WindowsAudioFactory;
 
+pub use announcement::{Announcement, WavError, load_announcement, parse_announcement};
 pub use audio_frame::RtpAudioFrames;
 pub use call_audio::{
     AudioAttachmentStatus, AudioDesktopIdentity, AudioMutePolicy, AudioOperation, AudioRoutePermit,
@@ -58,9 +60,7 @@ pub use mute::{
     SystemAudioMuteClock,
 };
 pub use permit::AudioPermit;
-pub use progress_audio::{
-    CallWaitingAudio, ScreeningAudio, WavError, load_announcement, parse_announcement,
-};
+pub use progress_audio::{CallWaitingAudio, ScreeningAudio};
 pub use queue::AudioQueue;
 pub use receive_owner::{ReceiveError, SipReceiveEvents, SipReceiveObservation, SipRtpReceiver};
 pub use resample::PcmResampler;

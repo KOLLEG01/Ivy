@@ -6,12 +6,13 @@ export function fakeSdk() {
   const sdk = { query({ prompt, options }) {
     const queued = [];
     let waiter, closed = false, failure;
-    const entry = { prompt, options, closed: 0, interrupts: 0, steers: [],
+    const entry = { prompt, options, closed: 0, interrupts: 0, inputs: [],
       push(value) { if (waiter) { const next = waiter; waiter = null; next({ value, done: false }); } else queued.push(value); },
       finish(error) { closed = true; failure = error; if (waiter) { const next = waiter; waiter = null; next({ done: true }); } },
       permission(name, input, id = 'tool-use') { return options.canUseTool(name, input, { toolUseID: id, signal: options.abortController.signal }); },
     };
     calls.push(entry);
+    void (async () => { for await (const message of prompt) entry.inputs.push(message); })();
     const query = {
       [Symbol.asyncIterator]() { return this; },
       async next() {
@@ -22,7 +23,7 @@ export function fakeSdk() {
         if (failure) throw failure;
         return value;
       },
-      streamInput(messages) { entry.steers.push(messages); },
+      streamInput() { throw new Error('A finite SDK input stream waits for the first result'); },
       async interrupt() { entry.interrupts++; entry.finish(); },
       close() { entry.closed++; entry.finish(); },
       async supportedModels() {
@@ -49,7 +50,8 @@ export async function check() {
   const receive = (method, params = {}, version = 2) => bridge.receive({ version, id: ++id, method, params });
   const messages = [{ type: 'user', message: { role: 'user', content: 'hello' }, parent_tool_use_id: null, origin: { kind: 'human' } }];
   await receive('query/start', { turnId: 'turn-a', options: { cwd: '/fixture', model: 'sonnet' }, messages, permissionCallback: true });
-  assert.deepEqual(await Array.fromAsync(calls[0].prompt), messages);
+  await new Promise(setImmediate);
+  assert.deepEqual(calls[0].inputs, messages);
   assert.equal(calls[0].options.model, 'sonnet');
   const first = calls[0].permission('Bash', { command: 'fixture' });
   assert.equal(output.at(-1).type, 'permission');
@@ -63,7 +65,7 @@ export async function check() {
     error: { name: 'TypeError', message: 'fixture callback error' } });
   await rejection;
   await receive('query/steer', { turnId: 'turn-a', messages });
-  assert.deepEqual(await Array.fromAsync(calls[0].steers[0]), messages);
+  assert.deepEqual(calls[0].inputs, [...messages, ...messages]);
   const interrupted = calls[0].permission('Edit', { file_path: 'a' }, 'edit');
   await receive('query/interrupt', { turnId: 'turn-a' });
   assert.deepEqual(await interrupted, { behavior: 'deny', message: 'turn already finished' });
@@ -72,7 +74,7 @@ export async function check() {
   assert.equal(calls[0].closed, 1);
   assert.equal(output.filter(v => v.type === 'end' && v.turnId === 'turn-a').length, 1);
   await receive('models', { options: { cwd: '/fixture', persistSession: false, tools: [], mcpServers: {} }, timeoutMs: 30000 });
-  assert.deepEqual(await Array.fromAsync(calls[1].prompt), []);
+  assert.deepEqual(calls[1].inputs, []);
   assert.equal(output.at(-1).result[0].value, 'sonnet');
   assert.equal(calls[1].closed, 1);
   await receive('usage', { options: { cwd: '/fixture' }, timeoutMs: 15000 });
@@ -106,7 +108,7 @@ if (process.argv[2] === '--transport') {
   const { sdk, calls } = fakeSdk();
   const output = eventFlow(value => process.stdout.write(JSON.stringify(value) + '\n'));
   const bridge = session(sdk, output.send, error => process.stdin.destroy(error));
-  const turns = new Map(), ready = new Map();
+  const turns = new Map(), ready = new Map(), initialInputs = new Map();
   let text = '';
   for await (const chunk of process.stdin) {
     text += chunk;
@@ -135,11 +137,14 @@ if (process.argv[2] === '--transport') {
         reply(null); continue;
       }
       if (message.method === 'fixture/inspect') {
-        reply(calls.map(c => ({ tag: c.options.fixtureTag ?? null, closed: c.closed, interrupts: c.interrupts, steers: c.steers.length })));
+        reply(calls.map((c, index) => ({ tag: c.options.fixtureTag ?? null, closed: c.closed, interrupts: c.interrupts, steers: Math.max(0, c.inputs.length - (initialInputs.get(index) ?? 0)) })));
         continue;
       }
       if (message.method === 'fixture/exit') process.exit(7);
-      if (message.method === 'query/start') turns.set(message.params.turnId, calls.length);
+      if (message.method === 'query/start') {
+        turns.set(message.params.turnId, calls.length);
+        initialInputs.set(calls.length, message.params.messages.length);
+      }
       void bridge.receive(message);
       if (message.method === 'query/start') {
         ready.get(message.params.turnId)?.(null); ready.delete(message.params.turnId);

@@ -17,6 +17,26 @@ pub struct DefinitionJournal {
     pub client: Arc<dyn RpcClient>,
     catalog_id: Arc<Mutex<Option<IvyJson>>>,
 }
+pub struct DefinitionHead {
+    pub job_id: IvyJson,
+    pub revision: IvyJson,
+    pub task_id: String,
+    pub name: IvyJson,
+    pub home_node: IvyJson,
+}
+impl DefinitionHead {
+    pub fn from_document(document: &IvyJson) -> IvyResult<Self> {
+        let definition = content(document)?;
+        let task = model::field(definition, "task")?;
+        Ok(Self {
+            job_id: id(document)?.clone(),
+            revision: revision(document)?.clone(),
+            task_id: model::text(task, "id")?,
+            name: model::field(task, "name")?.clone(),
+            home_node: model::field(definition, "homeServiceNodeId")?.clone(),
+        })
+    }
+}
 pub fn content(document: &IvyJson) -> IvyResult<&IvyJson> {
     let value = model::field(document, "content")?;
     require(
@@ -84,36 +104,77 @@ impl DefinitionJournal {
         Ok(IvyJson::String(id))
     }
     pub async fn all(&self, kind: &str) -> IvyResult<Vec<IvyJson>> {
-        let mut items = Vec::new();
-        let mut cursor = None;
-        loop {
-            let mut params = IvyJson::object([
-                ("contractKey", format!("data-collector/{kind}").into()),
-                ("includeContent", true.into()),
-                ("limit", IvyJson::Number(200.0)),
-            ]);
-            if let Some(value) = cursor {
-                params.insert("cursor", value);
-            }
-            let page = self
-                .client
-                .request("objects.query", params, RequestOptions::default())
-                .await?;
-            for item in model::field(&page, "items")?
-                .as_array()
-                .ok_or_else(IvyError::internal)?
-            {
-                let document = item
-                    .get("document")
+        self.query(kind, true, &[])
+            .await?
+            .into_iter()
+            .map(|mut item| {
+                item.remove("document")
                     .filter(|v| !v.is_null())
                     .ok_or_else(|| {
                         IvyError::new(
                             "invalid_frame",
                             "Collector query omitted its pinned document.",
                         )
-                    })?;
-                items.push(document.clone());
+                    })
+            })
+            .collect()
+    }
+    pub async fn definition_heads(&self) -> IvyResult<Vec<DefinitionHead>> {
+        self.query(
+            "definition",
+            false,
+            &[
+                "data:/task/id",
+                "data:/task/name",
+                "data:/homeServiceNodeId",
+            ],
+        )
+        .await?
+        .into_iter()
+        .map(|item| {
+            let values = model::field(&item, "values")?;
+            Ok(DefinitionHead {
+                job_id: model::field(&item, "objectId")?.clone(),
+                revision: model::field(&item, "revision")?.clone(),
+                task_id: model::text(values, "data:/task/id")?,
+                name: model::field(values, "data:/task/name")?.clone(),
+                home_node: model::field(values, "data:/homeServiceNodeId")?.clone(),
+            })
+        })
+        .collect()
+    }
+    async fn query(
+        &self,
+        kind: &str,
+        include_content: bool,
+        select: &[&str],
+    ) -> IvyResult<Vec<IvyJson>> {
+        let mut items = Vec::new();
+        let mut cursor = None;
+        loop {
+            let mut params = IvyJson::object([
+                ("contractKey", format!("data-collector/{kind}").into()),
+                ("includeContent", include_content.into()),
+                ("limit", IvyJson::Number(200.0)),
+            ]);
+            if !select.is_empty() {
+                params.insert(
+                    "select",
+                    IvyJson::Array(select.iter().map(|s| (*s).into()).collect()),
+                );
             }
+            if let Some(value) = cursor {
+                params.insert("cursor", value);
+            }
+            let mut page = self
+                .client
+                .request("objects.query", params, RequestOptions::default())
+                .await?;
+            let batch = page
+                .remove("items")
+                .and_then(IvyJson::into_array)
+                .ok_or_else(IvyError::internal)?;
+            items.extend(batch);
             cursor = page
                 .get("nextCursor")
                 .filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty()))

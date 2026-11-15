@@ -65,6 +65,154 @@ fn run(id: &str, task_id: &str, status: &str) -> IvyJson {
 }
 
 #[test]
+fn metadata_reads_exclude_workload_bodies_and_target_due_jobs() {
+    let db = Database::new();
+    let s = db.open(Limits::default());
+    for index in 0..23 {
+        let id = format!("job-{index:02}");
+        let mut row = task(&id, None);
+        row.get_mut("task")
+            .unwrap()
+            .insert("script", "x".repeat(48_000).into());
+        row.get_mut("task")
+            .unwrap()
+            .insert("intervalSeconds", 60.0.into());
+        row.insert(
+            "definition",
+            IvyJson::object([("jobId", id.clone().into())]),
+        );
+        s.save(&row).unwrap();
+    }
+    let full_bytes = stringify(&IvyJson::Array(s.list(true).unwrap()), usize::MAX)
+        .unwrap()
+        .len();
+    let rows = s.summaries(false).unwrap();
+    let metadata_bytes = stringify(&IvyJson::Array(rows.clone()), usize::MAX)
+        .unwrap()
+        .len();
+    assert_eq!(rows.len(), 23);
+    assert!(full_bytes > 1_100_000 && metadata_bytes < 20_000);
+    assert!(
+        rows.iter()
+            .all(|r| r.get("state").is_none() && r.get("task").unwrap().get("script").is_none())
+    );
+    assert_eq!(
+        s.for_job("job-11").unwrap(),
+        s.summary("job-11", false).unwrap()
+    );
+    assert!(s.due_tasks(999.0).unwrap().is_empty());
+    s.save_run(&run("waiting", "job-11", "queued")).unwrap();
+    let due = s.due_tasks(1000.0).unwrap();
+    assert_eq!(due.len(), 22);
+    assert!(!due.iter().any(|id| id == "job-11"));
+    s.save_run(&run("pending", "job-12", "publishing")).unwrap();
+    assert_eq!(s.run_count("publishing").unwrap(), 1);
+    assert_eq!(s.publication_counts().unwrap()["job-12"], 1);
+    assert!(
+        s.run_status("pending")
+            .unwrap()
+            .unwrap()
+            .get("output")
+            .is_none()
+    );
+}
+
+#[test]
+fn accepted_snapshot_and_journal_counters_survive_edits_rollback_and_restart() {
+    let db = Database::new();
+    fn check(s: &CollectorStore) {
+        for (kind, query) in [
+            (
+                "runs",
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(document AS BLOB))),0) FROM runs",
+            ),
+            (
+                "operations",
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(request AS BLOB))+length(CAST(result AS BLOB))),0) FROM operations",
+            ),
+            (
+                "snapshots",
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(document AS BLOB))),0) FROM task_snapshots",
+            ),
+            (
+                "progress",
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(id AS BLOB))+8+length(CAST(error AS BLOB))),0) FROM run_progress",
+            ),
+            (
+                "definitions",
+                "SELECT COUNT(*),COALESCE(SUM(length(CAST(value AS BLOB))),0) FROM metadata m WHERE key GLOB 'definition-*' AND NOT EXISTS(SELECT 1 FROM retired_operations r WHERE m.key='definition-request:'||r.id)",
+            ),
+        ] {
+            let actual = s
+                .connection()
+                .query_row(query, [], |r| {
+                    Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+                })
+                .unwrap();
+            assert_eq!(s.usage(kind).unwrap(), actual, "{kind}");
+        }
+    }
+    let snapshot;
+    {
+        let s = db.open(Limits {
+            operations: 2,
+            ..Limits::default()
+        });
+        let mut row = task("pinned", None);
+        row.get_mut("task").unwrap().insert(
+            "retention",
+            json(r#"{"maximumCount":10,"maximumAgeDays":7,"maximumBytes":1048576}"#),
+        );
+        row.get_mut("task")
+            .unwrap()
+            .insert("intervalSeconds", 60.0.into());
+        row.insert("state", true.into());
+        s.save(&row).unwrap();
+        ivy_data_collector::cache::ExecutionCache { store: &s }
+            .admit("pinned", "accepted", "request", IvyJson::Null, 100)
+            .unwrap();
+        let accepted = s.run("accepted").unwrap().unwrap();
+        assert!(accepted.get("task").unwrap().get("script").is_none());
+        snapshot = s.execution_task(&accepted).unwrap();
+        assert_eq!(s.execution_state("pinned").unwrap(), true.into());
+        row.get_mut("task")
+            .unwrap()
+            .insert("script", "replacement".into());
+        row.get_mut("task")
+            .unwrap()
+            .insert("config", json(r#"{"new":true}"#));
+        s.save(&row).unwrap();
+        assert_eq!(s.execution_task(&accepted).unwrap(), snapshot);
+        s.set_metadata("definition-request:finished", "request")
+            .unwrap();
+        s.set_metadata("definition-write:finished:script", "value")
+            .unwrap();
+        s.mutate("finished", "finished", 101, |_| Ok(IvyJson::Null))
+            .unwrap();
+        // The accepted operation's receipt is protected by its queued run.
+        s.mutate("next", "next", 102, |_| Ok(IvyJson::Null))
+            .unwrap();
+        check(&s);
+        let usage = s.usage("runs").unwrap();
+        let error = s.transaction::<()>(|s| {
+            s.save_run(&run("rollback", "pinned", "queued"))?;
+            s.set_metadata("definition-write:rollback:x", "discard")?;
+            Err(IvyError::internal())
+        });
+        assert!(error.is_err());
+        assert_eq!(s.usage("runs").unwrap(), usage);
+        check(&s);
+    }
+    let s = db.open(Limits::default());
+    check(&s);
+    assert_eq!(
+        s.execution_task(&s.run("accepted").unwrap().unwrap())
+            .unwrap(),
+        snapshot
+    );
+}
+
+#[test]
 fn reopening_fences_interrupted_work_preserves_named_job_schedule_and_unknown_fields() {
     let db = Database::new();
     {
@@ -107,7 +255,7 @@ fn reopening_fences_interrupted_work_preserves_named_job_schedule_and_unknown_fi
         0
     );
     let tables:i64=s.connection().query_row("SELECT count(*) FROM pragma_table_list WHERE schema='main' AND name NOT LIKE 'sqlite_%' AND strict=0",[],|r|r.get(0)).unwrap();
-    assert_eq!(tables, 6);
+    assert_eq!(tables, 9);
 }
 
 #[test]
@@ -503,37 +651,68 @@ fn dc01_deleted_id_adoption_cannot_bypass_capacity_and_transfer_is_consumed_once
 }
 
 fn scheduled_task() -> IvyJson {
-    json(r#"{"id":"scheduled","name":"Scheduled","enabled":true,"intervalSeconds":86400,"timeoutSeconds":5,"memoryMb":64,"script":"export default()=>({data:null})","dependencies":{},"config":{},"secretNames":[],"retention":{"maximumCount":1000,"maximumAgeDays":7,"maximumBytes":104857600}}"#)
+    json(
+        r#"{"id":"scheduled","name":"Scheduled","enabled":true,"intervalSeconds":86400,"timeoutSeconds":5,"memoryMb":64,"script":"export default()=>({data:null})","dependencies":{},"config":{},"secretNames":[],"retention":{"maximumCount":1000,"maximumAgeDays":7,"maximumBytes":104857600}}"#,
+    )
 }
 
 #[test]
 fn adoption_keeps_due_times_across_maintenance_and_non_interval_edits() {
     use ivy_data_collector::adoption::{Adoption, adopt};
     let settings = ivy_data_collector::schema::parse_schema(
-        "settingsSchema", &json(r#"{"ingress":{"port":8080}}"#),
-    ).unwrap();
+        "settingsSchema",
+        &json(r#"{"ingress":{"port":8080}}"#),
+    )
+    .unwrap();
     for due_at in [2000.0, 90_000_000.0] {
         let db = Database::new();
         let s = db.open(Limits::default());
         let mut task = scheduled_task();
-        let mut desired = json(r#"{"serviceNodeId":"fixture.collector","jobId":"job","enabled":true,"deleted":false,"definitionRevision":1,"rootObjectId":"root","resultObjectId":"result"}"#);
+        let mut desired = json(
+            r#"{"serviceNodeId":"fixture.collector","jobId":"job","enabled":true,"deleted":false,"definitionRevision":1,"rootObjectId":"root","resultObjectId":"result"}"#,
+        );
         let adopt_at = |task: &IvyJson, desired: &IvyJson, revision, now_ms| {
-            adopt(&s, Adoption {
-                task, desired, assignment_id: "assignment", assignment_revision: revision,
-                service_node_id: "fixture.collector", settings: &settings,
-                confirmed_stopped: false, ever_accepted: true, active: false, now_ms,
-            }).unwrap()
+            adopt(
+                &s,
+                Adoption {
+                    task,
+                    desired,
+                    assignment_id: "assignment",
+                    assignment_revision: revision,
+                    service_node_id: "fixture.collector",
+                    settings: &settings,
+                    confirmed_stopped: false,
+                    ever_accepted: true,
+                    active: false,
+                    now_ms,
+                },
+            )
+            .unwrap()
         };
         // First acceptance has no cache, so no earlier worker can exist.
-        assert!(adopt(&s, Adoption {
-            task: &task, desired: &desired, assignment_id: "assignment", assignment_revision: 1.0,
-            service_node_id: "fixture.collector", settings: &settings,
-            confirmed_stopped: false, ever_accepted: false, active: false, now_ms: 1000.0,
-        }).unwrap());
+        assert!(
+            adopt(
+                &s,
+                Adoption {
+                    task: &task,
+                    desired: &desired,
+                    assignment_id: "assignment",
+                    assignment_revision: 1.0,
+                    service_node_id: "fixture.collector",
+                    settings: &settings,
+                    confirmed_stopped: false,
+                    ever_accepted: false,
+                    active: false,
+                    now_ms: 1000.0,
+                }
+            )
+            .unwrap()
+        );
         let mut row = s.get("scheduled", false).unwrap().unwrap();
         assert_eq!(model::number(&row, "nextAt").unwrap(), 86_401_000.0);
         row.insert("nextAt", due_at.into());
         row.insert("state", false.into());
+        row.insert("resultRevision", 42.0.into());
         s.save(&row).unwrap();
         for (revision, enabled) in [(2.0, false), (3.0, true)] {
             desired.insert("enabled", enabled.into());
@@ -542,16 +721,29 @@ fn adoption_keeps_due_times_across_maintenance_and_non_interval_edits() {
             assert_eq!(model::number(&row, "nextAt").unwrap(), due_at);
             assert_eq!(row.get("state"), Some(&IvyJson::Bool(false)));
             assert_eq!(row.get("resultObjectId"), Some(&"result".into()));
+            assert_eq!(row.get("resultRevision"), Some(&42.0.into()));
         }
         task.insert("name", "Renamed".into());
         desired.insert("definitionRevision", 2.0.into());
         assert!(adopt_at(&task, &desired, 4.0, 7000.0));
-        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), due_at);
+        assert_eq!(
+            model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(),
+            due_at
+        );
         task.insert("intervalSeconds", 60.0.into());
         desired.insert("definitionRevision", 3.0.into());
         assert!(adopt_at(&task, &desired, 5.0, 8000.0));
-        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), 68_000.0);
-        assert!(s.runs("queued").unwrap().is_empty(), "Adoption must not replay work");
+        assert_eq!(
+            model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(),
+            68_000.0
+        );
+        assert!(
+            s.runs("queued").unwrap().is_empty(),
+            "Adoption must not replay work"
+        );
+        desired.insert("resultObjectId", "replacement".into());
+        assert!(adopt_at(&task, &desired, 6.0, 9000.0));
+        assert!(s.get("scheduled", false).unwrap().unwrap().get("resultRevision").is_none());
     }
 }
 
@@ -559,48 +751,89 @@ fn adoption_keeps_due_times_across_maintenance_and_non_interval_edits() {
 fn local_updates_keep_due_times_and_deleted_task_reuse_starts_a_new_schedule() {
     use ivy_data_collector::runtime::Runtime;
     let settings = ivy_data_collector::schema::parse_schema(
-        "settingsSchema", &json(r#"{"ingress":{"port":8080}}"#),
-    ).unwrap();
+        "settingsSchema",
+        &json(r#"{"ingress":{"port":8080}}"#),
+    )
+    .unwrap();
     for due_at in [2000.0, 90_000_000.0] {
         let db = Database::new();
         let s = db.open(Limits::default());
-        let runtime = Runtime { store: &s, settings: &settings, root_id: "root" };
-        let update = |args: IvyJson, now_ms| runtime.update(
-            &args, None, now_ms, "2026-01-01T00:00:00.000Z", |_| false, |_| Ok(()),
-        ).unwrap();
+        let runtime = Runtime {
+            store: &s,
+            settings: &settings,
+            root_id: "root",
+        };
+        let update = |args: IvyJson, now_ms| {
+            runtime
+                .update(
+                    &args,
+                    None,
+                    now_ms,
+                    "2026-01-01T00:00:00.000Z",
+                    |_| false,
+                    |_| Ok(()),
+                )
+                .unwrap()
+        };
         let mut task = scheduled_task();
-        let save = |task: &IvyJson, revision, operation: &str| IvyJson::object([
-            ("action", "save".into()), ("operationId", operation.into()),
-            ("expectedRevision", IvyJson::Number(revision)), ("task", task.clone()),
-        ]);
+        let save = |task: &IvyJson, revision, operation: &str| {
+            IvyJson::object([
+                ("action", "save".into()),
+                ("operationId", operation.into()),
+                ("expectedRevision", IvyJson::Number(revision)),
+                ("task", task.clone()),
+            ])
+        };
         update(save(&task, 0.0, "new"), 1000);
         let mut row = s.get("scheduled", false).unwrap().unwrap();
         row.insert("nextAt", due_at.into());
         row.insert("state", false.into());
         row.insert("resultObjectId", "result".into());
+        row.insert("resultRevision", 42.0.into());
         s.save(&row).unwrap();
         for (action, revision) in [("disable", 1.0), ("enable", 2.0)] {
-            update(IvyJson::object([
-                ("action", action.into()), ("operationId", action.into()),
-                ("id", "scheduled".into()), ("expectedRevision", revision.into()),
-            ]), 4000);
+            update(
+                IvyJson::object([
+                    ("action", action.into()),
+                    ("operationId", action.into()),
+                    ("id", "scheduled".into()),
+                    ("expectedRevision", revision.into()),
+                ]),
+                4000,
+            );
             let row = s.get("scheduled", false).unwrap().unwrap();
             assert_eq!(model::number(&row, "nextAt").unwrap(), due_at);
             assert_eq!(row.get("state"), Some(&IvyJson::Bool(false)));
             assert_eq!(row.get("resultObjectId"), Some(&"result".into()));
+            assert_eq!(row.get("resultRevision"), Some(&42.0.into()));
         }
         task.insert("name", "Renamed".into());
         update(save(&task, 3.0, "rename"), 5000);
-        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), due_at);
+        assert_eq!(s.get("scheduled", false).unwrap().unwrap().get("resultRevision"), Some(&42.0.into()));
+        assert_eq!(
+            model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(),
+            due_at
+        );
         task.insert("intervalSeconds", 60.0.into());
         update(save(&task, 4.0, "interval"), 6000);
-        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), 66_000.0);
-        update(json(r#"{"action":"delete","operationId":"delete","id":"scheduled","expectedRevision":5}"#), 7000);
+        assert_eq!(
+            model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(),
+            66_000.0
+        );
+        update(
+            json(
+                r#"{"action":"delete","operationId":"delete","id":"scheduled","expectedRevision":5}"#,
+            ),
+            7000,
+        );
         update(save(&task, 0.0, "recreate"), 8000);
         let row = s.get("scheduled", false).unwrap().unwrap();
         assert_eq!(model::number(&row, "revision").unwrap(), 7.0);
         assert_eq!(model::number(&row, "nextAt").unwrap(), 68_000.0);
         assert_eq!(row.get("state"), Some(&IvyJson::Null));
-        assert!(s.runs("queued").unwrap().is_empty(), "Updates must not replay work");
+        assert!(
+            s.runs("queued").unwrap().is_empty(),
+            "Updates must not replay work"
+        );
     }
 }

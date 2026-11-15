@@ -123,12 +123,10 @@ async fn handle(
         || request.uri().to_string() != "/call"
         || !http::equal(http::bearer(request.headers()).as_bytes(), token.as_bytes())
     {
-        http::drain(request.into_body());
-        return Ok(http::empty(401));
+        return Ok(http::close_response(http::empty(401)));
     }
     if signal.is_cancelled() {
-        http::drain(request.into_body());
-        return Err(IvyError::internal());
+        return Ok(http::close_response(http::empty(503)));
     }
     let value = match http::body(request.into_body(), MCP_BYTES).await {
         Ok(value) => value,

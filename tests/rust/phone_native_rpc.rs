@@ -1,5 +1,5 @@
 use ivy_phone_bridge::{
-    ipc::{FRAME_BYTES, FrameError},
+    ipc::{FRAME_BYTES, FrameError, MAX_RECEIPT_RESULT_BYTES},
     native_rpc::{Admission, NativeOutcome, NativeReceipts, NativeRequest},
 };
 use std::sync::Arc;
@@ -321,6 +321,150 @@ mod rpc_contracts {
             NativeOutcome::result(format!("{exact} ")).error_code(),
             Some("operation_outcome_unknown")
         );
+        assert_eq!(
+            NativeOutcome::error(&"x".repeat(FRAME_BYTES)).error_code(),
+            Some("operation_outcome_unknown")
+        );
+    }
+
+    #[test]
+    fn pending_byte_reservations_preserve_replays_and_release_only_unused_original_bytes() {
+        let limit = MAX_RECEIPT_RESULT_BYTES * 2 + 256;
+        let mut book = NativeReceipts::with_byte_limit(EPOCH.into(), 10, limit).unwrap();
+        let first_request = request("call.dial", Some(OP), "{}", 1);
+        let Admission::Dispatch(Some(first)) = book.admit(&first_request, 0) else {
+            panic!()
+        };
+        let Admission::Dispatch(Some(second)) =
+            book.admit(&request("call.dial", Some(EPOCH), "{}", 2), 0)
+        else {
+            panic!()
+        };
+        assert_eq!(book.usage().reserved_bytes, MAX_RECEIPT_RESULT_BYTES * 2);
+        let third_id = "c0000000-0000-4000-8000-000000000003";
+        let third_request = request("call.dial", Some(third_id), "{}", 3);
+        rejected(book.admit(&third_request, 0), "capacity_exceeded");
+        let Admission::Replay(replay) = book.admit(&first_request, 128) else {
+            panic!()
+        };
+        assert!(Arc::ptr_eq(&first, &replay));
+        rejected(
+            book.admit(&request("call.dial", Some(OP), "{\"changed\":true}", 4), 0),
+            "operation_conflict",
+        );
+        assert!(matches!(
+            book.admit(&request("status", None, "{}", 5), 128),
+            Admission::Dispatch(None)
+        ));
+
+        // A caller may supply a String with much more allocation than content.
+        // The retained original must use only the exact owned payload bytes.
+        let raw = r#"{ "state" : "ready" }"#;
+        let mut oversized_allocation = String::with_capacity(MAX_RECEIPT_RESULT_BYTES * 8);
+        oversized_allocation.push_str(raw);
+        first
+            .complete(NativeOutcome::result(oversized_allocation))
+            .unwrap();
+        assert_eq!(book.usage().retained_bytes, raw.len());
+        assert_eq!(book.usage().reserved_bytes, MAX_RECEIPT_RESULT_BYTES);
+        let before = book.usage();
+        assert!(
+            first
+                .complete(NativeOutcome::error("operation_outcome_unknown"))
+                .is_err()
+        );
+        assert_eq!(book.usage(), before);
+        assert_eq!(replay.outcome().unwrap().result_json(), Some(raw));
+        let Admission::Dispatch(Some(third)) = book.admit(&third_request, 0) else {
+            panic!()
+        };
+        assert_eq!(book.usage().reserved_bytes, MAX_RECEIPT_RESULT_BYTES * 2);
+        let maximum = format!("\"{}\"", "a".repeat(MAX_RECEIPT_RESULT_BYTES - 2));
+        second
+            .complete(NativeOutcome::result(maximum.clone()))
+            .unwrap();
+        third
+            .complete(NativeOutcome::error("invalid_request"))
+            .unwrap();
+        assert_eq!(
+            book.usage().retained_bytes,
+            raw.len() + maximum.len() + "invalid_request".len()
+        );
+        assert_eq!(book.usage().reserved_bytes, 0);
+        assert_eq!(book.len(), 3);
+        assert!(matches!(
+            book.admit(&first_request, 128),
+            Admission::Replay(_)
+        ));
+    }
+
+    #[test]
+    fn byte_capacity_preserves_the_original_per_call_cleanup_headroom() {
+        let mut book =
+            NativeReceipts::with_byte_limit(EPOCH.into(), 10, MAX_RECEIPT_RESULT_BYTES * 5)
+                .unwrap();
+        assert!(matches!(
+            book.admit(&request("call.dial", Some(OP), "{}", 1), 4),
+            Admission::Dispatch(Some(_))
+        ));
+        rejected(
+            book.admit(&request("call.dial", Some(EPOCH), "{}", 2), 4),
+            "capacity_exceeded",
+        );
+        for n in 0..4 {
+            let id = format!("c0000000-0000-4000-8000-{n:012}");
+            assert!(matches!(
+                book.admit(&request("call.release", Some(&id), "{}", n + 3), 4),
+                Admission::Dispatch(Some(_))
+            ));
+        }
+        assert_eq!(book.usage().reserved_bytes, MAX_RECEIPT_RESULT_BYTES * 5);
+        rejected(
+            book.admit(&request("call.release", Some(EPOCH), "{}", 8), 4),
+            "capacity_exceeded",
+        );
+        assert!(matches!(
+            book.admit(&request("heartbeat", None, "{}", 9), 4),
+            Admission::Dispatch(None)
+        ));
+    }
+
+    #[test]
+    fn concurrent_completions_cannot_release_a_reservation_twice_or_replace_the_original() {
+        let mut book =
+            NativeReceipts::with_byte_limit(EPOCH.into(), 10, MAX_RECEIPT_RESULT_BYTES).unwrap();
+        let original = request("call.dial", Some(OP), "{}", 1);
+        let Admission::Dispatch(Some(receipt)) = book.admit(&original, 0) else {
+            panic!()
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let attempts = (0..8)
+            .map(|n| {
+                let receipt = receipt.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    receipt
+                        .complete(NativeOutcome::result(format!("{{\"winner\":{n}}}")))
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts
+                .into_iter()
+                .map(|attempt| attempt.join().unwrap())
+                .filter(|won| *won)
+                .count(),
+            1
+        );
+        let saved = receipt.outcome().unwrap().result_json().unwrap();
+        assert_eq!(book.usage().reserved_bytes, 0);
+        assert_eq!(book.usage().retained_bytes, saved.len());
+        let Admission::Replay(replay) = book.admit(&original, 0) else {
+            panic!()
+        };
+        assert_eq!(replay.outcome().unwrap().result_json(), Some(saved));
     }
 
     /// Native protocol admission is independent of any transport or device.

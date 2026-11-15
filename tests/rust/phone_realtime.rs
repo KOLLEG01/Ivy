@@ -1,5 +1,5 @@
 use super::*;
-use crate::media::{AudioFormat, OpusEncoder, PcmAudioPort, PcmSendPort};
+use crate::media::{AudioFormat, OpusEncoder, PcmAudioPort, PcmAudioState, PcmSendPort};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -590,6 +590,78 @@ mod protocol_tests {
             "permit-race",
             serde_json::json!({"encodedFrames":0,"generation":state.generation,"revokedBeforeEncoding":true}),
         );
+    }
+
+    #[test]
+    fn permit_revoked_after_decode_discards_pcm_without_counting_unadmitted_overflow() {
+        let revoking = Arc::new(AtomicBool::new(false));
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed_revoking = revoking.clone();
+        let observed_checks = checks.clone();
+        let mut core = crate::media::realtime::pcm::Core::new(
+            20,
+            Some(0),
+            Arc::new(move || {
+                !observed_revoking.load(Ordering::Acquire)
+                    || observed_checks.fetch_add(1, Ordering::AcqRel) < 2
+            }),
+        )
+        .unwrap();
+        core.connected = true;
+        core.negotiate(111).unwrap();
+        core.resume().unwrap();
+        let packet = |sequence| crate::media::RtpAudioPacket {
+            sequence,
+            timestamp: u32::from(sequence) * 960,
+            source: 10,
+            payload_type: 111,
+            payload: Pair::encoded(),
+            generation: 0,
+        };
+        // A real, previously admitted overflow must survive the later rollback.
+        core.receive(packet(1)).unwrap();
+        core.receive(packet(2)).unwrap();
+        let status = core.status();
+        assert_eq!(
+            status.get("captureQueuedSamples").unwrap().as_f64(),
+            Some(960.0)
+        );
+        assert_eq!(
+            status.get("captureDroppedSamples").unwrap().as_f64(),
+            Some(960.0)
+        );
+        assert_eq!(core.received_packets, 2);
+
+        // Admission and the decoder's initial authority check pass. The final
+        // check revokes permission after a decoded block has filled the ring.
+        revoking.store(true, Ordering::Release);
+        core.receive(packet(3)).unwrap();
+        assert_eq!(checks.load(Ordering::Acquire), 3);
+        let status = core.status();
+        assert_eq!(
+            status.get("captureQueuedSamples").unwrap().as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            status.get("captureDroppedSamples").unwrap().as_f64(),
+            Some(960.0)
+        );
+        assert_eq!(core.received_packets, 2);
+        assert_eq!(
+            core.state(),
+            PcmAudioState {
+                open: false,
+                generation: 1
+            }
+        );
+
+        // Even a subsequent grant cannot publish samples from the old generation.
+        revoking.store(false, Ordering::Release);
+        let audio =
+            crate::media::realtime::pcm::RealtimeAudio(Arc::new(std::sync::Mutex::new(core)));
+        let mut output = [1.0; 960];
+        assert_eq!(audio.read_captured(&mut output, 1), 0);
+        assert!(output.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

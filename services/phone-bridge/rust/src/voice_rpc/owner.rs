@@ -24,7 +24,9 @@ mod archive;
 pub(super) mod instructions;
 mod sessions;
 mod tasks;
+mod transcript;
 mod work;
+use transcript::Transcript;
 
 #[cfg(test)]
 #[path = "../../../../../tests/rust/phone_voice_owner.rs"]
@@ -53,13 +55,34 @@ struct Session {
     failed: bool,
     realtime_requested: bool,
     started: bool,
-    items: Vec<IvyJson>,
-    transcript_ids: VecDeque<JsString>,
+    items: Transcript,
     speaker_voice_id: Option<JsString>,
 }
 struct PendingSdp {
     result: watch::Sender<Option<IvyResult<JsString>>>,
     timer: AbortHandle,
+}
+struct PendingInput {
+    request: NativeRequest,
+    notified: Option<String>,
+}
+impl PendingInput {
+    fn new(request: NativeRequest) -> Self {
+        Self {
+            request,
+            notified: None,
+        }
+    }
+    fn matches(&self, request: &NativeRequest) -> bool {
+        self.request.id == request.id
+            && self.request.method == request.method
+            && self.request.params == request.params
+    }
+    fn replace(&mut self, request: NativeRequest) {
+        if !self.matches(&request) {
+            *self = Self::new(request);
+        }
+    }
 }
 impl Drop for PendingSdp {
     fn drop(&mut self) {
@@ -76,17 +99,28 @@ struct State {
     sessions: Vec<(JsString, Arc<Mutex<Session>>)>,
     continuations: BTreeMap<JsString, IvyJson>,
     sdps: BTreeMap<JsString, PendingSdp>,
-    pending_inputs: Vec<(IvyJson, NativeRequest)>,
+    pending_inputs: Vec<(IvyJson, PendingInput)>,
     archiving: Option<VoiceControlOperation<()>>,
     archive_cursor: String,
     binding_cursor: String,
     input_epoch: JsString,
     rejoining: BTreeSet<JsString>,
     interrupting: BTreeMap<JsString, VoiceControlOperation<()>>,
-    interrupted: BTreeSet<JsString>,
     observation_retry_at: BTreeMap<JsString, i64>,
-    notified: BTreeSet<String>,
     notifying: BTreeMap<String, VoiceControlOperation<()>>,
+}
+impl State {
+    fn notice_delivered(&mut self, request: &NativeRequest, token: &str) -> IvyResult<()> {
+        if Inner::token_for(&self.input_epoch, request)?.to_utf8()? == token
+            && let Some((_, input)) = self
+                .pending_inputs
+                .iter_mut()
+                .find(|(_, p)| p.matches(request))
+        {
+            input.notified = Some(token.to_owned());
+        }
+        Ok(())
+    }
 }
 struct Inner {
     work_observer: Mutex<Option<WorkObserver>>,
@@ -98,6 +132,11 @@ struct Inner {
     works: crate::voice_work::PhoneVoiceWorks,
     maintenance: tokio::sync::Mutex<()>,
     notify_input: Mutex<Option<work::InputNotice>>,
+}
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.works.wake();
+    }
 }
 #[derive(Clone)]
 pub struct PhoneCodexVoice(Arc<Inner>);
@@ -258,10 +297,10 @@ impl PhoneCodexVoice {
             on_error,
         )
     }
-    pub async fn models(&self) -> IvyResult<IvyJson> {
+    pub async fn models(&self) -> IvyResult<Arc<super::VoiceModels>> {
         self.0.control.models().await
     }
-    pub async fn speaker_voices(&self) -> IvyResult<IvyJson> {
+    pub async fn speaker_voices(&self) -> IvyResult<Arc<super::VoiceSpeakers>> {
         self.0.control.speaker_voices().await
     }
     pub fn speaker_voice(&self, call_id: &JsString) -> Option<JsString> {
@@ -295,11 +334,12 @@ impl PhoneCodexVoice {
         state
             .pending_inputs
             .iter()
-            .filter(|(_, r)| {
+            .map(|(_, input)| &input.request)
+            .filter(|r| {
                 r.params.get("threadId").and_then(IvyJson::as_js_string) == thread_id.as_ref()
             })
             .take(4)
-            .map(|(_, r)| {
+            .map(|r| {
                 let schema = rpc
                     .as_ref()
                     .and_then(|rpc| rpc.rpc.catalog().get("serverRequests"))
@@ -337,7 +377,7 @@ impl PhoneCodexVoice {
             .pending_inputs
             .iter()
             .find(|(k, _)| k == &key)
-            .map(|(_, r)| r.clone());
+            .map(|(_, r)| r.request.clone());
         let session = self.0.session(&call_id);
         let work = self.0.works.for_call(&call_id);
         let thread = session
@@ -408,7 +448,7 @@ impl PhoneCodexVoice {
                                     .pending_inputs
                                     .iter()
                                     .find(|(k, _)| k == &key)
-                                    .map(|(_, r)| r.clone());
+                                    .map(|(_, r)| r.request.clone());
                                 require(
                                     current.as_ref().is_some_and(|r| {
                                         owner.input_token(r).ok().as_ref() == Some(&input_token)
@@ -418,10 +458,14 @@ impl PhoneCodexVoice {
                                 )?;
                                 if let Some(work) = owner.works.for_call(&call_id) {
                                     require(
-                                        owner.works.can_answer(&work) && current.as_ref().is_some_and(|r| {
-                                            r.params.get("threadId") == work.get("threadId")
-                                                && r.params.get("turnId").is_none_or(|turn| turn.is_null() || Some(turn) == work.get("turnId"))
-                                        }),
+                                        owner.works.can_answer(&work)
+                                            && current.as_ref().is_some_and(|r| {
+                                                r.params.get("threadId") == work.get("threadId")
+                                                    && r.params.get("turnId").is_none_or(|turn| {
+                                                        turn.is_null()
+                                                            || Some(turn) == work.get("turnId")
+                                                    })
+                                            }),
                                         "phone_call_cancelled",
                                         "Original Voice deadline expired before submission.",
                                     )?;
@@ -542,6 +586,7 @@ impl Inner {
         s.reconciled.clear();
         s.prepared_selections.clear();
         s.input_epoch = uuid();
+        self.works.wake();
     }
     fn connection_lost(&self, code: &str) {
         self.preparation.connection_lost(code);
@@ -558,6 +603,7 @@ impl Inner {
         state.reconciled.clear();
         state.prepared_selections.clear();
         state.pending_inputs.clear();
+        self.works.wake();
     }
     async fn input(&self, request: NativeRequest) -> IvyResult<()> {
         self.works.initialize().await?;
@@ -579,21 +625,22 @@ impl Inner {
             {
                 return Ok(());
             }
-            require(
-                state.pending_inputs.len() < 64,
-                "phone_voice_input_capacity",
-                "Too many pending Voice inputs.",
-            )?;
             let key = request.id.clone();
             if let Some((_, old)) = state.pending_inputs.iter_mut().find(|(k, _)| k == &key) {
-                *old = request;
+                old.replace(request);
             } else {
-                state.pending_inputs.push((key, request));
+                require(
+                    state.pending_inputs.len() < 64,
+                    "phone_voice_input_capacity",
+                    "Too many pending Voice inputs.",
+                )?;
+                state.pending_inputs.push((key, PendingInput::new(request)));
             }
         }
         if let Some(thread) = thread {
             self.works.waiting(&thread).await?;
         }
+        self.works.wake();
         Ok(())
     }
     async fn notification(&self, notification: NativeNotification) -> IvyResult<()> {
@@ -624,18 +671,13 @@ impl Inner {
                     .find(|(_, s)| &s.lock().unwrap().thread_id == thread_id)
             {
                 let mut s = session.lock().unwrap();
-                if !s.transcript_ids.contains(id) {
-                    s.transcript_ids.push_back(id.clone());
-                    if s.transcript_ids.len() > 512 {
-                        s.transcript_ids.pop_front();
-                    }
-                    let mut items = s.items.clone();
-                    items.push(IvyJson::object([
+                s.items.segment(
+                    id,
+                    IvyJson::object([
                         ("role", field(item, "role")?.clone()),
                         ("text", field(item, "text")?.clone()),
-                    ]));
-                    s.items = bounded_history(&items, 24000, 126)?;
-                }
+                    ]),
+                )?;
             }
         }
         if notification.method == JsString::from("thread/status/changed")

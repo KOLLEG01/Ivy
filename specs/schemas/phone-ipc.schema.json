@@ -423,6 +423,17 @@
         }
       }
     },
+    "ReceiptUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipts", "retainedBytes", "reservedBytes", "limitBytes"],
+      "properties": {
+        "receipts": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "retainedBytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "reservedBytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "limitBytes": { "type": "integer", "minimum": 65024, "maximum": 16777216 }
+      }
+    },
     "Response": {
       "type": "object",
       "additionalProperties": false,
@@ -451,6 +462,7 @@
           "type": "boolean"
         },
         "result": {},
+        "receiptUsage": { "$ref": "#/$defs/ReceiptUsage" },
         "error": {
           "enum": [
             null,

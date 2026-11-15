@@ -3,8 +3,10 @@
 use crate::{
     call_commands::PhoneCallCommands,
     call_logs::PhoneCallLogs,
-    native_client::{PhoneNativeClient, validate_phone},
-    voice_rpc::{PhoneCodexVoice, VoiceAsyncGuard, VoiceSelectionCommand},
+    native_client::{PhoneNativeClient, PhoneNativeSnapshot, validate_phone},
+    voice_rpc::{
+        PhoneCodexVoice, VoiceAsyncGuard, VoiceModels, VoiceSelectionCommand, VoiceSpeakers,
+    },
     voice_selection::{VoiceSelection, selected_keypad_model},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome, hash::hash_json};
@@ -23,8 +25,8 @@ pub type FlowFuture<T> = Pin<Box<dyn Future<Output = IvyResult<T>> + Send>>;
 /// The existing Voice-port boundary, implemented by the configured production
 /// owner. It also permits deterministic tests without any account or inference.
 pub trait PhoneFlowVoice: Send + Sync {
-    fn models(&self) -> FlowFuture<IvyJson>;
-    fn speaker_voices(&self) -> FlowFuture<IvyJson>;
+    fn models(&self) -> FlowFuture<Arc<VoiceModels>>;
+    fn speaker_voices(&self) -> FlowFuture<Arc<VoiceSpeakers>>;
     fn speaker_voice(&self, call_id: &JsString) -> Option<JsString>;
     fn failed(&self, call_id: &JsString) -> bool;
     fn inputs(&self, call_id: &JsString) -> IvyResult<Vec<IvyJson>>;
@@ -105,11 +107,11 @@ impl PhoneFlowVoice for PhoneCodexVoice {
         );
         Box::pin(async move { work.wait().await })
     }
-    fn models(&self) -> FlowFuture<IvyJson> {
+    fn models(&self) -> FlowFuture<Arc<VoiceModels>> {
         let owner = self.clone();
         Box::pin(async move { PhoneCodexVoice::models(&owner).await })
     }
-    fn speaker_voices(&self) -> FlowFuture<IvyJson> {
+    fn speaker_voices(&self) -> FlowFuture<Arc<VoiceSpeakers>> {
         let owner = self.clone();
         Box::pin(async move { PhoneCodexVoice::speaker_voices(&owner).await })
     }
@@ -241,7 +243,7 @@ struct State {
     ended: BTreeSet<JsString>,
     abandoned: BTreeSet<JsString>,
     selections: BTreeMap<JsString, VoiceSelection>,
-    models: Vec<IvyJson>,
+    models: Arc<VoiceModels>,
     closed: bool,
     closing: Option<PhoneFlowWork>,
 }
@@ -396,13 +398,12 @@ impl PhoneFlow {
             (self.0.on_error)(id, &error.code)
         }));
     }
-    pub async fn voice_model_catalog(&self) -> IvyResult<IvyJson> {
+    pub async fn voice_model_catalog(&self) -> IvyResult<Arc<VoiceModels>> {
         let models = self.voice()?.models().await?;
-        self.0.state.lock().unwrap().models =
-            models.as_array().ok_or_else(IvyError::internal)?.to_vec();
+        self.0.state.lock().unwrap().models = models.clone();
         Ok(models)
     }
-    pub async fn speaker_voice_catalog(&self) -> IvyResult<IvyJson> {
+    pub async fn speaker_voice_catalog(&self) -> IvyResult<Arc<VoiceSpeakers>> {
         let voice = self.0.voice.as_ref().ok_or_else(|| {
             IvyError::new(
                 "phone_voice_unavailable",
@@ -426,7 +427,7 @@ impl PhoneFlow {
                     reasoning_effort: effort,
                 };
                 if candidate
-                    .validate(&IvyJson::Array(self.0.state.lock().unwrap().models.clone()))
+                    .validate(&self.0.state.lock().unwrap().models)
                     .is_ok()
                 {
                     selection = candidate;
@@ -688,13 +689,17 @@ impl PhoneFlow {
         state.work.insert(id, pending.clone());
         Ok(pending)
     }
-    pub async fn speaker_voice_state(&self, id: JsString, catalog: &IvyJson) -> IvyResult<IvyJson> {
+    pub async fn speaker_voice_state(
+        &self,
+        id: JsString,
+        catalog: &VoiceSpeakers,
+    ) -> IvyResult<IvyJson> {
         let selected = self
             .calls()
             .journal()
             .selected_speaker_voice(id.clone())
             .await?
-            .unwrap_or(text(catalog, "defaultVoiceId")?);
+            .unwrap_or_else(|| catalog.default_voice_id.clone());
         let effective = self.0.voice.as_ref().and_then(|v| v.speaker_voice(&id));
         Ok(IvyJson::object([
             ("callId", id.into()),
@@ -752,9 +757,7 @@ impl PhoneFlow {
             let action_id = id.clone();
             let pending = flow.reserve(id, Box::pin(async move {
                 let catalog = action_flow.speaker_voice_catalog().await?;
-                let advertised = field(&catalog, "voices")?
-                    .as_array().ok_or_else(IvyError::internal)?
-                    .iter().any(|v| v.get("id") == Some(&voice_id.clone().into()));
+                let advertised = catalog.contains(&voice_id);
                 require(advertised, "phone_speaker_voice_invalid",
                     "Select a speaker voice advertised by phone_bridge_speaker_voices for native V3.")?;
                 action_flow.confirm_connected(&call).await?;
@@ -933,14 +936,11 @@ impl PhoneFlow {
         command: VoiceSelectionCommand,
         selection: VoiceSelection,
     ) -> IvyResult<()> {
-        selection.validate(&self.voice_model_catalog().await?)?;
+        selection.validate(self.voice_model_catalog().await?.as_ref())?;
         if let VoiceSelectionCommand::Update { voice_id, .. } = &command {
             let catalog = self.speaker_voice_catalog().await?;
             require(
-                catalog.required("voices")?.as_array().is_some_and(|vs| {
-                    vs.iter()
-                        .any(|v| v.get("id") == Some(&voice_id.clone().into()))
-                }),
+                catalog.contains(voice_id),
                 "phone_speaker_voice_invalid",
                 "Select a speaker voice advertised by phone_bridge_speaker_voices.",
             )?;
@@ -1244,7 +1244,9 @@ impl PhoneFlow {
                         };
                         let result = action_flow.cleanup_core(principal, action_id.clone()).await;
                         let observer = action_flow.0.cleanup_observer.lock().unwrap().clone();
-                        if let Some(observer) = observer { observer(&action_id, result.as_ref().err().map(|e| e.code.as_str())); }
+                        if let Some(observer) = observer {
+                            observer(&action_id, result.as_ref().err().map(|e| e.code.as_str()));
+                        }
                         result.map(|_| IvyJson::Null)
                     });
                     state.cleanups.insert(id, pending.clone());
@@ -1297,7 +1299,6 @@ impl PhoneFlow {
             let ended = hangup
                 .get("receipt")
                 .and_then(|r| r.get("result"))
-                .and_then(|r| r.get("call"))
                 .filter(|c| {
                     c.get("id") == Some(&id.clone().into())
                         && c.get("state") == Some(&"local_ended".into())
@@ -1457,20 +1458,18 @@ impl PhoneFlow {
         )?;
         Ok(())
     }
-    pub async fn observe(&self, observed: Option<IvyJson>) -> IvyResult<()> {
-        for call in self.calls().journal().current_calls().await? {
+    pub async fn observe(
+        &self,
+        calls: &[IvyJson],
+        observed: &mut PhoneNativeSnapshot,
+    ) -> IvyResult<()> {
+        for call in calls {
             if call.get("epoch") != Some(&self.0.native.epoch().clone().into()) {
                 continue;
             }
             let id = text(&call, "callId")?;
             let result = async {
-                let status = match observed
-                    .as_ref()
-                    .filter(|v| v.get("call").and_then(|v| v.get("id")) == Some(&id.clone().into()))
-                {
-                    Some(v) => v.clone(),
-                    None => self.0.native.observe(Some(id.clone())).await?,
-                };
+                let status = observed.for_call(&self.0.native, &id).await?;
                 if let Some(logs) = &self.0.logs {
                     let _ = logs.record(&call, &status);
                 }
@@ -1508,7 +1507,8 @@ impl PhoneFlow {
                     return Ok(());
                 }
                 if ended || abandoned {
-                    self.cleanup_when_observed(&call, Some(status)).await?;
+                    self.cleanup_when_observed(call, Some(status.clone()))
+                        .await?;
                     return Ok(());
                 }
                 let Some(original) =

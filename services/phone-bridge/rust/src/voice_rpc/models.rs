@@ -20,11 +20,112 @@ pub trait VoiceModelControl: Send + Sync {
     fn current(&self) -> Option<VoiceRpc>;
 }
 
-type Loading = watch::Receiver<Option<IvyResult<IvyJson>>>;
+#[derive(Debug)]
+pub struct VoiceReasoningEffort {
+    pub reasoning_effort: JsString,
+    description: JsString,
+}
+
+#[derive(Debug)]
+pub struct VoiceModel {
+    pub model: JsString,
+    display_name: JsString,
+    description: JsString,
+    default_reasoning_effort: JsString,
+    pub supported_reasoning_efforts: Box<[VoiceReasoningEffort]>,
+    is_default: bool,
+}
+
+impl VoiceModel {
+    fn from_wire(item: &IvyJson) -> IvyResult<Self> {
+        Ok(Self {
+            model: string(item, "model")?,
+            display_name: string(item, "displayName")?,
+            description: string(item, "description")?,
+            default_reasoning_effort: string(item, "defaultReasoningEffort")?,
+            supported_reasoning_efforts: item
+                .required("supportedReasoningEfforts")?
+                .as_array()
+                .ok_or_else(IvyError::internal)?
+                .iter()
+                .map(|effort| {
+                    Ok(VoiceReasoningEffort {
+                        reasoning_effort: string(effort, "reasoningEffort")?,
+                        description: string(effort, "description")?,
+                    })
+                })
+                .collect::<IvyResult<_>>()?,
+            is_default: item
+                .required("isDefault")?
+                .as_bool()
+                .ok_or_else(IvyError::internal)?,
+        })
+    }
+
+    fn to_wire(&self) -> IvyJson {
+        IvyJson::object([
+            ("model", self.model.clone().into()),
+            ("displayName", self.display_name.clone().into()),
+            ("description", self.description.clone().into()),
+            (
+                "defaultReasoningEffort",
+                self.default_reasoning_effort.clone().into(),
+            ),
+            (
+                "supportedReasoningEfforts",
+                IvyJson::Array(
+                    self.supported_reasoning_efforts
+                        .iter()
+                        .map(|effort| {
+                            IvyJson::object([
+                                ("reasoningEffort", effort.reasoning_effort.clone().into()),
+                                ("description", effort.description.clone().into()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            ("isDefault", self.is_default.into()),
+        ])
+    }
+}
+
+fn string(item: &IvyJson, key: &str) -> IvyResult<JsString> {
+    item.required(key)?
+        .as_js_string()
+        .cloned()
+        .ok_or_else(IvyError::internal)
+}
+
+/// Immutable advertised values; cache observers and the call policy share this
+/// allocation. JSON is materialized only for the public status response.
+#[derive(Debug, Default)]
+pub struct VoiceModels {
+    pub entries: Box<[VoiceModel]>,
+}
+
+impl VoiceModels {
+    pub fn to_wire(&self) -> IvyJson {
+        IvyJson::Array(self.entries.iter().map(VoiceModel::to_wire).collect())
+    }
+
+    pub fn from_wire(value: &IvyJson) -> IvyResult<Self> {
+        Ok(Self {
+            entries: value
+                .as_array()
+                .ok_or_else(IvyError::internal)?
+                .iter()
+                .map(VoiceModel::from_wire)
+                .collect::<IvyResult<_>>()?,
+        })
+    }
+}
+
+type Loading = watch::Receiver<Option<IvyResult<Arc<VoiceModels>>>>;
 struct Cache {
     // Remember identity without extending the transport actor's lifetime.
     connection: Weak<NativeRpc>,
-    models: IvyJson,
+    models: Arc<VoiceModels>,
     expires_at: i128,
 }
 #[derive(Default)]
@@ -38,7 +139,7 @@ struct Inner {
     state: Mutex<State>,
 }
 
-/// Coalesced model discovery, with independent result copies for every observer.
+/// Coalesced model discovery, sharing immutable values between observers.
 /// Dropping an observer leaves the dispatched load running to its normal result.
 #[derive(Clone)]
 pub struct VoiceModelCatalog(Arc<Inner>);
@@ -59,7 +160,7 @@ impl VoiceModelCatalog {
         }))
     }
 
-    pub async fn models(&self) -> IvyResult<IvyJson> {
+    pub async fn models(&self) -> IvyResult<Arc<VoiceModels>> {
         // Opening precedes even a cache hit, preserving the owner's stop policy.
         let connection = self.0.control.open().await?;
         let current = self
@@ -95,7 +196,7 @@ impl VoiceModelCatalog {
                 state.loading = Some(receive.clone());
                 let owner = self.0.clone();
                 tokio::spawn(async move {
-                    let result = discover(&owner, &connection).await;
+                    let result = discover(&owner, &connection).await.map(Arc::new);
                     {
                         let mut state = owner.state.lock().unwrap();
                         if let Ok(models) = &result {
@@ -128,7 +229,7 @@ pub(super) fn wall_time_ms() -> i128 {
     }
 }
 
-async fn discover(owner: &Inner, connection: &VoiceRpc) -> IvyResult<IvyJson> {
+async fn discover(owner: &Inner, connection: &VoiceRpc) -> IvyResult<VoiceModels> {
     let definition = connection
         .rpc
         .catalog()
@@ -148,7 +249,7 @@ async fn discover(owner: &Inner, connection: &VoiceRpc) -> IvyResult<IvyJson> {
     let output_schema = definition
         .get("outputSchema")
         .ok_or_else(IvyError::internal)?;
-    let mut models = Vec::<IvyJson>::new();
+    let mut models = Vec::<VoiceModel>::new();
     let mut cursors = HashSet::<JsString>::new();
     let mut cursor = None;
     loop {
@@ -192,32 +293,16 @@ async fn discover(owner: &Inner, connection: &VoiceRpc) -> IvyResult<IvyJson> {
                 continue;
             }
             if models.len() >= 256
-                || models
-                    .iter()
-                    .any(|existing| existing.get("model") == item.get("model"))
+                || models.iter().any(|existing| {
+                    Some(&existing.model) == item.get("model").and_then(IvyJson::as_js_string)
+                })
             {
                 return Err(IvyError::new(
                     "phone_voice_catalog_invalid",
                     "Codex returned a duplicate or oversized model catalog.",
                 ));
             }
-            let fields = [
-                "model",
-                "displayName",
-                "description",
-                "defaultReasoningEffort",
-                "supportedReasoningEfforts",
-                "isDefault",
-            ]
-            .into_iter()
-            .map(|key| {
-                Ok((
-                    JsString::from(key),
-                    item.get(key).cloned().ok_or_else(IvyError::internal)?,
-                ))
-            })
-            .collect::<IvyResult<Vec<_>>>()?;
-            models.push(IvyJson::Object(fields));
+            models.push(VoiceModel::from_wire(item)?);
         }
         cursor = match page.get("nextCursor") {
             None | Some(IvyJson::Null) => None,
@@ -245,7 +330,9 @@ async fn discover(owner: &Inner, connection: &VoiceRpc) -> IvyResult<IvyJson> {
             "Codex model catalog lost its control connection.",
         ));
     }
-    Ok(IvyJson::Array(models))
+    Ok(VoiceModels {
+        entries: models.into_boxed_slice(),
+    })
 }
 
 #[cfg(test)]

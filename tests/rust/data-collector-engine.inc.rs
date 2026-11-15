@@ -39,7 +39,7 @@ impl Runner for TestRunner {
         input: IvyJson,
         signal: CancellationToken,
         register: RegisterJob,
-    ) -> ServiceFuture<IvyJson> {
+    ) -> ServiceFuture<model::Output> {
         let this = self.clone();
         Box::pin(async move {
             let index = {
@@ -52,8 +52,11 @@ impl Runner for TestRunner {
                 calls.len()
             };
             register(format!("fixture-job-{index}")).await?;
-            tokio::select! {biased;_=signal.cancelled()=>Err(IvyError::new("outcome_unknown","Tree absence is unproven.")),permit=this.finish.acquire()=>{permit.unwrap().forget();Ok(IvyJson::object([("data",true.into()),("state",IvyJson::Number(index as f64))]))}}
+            tokio::select! {biased;_=signal.cancelled()=>Err(IvyError::new("outcome_unknown","Tree absence is unproven.")),permit=this.finish.acquire()=>{permit.unwrap().forget();model::Output::parse(&IvyJson::object([("data",true.into()),("state",IvyJson::Number(index as f64))]))}}
         })
+    }
+    fn can_verify_stopped(&self) -> bool {
+        true
     }
     fn stopped(&self, _: String, _: String) -> ServiceFuture<bool> {
         let proved = self.proved_stopped.load(Ordering::Acquire);
@@ -83,6 +86,11 @@ impl Drop for Directory {
     }
 }
 async fn fixture() -> (Directory, Engine, TestRunner, Arc<TestClock>) {
+    fixture_with_concurrency(1).await
+}
+async fn fixture_with_concurrency(
+    concurrency: usize,
+) -> (Directory, Engine, TestRunner, Arc<TestClock>) {
     let directory = Directory(
         std::env::temp_dir().join(format!("ivy-collector-engine-{}", uuid::Uuid::new_v4())),
     );
@@ -105,12 +113,67 @@ async fn fixture() -> (Directory, Engine, TestRunner, Arc<TestClock>) {
     let engine = Engine::new(
         store,
         Arc::new(runner.clone()),
-        json(r#"{"concurrency":1}"#),
+        IvyJson::object([("concurrency", (concurrency as f64).into())]),
         clock.clone(),
     )
     .await
     .unwrap();
     (directory, engine, runner, clock)
+}
+
+#[tokio::test]
+async fn three_slots_leave_the_fourth_run_durable_until_a_worker_finishes() {
+    let (_directory, engine, runner, _) = fixture_with_concurrency(3).await;
+    for id in ["a", "b", "c", "d"] {
+        save(&engine, id, false).await;
+        engine
+            .update(
+                IvyJson::object([
+                    ("action", "run".into()),
+                    ("id", id.into()),
+                    ("operationId", format!("run-{id}").into()),
+                ]),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    engine.tick(false).await.unwrap();
+    wait(|| runner.calls.lock().unwrap().len() == 3).await;
+    for _ in 0..8 {
+        engine.tick(false).await.unwrap();
+    }
+    assert_eq!(runner.calls.lock().unwrap().len(), 3);
+    assert!(!engine.active("d"));
+    assert_eq!(
+        engine
+            .store()
+            .call(|s| s.run_count("queued"))
+            .await
+            .unwrap(),
+        1
+    );
+    runner.finish.add_permits(1);
+    wait(|| {
+        ["a", "b", "c"]
+            .iter()
+            .filter(|id| engine.active(id))
+            .count()
+            == 2
+    })
+    .await;
+    engine.tick(false).await.unwrap();
+    wait(|| runner.calls.lock().unwrap().len() == 4).await;
+    assert!(engine.active("d"));
+    assert_eq!(
+        engine
+            .store()
+            .call(|s| s.run_count("queued"))
+            .await
+            .unwrap(),
+        0
+    );
+    engine.close().await;
 }
 async fn save(engine: &Engine, id: &str, enabled: bool) {
     let mut task = json(
@@ -412,7 +475,6 @@ async fn unknown_fence_survives_observation_failures_and_only_current_stopped_co
     engine.close().await;
 }
 
-
 struct ControlPeer {
     assignment: Mutex<IvyJson>,
     definition: IvyJson,
@@ -422,127 +484,287 @@ struct ControlPeer {
 }
 fn control_document(id: &str, kind: &str, revision: f64, value: IvyJson) -> IvyJson {
     IvyJson::object([
-        ("object",IvyJson::object([("id",id.into()),("contractKey",format!("data-collector/{kind}").into()),("effectivelyArchived",false.into())])),
-        ("revision",IvyJson::object([("revision",revision.into())])),
-        ("content",IvyJson::object([("encoding","json".into()),("value",value)])),
+        (
+            "object",
+            IvyJson::object([
+                ("id", id.into()),
+                ("contractKey", format!("data-collector/{kind}").into()),
+                ("effectivelyArchived", false.into()),
+            ]),
+        ),
+        ("revision", IvyJson::object([("revision", revision.into())])),
+        (
+            "content",
+            IvyJson::object([("encoding", "json".into()), ("value", value)]),
+        ),
     ])
 }
 impl ivy_sdk::rpc::RpcClient for ControlPeer {
-    fn request(&self, method: &str, params: IvyJson, _: ivy_sdk::rpc::RequestOptions) -> ivy_sdk::rpc::RequestFuture<'_> {
-        let method=method.to_owned();
-        Box::pin(async move {Ok(match method.as_str() {
-            "system.status"=>json(r#"{"runtimeEpoch":"00000000-0000-4000-8000-000000000000"}"#),
-            "objects.query"=>{
-                let items=match model::text(&params,"contractKey")?.as_str() {
-                    "data-collector/root"=>vec![json(r#"{"objectId":"root"}"#)],
-                    "data-collector/assignment"=>vec![IvyJson::object([("document",self.assignment.lock().unwrap().clone())])],
-                    other=>panic!("Unexpected control query {other}"),
-                };
-                IvyJson::object([("items",IvyJson::Array(items)),("nextCursor",IvyJson::Null)])
-            },
-            "objects.read"=>match model::text(&params,"objectId")?.as_str() {
-                "job"=>self.definition.clone(),"script"=>self.script.clone(),
-                "assignment"=>self.assignment.lock().unwrap().clone(),
-                other=>panic!("Unexpected control read {other}"),
-            },
-            "objects.write"=>{
-                assert_eq!(params.get("objectId"),Some(&"assignment".into()));
-                if params.required("content")?.required("value")?.get("enabled")==Some(&false.into()) {
-                    // The scheduler must already see disabled before the remote write.
-                    let row=self.store.call(|s|s.get("task",false)).await?.unwrap();
-                    assert!(!model::truth(row.required("task")?,"enabled"));
+    fn request(
+        &self,
+        method: &str,
+        params: IvyJson,
+        _: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'_> {
+        let method = method.to_owned();
+        Box::pin(async move {
+            Ok(match method.as_str() {
+                "system.status" => {
+                    json(r#"{"runtimeEpoch":"00000000-0000-4000-8000-000000000000"}"#)
                 }
-                let mut current=self.assignment.lock().unwrap();
-                let revision=model::number(current.required("revision")?,"revision")?;
-                assert_eq!(params.get("expectedRevision"),Some(&revision.into()));
-                let mut updated=current.clone();updated.insert("revision",IvyJson::object([("revision",(revision+1.0).into())]));
-                updated.insert("content",params.required("content")?.clone());*current=updated.clone();
-                self.writes.fetch_add(1,Ordering::Relaxed);updated
-            },
-            other=>panic!("Unexpected control RPC {other}: {params:?}"),
-        })})
+                "objects.query" => {
+                    let items = match model::text(&params, "contractKey")?.as_str() {
+                        "data-collector/root" => vec![json(r#"{"objectId":"root"}"#)],
+                        "data-collector/assignment" => vec![IvyJson::object([(
+                            "document",
+                            self.assignment.lock().unwrap().clone(),
+                        )])],
+                        other => panic!("Unexpected control query {other}"),
+                    };
+                    IvyJson::object([
+                        ("items", IvyJson::Array(items)),
+                        ("nextCursor", IvyJson::Null),
+                    ])
+                }
+                "objects.read" => match model::text(&params, "objectId")?.as_str() {
+                    "job" => self.definition.clone(),
+                    "script" => self.script.clone(),
+                    "assignment" => self.assignment.lock().unwrap().clone(),
+                    other => panic!("Unexpected control read {other}"),
+                },
+                "objects.write" => {
+                    assert_eq!(params.get("objectId"), Some(&"assignment".into()));
+                    if params
+                        .required("content")?
+                        .required("value")?
+                        .get("enabled")
+                        == Some(&false.into())
+                    {
+                        // The scheduler must already see disabled before the remote write.
+                        let row = self.store.call(|s| s.get("task", false)).await?.unwrap();
+                        assert!(!model::truth(row.required("task")?, "enabled"));
+                    }
+                    let mut current = self.assignment.lock().unwrap();
+                    let revision = model::number(current.required("revision")?, "revision")?;
+                    assert_eq!(params.get("expectedRevision"), Some(&revision.into()));
+                    let mut updated = current.clone();
+                    updated.insert(
+                        "revision",
+                        IvyJson::object([("revision", (revision + 1.0).into())]),
+                    );
+                    updated.insert("content", params.required("content")?.clone());
+                    *current = updated.clone();
+                    self.writes.fetch_add(1, Ordering::Relaxed);
+                    updated
+                }
+                other => panic!("Unexpected control RPC {other}: {params:?}"),
+            })
+        })
     }
 }
 
 #[tokio::test]
 async fn idle_activation_preserves_queued_running_and_publishing_work_and_original_receipts() {
-    let (_directory,engine,runner,clock)=fixture().await;save(&engine,"task",true).await;
-    let mut task=engine.store().call(|s|Ok(s.get("task",false)?.unwrap().required("task")?.clone())).await.unwrap();
-    let script=task.remove("script").unwrap();task.remove("enabled");
-    let peer=Arc::new(ControlPeer {
-        assignment:Mutex::new(control_document("assignment","assignment",1.0,json(r#"{"schemaVersion":1,"jobId":"job","definitionRevision":1,"serviceNodeId":"fixture.collector","enabled":true,"deleted":false,"rootObjectId":"root","resultObjectId":null}"#))),
-        definition:control_document("job","definition",1.0,IvyJson::object([("schemaVersion",1.0.into()),("homeServiceNodeId","fixture.collector".into()),("task",task),("script",json(r#"{"objectId":"script","revision":1}"#))])),
-        script:control_document("script","script",1.0,IvyJson::object([("schemaVersion",1.0.into()),("script",script)])),
-        writes:Default::default(),store:engine.store(),
+    let (_directory, engine, runner, clock) = fixture().await;
+    save(&engine, "task", true).await;
+    let mut task = engine
+        .store()
+        .call(|s| Ok(s.get("task", false)?.unwrap().required("task")?.clone()))
+        .await
+        .unwrap();
+    let script = task.remove("script").unwrap();
+    task.remove("enabled");
+    let peer = Arc::new(ControlPeer {
+        assignment: Mutex::new(control_document(
+            "assignment",
+            "assignment",
+            1.0,
+            json(
+                r#"{"schemaVersion":1,"jobId":"job","definitionRevision":1,"serviceNodeId":"fixture.collector","enabled":true,"deleted":false,"rootObjectId":"root","resultObjectId":null}"#,
+            ),
+        )),
+        definition: control_document(
+            "job",
+            "definition",
+            1.0,
+            IvyJson::object([
+                ("schemaVersion", 1.0.into()),
+                ("homeServiceNodeId", "fixture.collector".into()),
+                ("task", task),
+                ("script", json(r#"{"objectId":"script","revision":1}"#)),
+            ]),
+        ),
+        script: control_document(
+            "script",
+            "script",
+            1.0,
+            IvyJson::object([("schemaVersion", 1.0.into()), ("script", script)]),
+        ),
+        writes: Default::default(),
+        store: engine.store(),
     });
     engine.attach(peer.clone()).await.unwrap();
     engine.store().call(|s|{let mut row=s.get("task",false)?.unwrap();row.insert("definition",json(r#"{"jobId":"job","revision":1,"assignmentId":"assignment","assignmentRevision":1}"#));s.save(&row)}).await.unwrap();
-    let control=ivy_data_collector::definitions::Definitions::new("fixture.collector".into(),engine.clone(),Arc::new(|_|Ok(None)));
-    let input=json(r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false,"onlyWhenIdle":true}"#);
-    let original=engine.store().call(|s|s.get("task",false)).await.unwrap();
-    for (field,value,code) in [
-        ("enabled",true.into(),"invalid_arguments"),
-        ("serviceNodeId","another.collector".into(),"invalid_arguments"),
-        ("definitionRevision",2.0.into(),"invalid_arguments"),
-        ("expectedRevision",2.0.into(),"revision_conflict"),
+    let control = ivy_data_collector::definitions::Definitions::new(
+        "fixture.collector".into(),
+        engine.clone(),
+        Arc::new(|_| Ok(None)),
+    );
+    let input = json(
+        r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false,"onlyWhenIdle":true}"#,
+    );
+    let original = engine.store().call(|s| s.get("task", false)).await.unwrap();
+    for (field, value, code) in [
+        ("enabled", true.into(), "invalid_arguments"),
+        (
+            "serviceNodeId",
+            "another.collector".into(),
+            "invalid_arguments",
+        ),
+        ("definitionRevision", 2.0.into(), "invalid_arguments"),
+        ("expectedRevision", 2.0.into(), "revision_conflict"),
     ] {
-        let mut bad=input.clone();bad.insert("operationId",format!("bad-{field}").into());bad.insert(field,value);
-        assert_eq!(control.update(bad,None).await.unwrap_err().code,code);
-        assert_eq!(engine.store().call(|s|s.get("task",false)).await.unwrap(),original);
-        assert_eq!(peer.writes.load(Ordering::Relaxed),0);
+        let mut bad = input.clone();
+        bad.insert("operationId", format!("bad-{field}").into());
+        bad.insert(field, value);
+        assert_eq!(control.update(bad, None).await.unwrap_err().code, code);
+        assert_eq!(
+            engine.store().call(|s| s.get("task", false)).await.unwrap(),
+            original
+        );
+        assert_eq!(peer.writes.load(Ordering::Relaxed), 0);
     }
-    engine.update(json(r#"{"action":"run","operationId":"first","id":"task"}"#),None).await.unwrap();
-    let queued=engine.store().call(|s|s.run("first")).await.unwrap();
-    let queued_row=engine.store().call(|s|s.get("task",false)).await.unwrap();
-    assert_eq!(control.update(input.clone(),None).await.unwrap_err().code,"task_busy");
-    assert_eq!(engine.store().call(|s|s.run("first")).await.unwrap(),queued);
-    assert_eq!(engine.store().call(|s|s.get("task",false)).await.unwrap(),queued_row);
-    assert_eq!(peer.writes.load(Ordering::Relaxed),0);
-    engine.tick(false).await.unwrap();wait(||runner.calls.lock().unwrap().len()==1).await;
-    assert_eq!(control.update(input.clone(),None).await.unwrap_err().code,"task_busy");
-    assert!(engine.active("task"));assert_eq!(peer.writes.load(Ordering::Relaxed),0);
-    runner.finish.add_permits(1);wait(||!engine.active("task")).await;
-    assert_eq!(engine.pending_publications().await.unwrap(),1);
-    assert_eq!(control.update(input.clone(),None).await.unwrap_err().code,"task_busy");
+    engine
+        .update(
+            json(r#"{"action":"run","operationId":"first","id":"task"}"#),
+            None,
+        )
+        .await
+        .unwrap();
+    let queued = engine.store().call(|s| s.run("first")).await.unwrap();
+    let queued_row = engine.store().call(|s| s.get("task", false)).await.unwrap();
+    assert_eq!(
+        control.update(input.clone(), None).await.unwrap_err().code,
+        "task_busy"
+    );
+    assert_eq!(
+        engine.store().call(|s| s.run("first")).await.unwrap(),
+        queued
+    );
+    assert_eq!(
+        engine.store().call(|s| s.get("task", false)).await.unwrap(),
+        queued_row
+    );
+    assert_eq!(peer.writes.load(Ordering::Relaxed), 0);
+    engine.tick(false).await.unwrap();
+    wait(|| runner.calls.lock().unwrap().len() == 1).await;
+    assert_eq!(
+        control.update(input.clone(), None).await.unwrap_err().code,
+        "task_busy"
+    );
+    assert!(engine.active("task"));
+    assert_eq!(peer.writes.load(Ordering::Relaxed), 0);
+    runner.finish.add_permits(1);
+    wait(|| !engine.active("task")).await;
+    assert_eq!(engine.pending_publications().await.unwrap(), 1);
+    assert_eq!(
+        control.update(input.clone(), None).await.unwrap_err().code,
+        "task_busy"
+    );
     // Model the publisher's acknowledgement after the real worker completed.
-    engine.store().call(|s|{let mut r=s.run("first")?.unwrap();r.insert("status","succeeded".into());s.save_run(&r)}).await.unwrap();
-    let completed=engine.store().call(|s|s.run("first")).await.unwrap();
-    let due_at=engine.store().call(|s|model::number(&s.get("task",false)?.unwrap(),"nextAt")).await.unwrap();
-    let paused=control.update(input.clone(),None).await.unwrap();
+    engine
+        .store()
+        .call(|s| {
+            let mut r = s.run("first")?.unwrap();
+            r.insert("status", "succeeded".into());
+            s.save_run(&r)
+        })
+        .await
+        .unwrap();
+    let completed = engine.store().call(|s| s.run("first")).await.unwrap();
+    let due_at = engine
+        .store()
+        .call(|s| model::number(&s.get("task", false)?.unwrap(), "nextAt"))
+        .await
+        .unwrap();
+    let paused = control.update(input.clone(), None).await.unwrap();
     assert!(paused.required("adoptionError").unwrap().is_null());
-    assert_eq!(peer.writes.load(Ordering::Relaxed),1);
-    assert_eq!(engine.store().call(|s|s.run("first")).await.unwrap(),completed);
-    assert_eq!(engine.store().call(|s|model::number(&s.get("task",false)?.unwrap(),"nextAt")).await.unwrap(),due_at);
-    clock.0.store(2_000_000,Ordering::Release);engine.tick(false).await.unwrap();
-    assert_eq!(runner.calls.lock().unwrap().len(),1);
-    let mut resume=input.clone();resume.insert("operationId","resume".into());resume.insert("expectedRevision",2.0.into());resume.insert("enabled",true.into());resume.remove("onlyWhenIdle");
-    control.update(resume,None).await.unwrap();
-    assert_eq!(engine.store().call(|s|model::number(&s.get("task",false)?.unwrap(),"nextAt")).await.unwrap(),due_at);
+    assert_eq!(peer.writes.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        engine.store().call(|s| s.run("first")).await.unwrap(),
+        completed
+    );
+    assert_eq!(
+        engine
+            .store()
+            .call(|s| model::number(&s.get("task", false)?.unwrap(), "nextAt"))
+            .await
+            .unwrap(),
+        due_at
+    );
+    clock.0.store(2_000_000, Ordering::Release);
+    engine.tick(false).await.unwrap();
+    assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    let mut resume = input.clone();
+    resume.insert("operationId", "resume".into());
+    resume.insert("expectedRevision", 2.0.into());
+    resume.insert("enabled", true.into());
+    resume.remove("onlyWhenIdle");
+    control.update(resume, None).await.unwrap();
+    assert_eq!(
+        engine
+            .store()
+            .call(|s| model::number(&s.get("task", false)?.unwrap(), "nextAt"))
+            .await
+            .unwrap(),
+        due_at
+    );
     // Work that became due during maintenance runs on the next scheduler tick.
-    engine.tick(false).await.unwrap();wait(||runner.calls.lock().unwrap().len()==2).await;
-    let later_id=engine.store().call(|s|model::text(&s.get("task",false)?.unwrap(),"lastRunId")).await.unwrap();
-    assert_eq!(control.update(input,None).await.unwrap(),paused);
-    assert_eq!(peer.writes.load(Ordering::Relaxed),2);assert!(engine.active("task"));
-    runner.finish.add_permits(1);wait(||!engine.active("task")).await;
-    let later=engine.store().call(move |s|s.run(&later_id)).await.unwrap().unwrap();
-    assert_eq!(later.get("status"),Some(&"publishing".into()));assert!(later.required("error").unwrap().is_null());
+    engine.tick(false).await.unwrap();
+    wait(|| runner.calls.lock().unwrap().len() == 2).await;
+    let later_id = engine
+        .store()
+        .call(|s| model::text(&s.get("task", false)?.unwrap(), "lastRunId"))
+        .await
+        .unwrap();
+    assert_eq!(control.update(input, None).await.unwrap(), paused);
+    assert_eq!(peer.writes.load(Ordering::Relaxed), 2);
+    assert!(engine.active("task"));
+    runner.finish.add_permits(1);
+    wait(|| !engine.active("task")).await;
+    let later = engine
+        .store()
+        .call(move |s| s.run(&later_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(later.get("status"), Some(&"publishing".into()));
+    assert!(later.required("error").unwrap().is_null());
     engine.close().await;
 }
 
 #[tokio::test]
 async fn idle_disable_checks_active_owner_gap_and_unknown_outcome_without_cancellation() {
-    let (_directory,engine,_runner,_clock)=fixture().await;save(&engine,"task",true).await;
-    let before=engine.store().call(|s|s.get("task",false)).await.unwrap();
-    let settings=engine.settings().clone();
+    let (_directory, engine, _runner, _clock) = fixture().await;
+    save(&engine, "task", true).await;
+    let before = engine.store().call(|s| s.get("task", false)).await.unwrap();
+    let settings = engine.settings().clone();
     let busy=engine.store().call(move |s|ivy_data_collector::runtime::Runtime{store:s,settings:&settings,root_id:"root"}
         .update(&json(r#"{"action":"disable","operationId":"active-gap","id":"task","expectedRevision":1,"onlyWhenIdle":true}"#),None,1000000,"1970-01-01T00:16:40.000Z",|_|true,|_|Ok(()))).await.err().unwrap();
-    assert_eq!(busy.code,"task_busy");assert_eq!(engine.store().call(|s|s.get("task",false)).await.unwrap(),before);
+    assert_eq!(busy.code, "task_busy");
+    assert_eq!(
+        engine.store().call(|s| s.get("task", false)).await.unwrap(),
+        before
+    );
     engine.store().call(|s|{
         let mut row=s.get("task",false)?.unwrap();row.insert("lastRunId","unknown".into());s.save(&row)?;
         s.save_run(&json(r#"{"id":"unknown","taskId":"task","task":{},"status":"failed","error":"outcome_unknown","finishedAt":"1970-01-01T00:16:40.000Z"}"#))
     }).await.unwrap();
-    let prior=engine.store().call(|s|s.run("unknown")).await.unwrap();
+    let prior = engine.store().call(|s| s.run("unknown")).await.unwrap();
     assert_eq!(engine.update(json(r#"{"action":"disable","operationId":"unknown-idle","id":"task","expectedRevision":1,"onlyWhenIdle":true}"#),None).await.unwrap_err().code,"outcome_unknown");
-    assert_eq!(engine.store().call(|s|s.run("unknown")).await.unwrap(),prior);
+    assert_eq!(
+        engine.store().call(|s| s.run("unknown")).await.unwrap(),
+        prior
+    );
     engine.close().await;
 }

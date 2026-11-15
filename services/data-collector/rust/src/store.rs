@@ -94,6 +94,13 @@ impl CollectorStore {
     pub fn connection(&self) -> &Connection {
         &self.db
     }
+    pub fn usage(&self, kind: &str) -> IvyResult<(u64, u64)> {
+        sql(self.db.query_row(
+            "SELECT count,bytes FROM journal_usage WHERE kind=?",
+            [kind],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+        ))
+    }
     pub fn transaction<T>(&self, work: impl FnOnce(&Self) -> IvyResult<T>) -> IvyResult<T> {
         sql(self.db.execute_batch("BEGIN IMMEDIATE"))?;
         // RAII rollback also covers a panic; never leave an open writer transaction.
@@ -136,26 +143,148 @@ impl CollectorStore {
         }
         Ok(result)
     }
+    /// SQL projections keep scripts, configuration and private cursors out of
+    /// control-plane reads. The original document remains authoritative.
+    pub fn summaries(&self, include_deleted: bool) -> IvyResult<Vec<RecordTask>> {
+        let mut statement = sql(self.db.prepare("SELECT json_remove(document,'$.task.script','$.task.config','$.task.dependencies','$.state') FROM tasks WHERE ? OR NOT COALESCE(json_extract(document,'$.deleted'),0) ORDER BY id"))?;
+        let rows = sql(statement.query_map([include_deleted], |r| r.get::<_, String>(0)))?;
+        rows.map(|r| decode(&sql(r)?)).collect()
+    }
+    pub fn summary(&self, id: &str, include_deleted: bool) -> IvyResult<Option<RecordTask>> {
+        Ok(self.document("SELECT json_remove(document,'$.task.script','$.task.config','$.task.dependencies','$.state') FROM tasks WHERE id=?", id)?
+            .filter(|r| include_deleted || !model::truth(r, "deleted")))
+    }
+    pub fn for_job(&self, job: &str) -> IvyResult<Option<RecordTask>> {
+        self.document("SELECT json_remove(document,'$.task.script','$.task.config','$.task.dependencies','$.state') FROM tasks WHERE json_extract(document,'$.definition.jobId')=?", job)
+    }
+    pub fn due_tasks(&self, now: f64) -> IvyResult<Vec<String>> {
+        let mut statement = sql(self.db.prepare("SELECT id FROM tasks t WHERE json_extract(document,'$.nextAt')<=? AND NOT COALESCE(json_extract(document,'$.deleted'),0) AND json_extract(document,'$.task.enabled')=1 AND json_extract(document,'$.task.intervalSeconds')>0 AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.status IN ('queued','running')) AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.id=json_extract(t.document,'$.lastRunId') AND json_extract(r.document,'$.error')='outcome_unknown') ORDER BY json_extract(document,'$.nextAt'),id LIMIT 64"))?;
+        sql(statement.query_map([now], |r| r.get(0)))?
+            .map(sql)
+            .collect()
+    }
+    pub fn run_status(&self, id: &str) -> IvyResult<Option<IvyJson>> {
+        self.document("SELECT json_object('status',r.status,'error',json(COALESCE(p.error,r.document -> '$.error','null')),'startedAt',json_extract(r.document,'$.startedAt')) FROM runs r LEFT JOIN run_progress p ON p.id=r.id WHERE r.id=?", id)
+    }
+    pub fn run_count(&self, status: &str) -> IvyResult<usize> {
+        sql(self
+            .db
+            .query_row("SELECT COUNT(*) FROM runs WHERE status=?", [status], |r| {
+                r.get::<_, i64>(0)
+            }))
+        .map(|n| n as usize)
+    }
+    pub fn next_runs(&self, status: &str, limit: usize) -> IvyResult<Vec<Run>> {
+        let mut statement = sql(self
+            .db
+            .prepare("SELECT document FROM runs WHERE status=? ORDER BY rowid LIMIT ?"))?;
+        sql(statement.query_map(params![status, limit as i64], |r| r.get::<_, String>(0)))?
+            .map(|r| self.with_progress(decode(&sql(r)?)?))
+            .collect()
+    }
+    pub fn pin_task(&self, task: &IvyJson) -> IvyResult<String> {
+        let document = encode(task)?;
+        let id = digest(&document);
+        sql(self.db.execute(
+            "INSERT OR IGNORE INTO task_snapshots VALUES(?,?)",
+            [&id, &document],
+        ))?;
+        Ok(id)
+    }
+    pub fn execution_task(&self, run: &Run) -> IvyResult<IvyJson> {
+        if let Some(id) = model::optional_text(run, "taskSnapshot") {
+            self.document("SELECT document FROM task_snapshots WHERE id=?", &id)?
+                .ok_or_else(IvyError::internal)
+        } else {
+            Ok(model::field(run, "task")?.clone())
+        }
+    }
+    pub fn execution_state(&self, id: &str) -> IvyResult<IvyJson> {
+        self.document(
+            "SELECT COALESCE(document -> '$.state','null') FROM tasks WHERE id=?",
+            id,
+        )?
+        .ok_or_else(IvyError::internal)
+    }
+    pub fn commit_execution(&self, run: &mut Run, now: f64) -> IvyResult<()> {
+        let task = model::text(run, "taskId")?;
+        self.transaction(|s| {
+            if let Some(state) = model::field(run,"output")?.get("state") {
+                sql(s.db.execute("UPDATE tasks SET document=json_set(document,'$.state',json(?),'$.nextAt',?+json_extract(document,'$.task.intervalSeconds')*1000) WHERE id=?", params![encode(state)?,now,task]))?;
+            } else {
+                sql(s.db.execute("UPDATE tasks SET document=json_set(document,'$.nextAt',?+json_extract(document,'$.task.intervalSeconds')*1000) WHERE id=?", params![now,task]))?;
+            }
+            run.insert("executionCommitted",true.into());
+            s.save_run(run)
+        })
+    }
+    pub fn bind_result(&self, task: &str, binding: &str, revision: &IvyJson) -> IvyResult<()> {
+        sql(self.db.execute("UPDATE tasks SET document=json_set(document,'$.resultObjectId',?,'$.resultRevision',json(?)) WHERE id=?",params![binding,encode(revision)?,task]))?;
+        Ok(())
+    }
+    pub fn finish_publication(&self, id: &str) -> IvyResult<()> {
+        self.transaction(|s| {
+            let snapshot: Option<String> = sql(s.db.query_row("SELECT json_extract(document,'$.taskSnapshot') FROM runs WHERE id=?",[id],|r|r.get(0)))?;
+            sql(s.db.execute("UPDATE runs SET status='succeeded',document=json_set(json_remove(document,'$.taskSnapshot'),'$.eventIndex',COALESCE((SELECT event_index FROM run_progress WHERE id=runs.id),json_extract(document,'$.eventIndex')),'$.status','succeeded','$.error',null,'$.input',null,'$.output',null,'$.task.script','','$.task.config',json('{}'),'$.task.dependencies',json('{}')) WHERE id=?",[id]))?;
+            sql(s.db.execute("DELETE FROM run_progress WHERE id=?",[id]))?;
+            if let Some(snapshot) = snapshot {
+                sql(s.db.execute("DELETE FROM task_snapshots WHERE id=? AND NOT EXISTS(SELECT 1 FROM runs WHERE json_extract(document,'$.taskSnapshot')=?)",[&snapshot,&snapshot]))?;
+            }
+            s.collect_runs(Some(id))
+        })
+    }
+    /// Publication acknowledgement changes only its small progress fields.
+    pub fn publication_progress(&self, id: &str, index: usize, error: IvyJson) -> IvyResult<()> {
+        sql(self.db.execute("INSERT INTO run_progress SELECT id,?,? FROM runs WHERE id=? AND status='publishing' ON CONFLICT(id) DO UPDATE SET event_index=excluded.event_index,error=excluded.error", params![index as i64, encode(&error)?, id]))?;
+        Ok(())
+    }
+    fn with_progress(&self, mut run: Run) -> IvyResult<Run> {
+        let id = model::sqlite_key(model::field(&run, "id")?)?;
+        let progress: Option<(i64, String)> = sql(self
+            .db
+            .query_row(
+                "SELECT event_index,error FROM run_progress WHERE id=?",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional())?;
+        if let Some((index, error)) = progress {
+            run.insert("eventIndex", (index as f64).into());
+            run.insert("error", decode(&error)?);
+        }
+        Ok(run)
+    }
+    pub fn publication_counts(&self) -> IvyResult<std::collections::HashMap<String, usize>> {
+        let mut statement = sql(self.db.prepare(
+            "SELECT task_id,COUNT(*) FROM runs WHERE status='publishing' GROUP BY task_id",
+        ))?;
+        sql(statement.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize))))?
+            .map(sql)
+            .collect()
+    }
     pub fn save(&self, value: &RecordTask) -> IvyResult<()> {
         sql(self.db.execute("INSERT INTO tasks VALUES (?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document", params![model::text(model::field(value,"task")?,"id")?, encode(value)?]))?;
         Ok(())
     }
     pub fn run(&self, id: &str) -> IvyResult<Option<Run>> {
-        self.document("SELECT document FROM runs WHERE id=?", id)
+        self.document("SELECT document FROM runs WHERE id=?", id)?
+            .map(|r| self.with_progress(r))
+            .transpose()
     }
     pub fn runs(&self, status: &str) -> IvyResult<Vec<Run>> {
         let mut statement = sql(self
             .db
             .prepare("SELECT document FROM runs WHERE status=? ORDER BY rowid"))?;
         let rows = sql(statement.query_map([status], |r| r.get::<_, String>(0)))?;
-        rows.map(|r| decode(&sql(r)?)).collect()
+        rows.map(|r| self.with_progress(decode(&sql(r)?)?))
+            .collect()
     }
     pub fn save_run(&self, run: &Run) -> IvyResult<()> {
         let status = model::text(run, "status")?;
-        let mut document = run.clone();
-        if !matches!(status.as_str(), "queued" | "running" | "publishing")
-            && !model::unresolved(run)
-        {
+        let terminal = !matches!(status.as_str(), "queued" | "running" | "publishing")
+            && !model::unresolved(run);
+        let document = if terminal {
+            let mut document = run.clone();
             let mut task = model::field(run, "task")?.clone();
             task.insert("script", "".into());
             task.insert("config", model::object());
@@ -163,17 +292,26 @@ impl CollectorStore {
             document.insert("task", task);
             document.insert("input", IvyJson::Null);
             document.insert("output", IvyJson::Null);
-        }
+            document.remove("taskSnapshot");
+            encode(&document)?
+        } else {
+            encode(run)?
+        };
         let work = |s: &Self| {
-            sql(s.db.execute("INSERT INTO runs VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document", params![model::sqlite_key(model::field(run,"id")?)?,model::text(run,"taskId")?,status,encode(&document)?]))?;
+            sql(s.db.execute("INSERT INTO runs VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document", params![model::sqlite_key(model::field(run,"id")?)?,model::text(run,"taskId")?,status,document]))?;
+            let id = model::sqlite_key(model::field(run, "id")?)?;
+            sql(s.db.execute("DELETE FROM run_progress WHERE id=?", [&id]))?;
+            if terminal {
+                if let Some(id) = model::optional_text(run, "taskSnapshot") {
+                    sql(s.db.execute("DELETE FROM task_snapshots WHERE id=? AND NOT EXISTS(SELECT 1 FROM runs WHERE json_extract(document,'$.taskSnapshot')=?)", [&id,&id]))?;
+                }
+            }
             if model::completed(run) {
                 s.collect_runs(Some(&model::sqlite_key(model::field(run, "id")?)?))?;
             }
             Ok(())
         };
-        if !self.db.is_autocommit()
-            || !matches!(status.as_str(), "succeeded" | "failed" | "cancelled")
-        {
+        if !self.db.is_autocommit() {
             work(self)
         } else {
             self.transaction(work)
@@ -219,12 +357,6 @@ impl CollectorStore {
             [id, id],
         )
     }
-    fn completed_run(&self, id: &str) -> IvyResult<bool> {
-        match self.run(id)? {
-            Some(run) => Ok(model::completed(&run)),
-            None => self.exists("SELECT 1 FROM retired_runs WHERE id=?", [id]),
-        }
-    }
     fn forget_definition(&self, id: &str) -> IvyResult<u64> {
         let mut bytes = 0;
         for kind in [
@@ -236,81 +368,72 @@ impl CollectorStore {
             let prefix = format!("{kind}{id}");
             let mut statement = sql(self
                 .db
-                .prepare("DELETE FROM metadata WHERE key=? OR substr(key,1,?)=? RETURNING value"))?;
+                .prepare("DELETE FROM metadata WHERE key=? OR substr(key,1,?)=? RETURNING length(CAST(value AS BLOB))"))?;
             let rows = sql(statement.query_map(
                 params![
                     prefix,
                     (prefix.chars().count() + 1) as i64,
                     format!("{prefix}:")
                 ],
-                |r| r.get::<_, String>(0),
+                |r| r.get::<_, i64>(0),
             ))?;
             for row in rows {
-                bytes += sql(row)?.len() as u64;
+                bytes += sql(row)? as u64;
             }
         }
         Ok(bytes)
     }
     fn collect_operations(&self, protected: Option<&str>) -> IvyResult<()> {
-        let (mut count, mut bytes): (u64,u64) = sql(self.db.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(request AS BLOB))+length(CAST(result AS BLOB))),0)+(SELECT COALESCE(SUM(length(CAST(value AS BLOB))),0) FROM metadata m WHERE key GLOB 'definition-*' AND NOT EXISTS(SELECT 1 FROM retired_operations r WHERE m.key='definition-request:'||r.id)) FROM operations", [], |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,i64>(1)? as u64))))?;
-        let full =
-            |count, bytes| count > self.limits.operations || bytes > self.limits.operation_bytes;
-        if !full(count, bytes) {
-            return Ok(());
-        }
-        let mut statement = sql(self.db.prepare("SELECT id,request,result,length(CAST(request AS BLOB))+length(CAST(result AS BLOB)) FROM operations ORDER BY created_at,rowid"))?;
-        let rows = sql(statement.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)? as u64,
-            ))
-        }))?;
-        // Finish the query before evicting its rows.
-        let rows = sql(rows.collect::<rusqlite::Result<Vec<_>>>())?;
-        for (id, request, result, size) in rows {
-            let result = decode(&result)?;
-            if protected == Some(id.as_str()) {
-                continue;
+        loop {
+            let (count, bytes) = self.usage("operations")?;
+            if count <= self.limits.operations
+                && bytes + self.usage("definitions")?.1 <= self.limits.operation_bytes
+            {
+                return Ok(());
             }
-            if let Some(run_id) = model::optional_text(&result, "runId").filter(|s| !s.is_empty()) {
-                if !self.completed_run(&run_id)? {
-                    continue;
+            let mut statement = sql(self.db.prepare("SELECT id FROM operations o WHERE (? IS NULL OR id<>?) AND (COALESCE(json_type(result,'$.runId'),'null')<>'text' OR json_extract(result,'$.runId')='' OR EXISTS(SELECT 1 FROM retired_runs r WHERE r.id=json_extract(o.result,'$.runId')) OR EXISTS(SELECT 1 FROM runs r WHERE r.id=json_extract(o.result,'$.runId') AND r.status IN ('succeeded','failed','cancelled') AND lower(COALESCE(json_extract(r.document,'$.error'),'')) NOT GLOB '*unknown*')) ORDER BY created_at,rowid LIMIT 32"))?;
+            let ids = sql(sql(
+                statement.query_map(params![protected, protected], |r| r.get::<_, String>(0))
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>())?;
+            if ids.is_empty() {
+                return Err(IvyError::new(
+                    "capacity_exceeded",
+                    "Collector journal capacity is occupied by live or unresolved work.",
+                ));
+            }
+            for id in ids {
+                let request: String = sql(self.db.query_row(
+                    "SELECT request FROM operations WHERE id=?",
+                    [&id],
+                    |r| r.get(0),
+                ))?;
+                let hash = digest(&request);
+                sql(self.db.execute(
+                    "INSERT OR IGNORE INTO retired_operations VALUES(?,?)",
+                    [&id, &hash],
+                ))?;
+                let definition = self
+                    .metadata(&format!("definition-request:{id}"))?
+                    .is_some();
+                self.forget_definition(&id)?;
+                if definition {
+                    self.set_metadata(
+                        &format!("definition-request:{id}"),
+                        &encode(&IvyJson::object([
+                            ("retired", true.into()),
+                            ("requestHash", hash.into()),
+                        ]))?,
+                    )?;
+                }
+                sql(self.db.execute("DELETE FROM operations WHERE id=?", [&id]))?;
+                let (count, bytes) = self.usage("operations")?;
+                if count <= self.limits.operations
+                    && bytes + self.usage("definitions")?.1 <= self.limits.operation_bytes
+                {
+                    return Ok(());
                 }
             }
-            let hash = digest(&request);
-            sql(self.db.execute(
-                "INSERT OR IGNORE INTO retired_operations VALUES(?,?)",
-                [&id, &hash],
-            ))?;
-            let definition = self
-                .metadata(&format!("definition-request:{id}"))?
-                .is_some();
-            let definition_bytes = self.forget_definition(&id)?;
-            if definition {
-                self.set_metadata(
-                    &format!("definition-request:{id}"),
-                    &encode(&IvyJson::object([
-                        ("retired", true.into()),
-                        ("requestHash", hash.into()),
-                    ]))?,
-                )?;
-            }
-            sql(self.db.execute("DELETE FROM operations WHERE id=?", [&id]))?;
-            count -= 1;
-            bytes = bytes.saturating_sub(size + definition_bytes);
-            if !full(count, bytes) {
-                break;
-            }
-        }
-        if full(count, bytes) {
-            Err(IvyError::new(
-                "capacity_exceeded",
-                "Collector journal capacity is occupied by live or unresolved work.",
-            ))
-        } else {
-            Ok(())
         }
     }
     pub fn mutate(
@@ -360,7 +483,7 @@ impl CollectorStore {
     }
     pub fn cleanup(&self, now_ms: i64) -> IvyResult<()> {
         self.transaction(|s| {
-            let mut statement = sql(s.db.prepare("SELECT key FROM metadata WHERE key LIKE 'definition-expiry:%' AND CAST(value AS REAL)<?"))?;
+            let mut statement = sql(s.db.prepare("SELECT key FROM metadata m WHERE key LIKE 'definition-expiry:%' AND CAST(value AS REAL)<? AND (EXISTS(SELECT 1 FROM operations o WHERE m.key='definition-expiry:'||o.id) OR EXISTS(SELECT 1 FROM retired_operations o WHERE m.key='definition-expiry:'||o.id)) ORDER BY key LIMIT 32"))?;
             let rows = sql(statement.query_map([now_ms],|r| r.get::<_,String>(0)))?;
             let keys = sql(rows.collect::<rusqlite::Result<Vec<_>>>())?;
             for key in keys {
@@ -371,19 +494,16 @@ impl CollectorStore {
         })
     }
     fn collect_runs(&self, protected: Option<&str>) -> IvyResult<()> {
-        let (mut count, mut bytes): (u64, u64) = sql(self.db.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(length(CAST(document AS BLOB))),0) FROM runs",
-            [],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
-        ))?;
+        let (mut count, mut bytes) = self.usage("runs")?;
+        bytes += self.usage("snapshots")?.1 + self.usage("progress")?.1;
         if count <= self.limits.runs && bytes <= self.limits.run_bytes {
             return Ok(());
         }
-        let mut statement = sql(self.db.prepare("SELECT id,length(CAST(document AS BLOB)) FROM runs WHERE status IN ('succeeded','failed','cancelled') AND lower(COALESCE(json_extract(document,'$.error'),'')) NOT GLOB '*unknown*' AND (? IS NULL OR id<>?) AND id NOT IN (SELECT json_extract(document,'$.lastRunId') FROM tasks WHERE json_extract(document,'$.lastRunId') IS NOT NULL) ORDER BY json_extract(document,'$.finishedAt'),rowid"))?;
-        let rows = sql(statement.query_map(params![protected, protected], |r| {
+        let mut statement = sql(self.db.prepare("SELECT id,length(CAST(document AS BLOB)) FROM runs r WHERE status IN ('succeeded','failed','cancelled') AND lower(COALESCE(json_extract(document,'$.error'),'')) NOT GLOB '*unknown*' AND (? IS NULL OR id<>?) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE json_extract(t.document,'$.lastRunId')=r.id) ORDER BY json_extract(document,'$.finishedAt'),rowid LIMIT 32"))?;
+        let rows = sql(sql(statement.query_map(params![protected, protected], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-        }))?;
-        let rows = sql(rows.collect::<rusqlite::Result<Vec<_>>>())?;
+        }))?
+        .collect::<rusqlite::Result<Vec<_>>>())?;
         for (id, size) in rows {
             if count <= self.limits.runs && bytes <= self.limits.run_bytes {
                 break;

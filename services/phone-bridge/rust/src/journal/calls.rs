@@ -104,7 +104,6 @@ impl JournalDb<'_> {
             "invalid_arguments",
             "Outgoing call UUIDs are allocated by original admission.",
         )?;
-        db.compact()?;
         db.transaction(|db| {
             let operation_id = field(&admission, "operationId")?
                 .as_js_string()
@@ -168,6 +167,7 @@ impl JournalDb<'_> {
             db.db
                 .execute("INSERT INTO active_calls VALUES (?)", [&id])
                 .map_err(error)?;
+            db.maintenance_pending.set(true);
             Ok(call)
         })
     }
@@ -204,6 +204,7 @@ impl PhoneJournal {
                         [call_id.to_utf8()?],
                     )
                     .map_err(error)?;
+                db.maintenance_pending.set(true);
                 Ok(())
             })
         })
@@ -269,6 +270,7 @@ impl PhoneJournal {
                         [call_id.to_utf8()?],
                     )
                     .map_err(error)?;
+                db.maintenance_pending.set(true);
                 Ok(())
             })
         })

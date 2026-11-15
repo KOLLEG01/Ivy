@@ -1,6 +1,6 @@
 //! Pure Collector policy. Process ownership and RPC transport belong to shared crates.
 use crate::model::{self, RecordTask, Run};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, json::canonical};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::canonical_object_size};
 
 pub const WORKER: &str = include_str!("../assets/worker.mjs");
 pub const WORKER_BYTES: usize = 1_000_000;
@@ -69,21 +69,46 @@ pub fn validate_publication(run: &Run, maximum_retention: &IvyJson) -> IvyResult
         model::field(model::field(run, "task")?, "retention")?,
         maximum_retention,
     )?;
-    let bytes = canonical(
-        &result_content(run)?,
+    let output = model::field(run, "output")?;
+    let version = IvyJson::Number(1.0);
+    let empty = IvyJson::Array(Vec::new());
+    let fields = [
+        ("schemaVersion", &version),
+        ("taskId", model::field(run, "taskId")?),
+        ("runId", model::field(run, "id")?),
+        ("collectedAt", model::field(run, "finishedAt")?),
+        ("data", model::field(output, "data")?),
+        ("events", output.get("events").unwrap_or(&empty)),
+    ]
+    .map(|(k, v)| (JsString::from(k), v));
+    let bytes = canonical_object_size(
+        fields.iter().map(|(k, v)| (k, *v)),
         ivy_contracts::limits::MANAGEMENT_FRAME_BYTES,
-    )?
-    .len();
+    )?;
     if bytes > 1_048_576.min(model::number(&retention, "maximumBytes")? as usize) {
         return Err(IvyError::new(
             "limit_exceeded",
             "Result exceeds the task retained byte budget.",
         ));
     }
-    let output = model::field(run, "output")?;
     if let Some(IvyJson::Array(events)) = output.get("events") {
         for i in 0..events.len() {
-            canonical(&event_content(run, i)?, EVENT_BYTES)?;
+            let index = IvyJson::Number(i as f64);
+            let event = &events[i];
+            let fields = [
+                ("kind", IvyJson::String("collected".into())),
+                ("eventIndex", index),
+            ];
+            let values = [
+                ("kind", &fields[0].1),
+                ("eventIndex", &fields[1].1),
+                ("taskId", model::field(run, "taskId")?),
+                ("runId", model::field(run, "id")?),
+                ("name", model::field(event, "name")?),
+                ("payload", model::field(event, "payload")?),
+            ]
+            .map(|(k, v)| (JsString::from(k), v));
+            canonical_object_size(values.iter().map(|(k, v)| (k, *v)), EVENT_BYTES)?;
         }
     }
     Ok(())

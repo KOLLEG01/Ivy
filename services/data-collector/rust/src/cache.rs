@@ -56,13 +56,22 @@ impl ExecutionCache<'_> {
             ),
         );
         self.store.save(&row)?;
+        let task = model::field(&row, "task")?;
+        let snapshot = self.store.pin_task(task)?;
         let mut run = IvyJson::object([
             ("id", id),
             (
                 "taskId",
                 model::field(model::field(&row, "task")?, "id")?.clone(),
             ),
-            ("task", model::field(&row, "task")?.clone()),
+            (
+                "task",
+                IvyJson::object([
+                    ("id", model::field(task, "id")?.clone()),
+                    ("retention", model::field(task, "retention")?.clone()),
+                ]),
+            ),
+            ("taskSnapshot", snapshot.into()),
             ("status", "queued".into()),
             ("input", input),
             ("output", IvyJson::Null),
@@ -102,19 +111,11 @@ impl ExecutionCache<'_> {
     /// produce catch-up bursts; enqueue advances from the current time.
     pub fn schedule(&self, now_ms: f64, mut fresh_id: impl FnMut() -> String) -> IvyResult<usize> {
         let mut queued = 0;
-        for row in self.store.list(false)? {
-            let task = model::field(&row, "task")?;
-            let id = model::text(task, "id")?;
-            if model::truth(task, "enabled")
-                && model::number(task, "intervalSeconds")? > 0.0
-                && model::number(&row, "nextAt")? <= now_ms
-                && !self.unconfirmed(&row)?
-                && !self.store.executing(&id)?
-            {
-                self.store
-                    .transaction(|_| self.enqueue(row, &fresh_id(), IvyJson::Null, now_ms))?;
-                queued += 1;
-            }
+        for id in self.store.due_tasks(now_ms)? {
+            self.store.transaction(|_| {
+                self.enqueue(self.task(&id)?, &fresh_id(), IvyJson::Null, now_ms)
+            })?;
+            queued += 1;
         }
         Ok(queued)
     }
@@ -155,12 +156,7 @@ impl ExecutionCache<'_> {
         if model::truth(run, "executionCommitted") {
             return Ok(());
         }
-        let mut row = self.task(&model::text(run, "taskId")?)?;
-        policy::commit_execution(&mut row, run, now_ms)?;
-        self.store.transaction(|s| {
-            s.save(&row)?;
-            s.save_run(run)
-        })
+        self.store.commit_execution(run, now_ms)
     }
     pub fn fail(&self, run: &mut Run, code: &str, cancelled: bool, now_iso: &str) -> IvyResult<()> {
         run.insert(
@@ -255,7 +251,7 @@ impl ExecutionCache<'_> {
                 .cloned(),
         );
         let run = if let Some(id) = model::optional_sqlite_key(row, "lastRunId") {
-            self.store.run(&id)?
+            self.store.run_status(&id)?
         } else {
             None
         };

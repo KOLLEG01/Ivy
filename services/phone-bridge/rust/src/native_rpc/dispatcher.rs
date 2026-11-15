@@ -1,7 +1,7 @@
 //! The native dispatcher owns invocation and safe receipts independently of
 //! pipe response waiters. Epoch loss is still resolved by the service journal.
 use super::*;
-use std::{future::Future, pin::Pin, sync::Mutex};
+use std::{future::Future, pin::Pin};
 
 pub type NativeInvocation = Pin<Box<dyn Future<Output = NativeOutcome> + Send + 'static>>;
 pub type NativeInvocationStart = Pin<Box<dyn Future<Output = NativeInvocation> + Send + 'static>>;
@@ -26,6 +26,7 @@ pub struct NativeReply {
     epoch: String,
     request_id: u64,
     outcome: NativeOutcome,
+    receipt_usage: NativeReceiptUsage,
 }
 impl NativeReply {
     pub fn request_id(&self) -> u64 {
@@ -33,6 +34,9 @@ impl NativeReply {
     }
     pub fn outcome(&self) -> &NativeOutcome {
         &self.outcome
+    }
+    pub fn receipt_usage(&self) -> NativeReceiptUsage {
+        self.receipt_usage
     }
     pub fn to_json(&self) -> Result<String, FrameError> {
         let quote = |value: &str| {
@@ -45,10 +49,11 @@ impl NativeReply {
             None => "null".into(),
         };
         let json = format!(
-            "{{\"version\":1,\"epoch\":{},\"requestId\":{},\"ok\":{},\"result\":{result},\"error\":{error}}}",
+            "{{\"version\":1,\"epoch\":{},\"requestId\":{},\"ok\":{},\"result\":{result},\"error\":{error},\"receiptUsage\":{}}}",
             quote(&self.epoch)?,
             self.request_id,
-            self.outcome.error_code().is_none()
+            self.outcome.error_code().is_none(),
+            self.receipt_usage.json()
         );
         if json.len() > FRAME_BYTES {
             return Err(FrameError::Oversized);
@@ -144,6 +149,7 @@ impl NativeDispatcher {
                         hash: String::new(),
                         outcome: OnceLock::new(),
                         changed: Notify::new(),
+                        budget: None,
                     })
                 });
                 let completed = receipt.clone();
@@ -184,6 +190,7 @@ impl NativeDispatcher {
             epoch: self.0.epoch.clone(),
             request_id,
             outcome,
+            receipt_usage: self.0.receipts.lock().unwrap().usage(),
         }
     }
 }

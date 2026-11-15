@@ -1,4 +1,6 @@
 import {writeFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+import {resolve} from 'node:path';
 process.stdin.setEncoding('utf8');
 let input=''; for await (const chunk of process.stdin) input+=chunk;
 const context=JSON.parse(input); context.signal=AbortSignal.timeout(context.timeoutMs);
@@ -11,7 +13,7 @@ if(!response.ok||reply.error) throw Object.assign(new Error('MCP request failed.
 return reply.result;
 }};
 }
-try { const {default:run}=await import('./task.mjs');
+try { const {default:run}=await import(pathToFileURL(process.argv[2] ?? resolve('task.mjs')).href);
 const output=JSON.stringify(await run(context));
 if(typeof output!=='string'||Buffer.byteLength(output)>1000000) process.exit(79);
 writeFileSync('result.json',output,{mode:0o600}); process.exit(0);

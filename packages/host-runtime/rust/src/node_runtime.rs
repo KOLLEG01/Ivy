@@ -96,12 +96,38 @@ impl NodeRuntime {
                 .unwrap()
                 .join("node_modules/npm/bin/npm-cli.js")
         });
+        #[cfg(not(windows))]
+        let path = if configured.is_none() && !path.is_file() {
+            self.executable
+                .parent()
+                .unwrap()
+                .join("../lib/node_modules/npm/bin/npm-cli.js")
+        } else {
+            path
+        };
         if !path.is_file() {
             return Err(IvyError::new(
                 "unsupported_runtime",
                 "Configure npmCliPath for tasks with npm dependencies.",
             ));
         }
+        // Node resolves its JavaScript entrypoint through the module loader,
+        // which rejects Windows verbatim drive/UNC paths returned by realpath.
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::{OsStrExt, OsStringExt};
+            let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+            let unc = r"\\?\UNC\".encode_utf16().collect::<Vec<_>>();
+            let drive = r"\\?\".encode_utf16().collect::<Vec<_>>();
+            let normal = if wide.starts_with(&unc) {
+                [vec![b'\\' as u16; 2], wide[unc.len()..].to_vec()].concat()
+            } else if wide.starts_with(&drive) {
+                wide[drive.len()..].to_vec()
+            } else {
+                wide
+            };
+            PathBuf::from(std::ffi::OsString::from_wide(&normal))
+        };
         Ok(path)
     }
 }

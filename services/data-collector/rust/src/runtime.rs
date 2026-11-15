@@ -49,7 +49,7 @@ impl Runtime<'_> {
         let view = model::text(&input, "view")?;
         if view == "tasks" {
             let mut items = Vec::new();
-            for row in self.store.list(false)? {
+            for row in self.store.summaries(false)? {
                 let mut visible = cache.visible(&row, maximum)?;
                 visible.insert(
                     "task",
@@ -96,7 +96,14 @@ impl Runtime<'_> {
                 ),
             ])));
         }
-        let row = cache.task(&model::text(&input, "id")?)?;
+        let id = model::text(&input, "id")?;
+        let row = if view == "task" {
+            cache.task(&id)?
+        } else {
+            self.store
+                .summary(&id, false)?
+                .ok_or_else(|| IvyError::new("not_found", "Collector task not found."))?
+        };
         if view == "task" {
             return Ok(Read::Local(cache.visible(&row, maximum)?));
         }
@@ -183,7 +190,7 @@ impl Runtime<'_> {
                     ("lastRunId", nullable(previous.and_then(|r| r.get("lastRunId")))),
                     ("retentionWarning", IvyJson::Null),
                 ]);
-                for key in ["definition", "resultRootId"] { if let Some(value) = saved.as_ref().and_then(|r| r.get(key)).filter(|v| !v.is_null()) { row.insert(key, value.clone()); } }
+                for key in ["definition", "resultRootId", "resultRevision"] { if let Some(value) = saved.as_ref().and_then(|r| r.get(key)).filter(|v| !v.is_null()) { row.insert(key, value.clone()); } }
                 self.store.save(&row)?;
                 return cache.visible(&row, maximum);
             }

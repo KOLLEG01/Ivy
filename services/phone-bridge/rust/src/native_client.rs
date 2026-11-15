@@ -109,6 +109,7 @@ struct State {
     expired_reads: BTreeSet<u64>,
     expired_effects: BTreeMap<u64, Arc<Mutex<Pending>>>,
     heartbeat: bool,
+    receipt_rotation_due: bool,
 }
 struct Inner {
     epoch: JsString,
@@ -120,6 +121,18 @@ struct Inner {
 #[derive(Clone)]
 pub struct PhoneNativeClient(Arc<Inner>);
 impl PhoneNativeClient {
+    pub fn receipt_rotation_due(&self) -> bool {
+        self.0.state.lock().unwrap().receipt_rotation_due
+    }
+    pub fn can_rotate_receipts(&self) -> bool {
+        let state = self.0.state.lock().unwrap();
+        state.closed.is_none()
+            && state.expired_effects.is_empty()
+            && state
+                .pending
+                .values()
+                .all(|pending| pending.lock().unwrap().intent.is_none())
+    }
     pub fn start<R: AsyncRead + Unpin + Send + 'static, W: AsyncWrite + Unpin + Send + 'static>(
         epoch: JsString,
         input: W,
@@ -475,11 +488,35 @@ impl Inner {
             .get("requestId")
             .and_then(IvyJson::as_f64)
             .ok_or_else(IvyError::internal)? as u64;
+        let pressure = match reply.get("receiptUsage") {
+            Some(usage) => {
+                let number = |key: &str| {
+                    usage
+                        .get(key)
+                        .and_then(IvyJson::as_f64)
+                        .ok_or_else(IvyError::internal)
+                };
+                let retained = number("retainedBytes")?;
+                let reserved = number("reservedBytes")?;
+                let limit = number("limitBytes")?;
+                require(
+                    retained + reserved <= limit,
+                    "phone_invalid_frame",
+                    "Native receipt usage exceeds its admitted byte budget.",
+                )?;
+                // Half the production budget leaves room for the maximum 128
+                // cleanup outcomes and another full-sized result. Completed
+                // bytes never decrease within the same process epoch.
+                retained >= limit / 2.0
+            }
+            None => false,
+        };
         let mut state = self.state.lock().unwrap();
         if state.closed.is_some() {
             return Ok(());
         }
         if state.expired_reads.remove(&id) {
+            state.receipt_rotation_due |= pressure;
             return Ok(());
         }
         let pending = state
@@ -495,6 +532,7 @@ impl Inner {
             "Native Phone response has no unconsumed original request.",
         )?;
         let pending = pending.unwrap();
+        state.receipt_rotation_due |= pressure;
         let mut original = pending.lock().unwrap();
         original.receiving = true;
         let intent = original.intent.clone();
@@ -644,6 +682,7 @@ async fn write<W: AsyncWrite + Unpin>(
 }
 
 mod observations;
+pub use observations::PhoneNativeSnapshot;
 #[cfg(test)]
 #[path = "../../../../tests/rust/phone_service_native_client.rs"]
 mod tests;

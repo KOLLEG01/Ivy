@@ -33,6 +33,7 @@ const title = ref(props.row?.value.title ?? ""),
   refreshSeconds = ref(props.row?.value.refreshSeconds ?? 5),
   metadata = ref(JSON.stringify(props.row?.value.metadata ?? {}, null, 2)),
   imageToken = ref(props.row?.value.imageToken ?? null);
+const imageSvg = ref(props.row?.value.image?.svg ?? "");
 const parsedMetadata = computed(() => {
   try {
     const value = JSON.parse(metadata.value || "{}");
@@ -120,6 +121,7 @@ const submit = () => {
     refreshSeconds: Number(refreshSeconds.value),
     metadata: parsedMetadata.value.value!,
     imageToken: imageToken.value,
+    ...(imageSvg.value.trim() ? { image: { svg: imageSvg.value } } : {}),
   });
 };
 </script>
@@ -169,6 +171,7 @@ const submit = () => {
           <TabsTrigger value="sources">{{
             tr("Datenquellen", "Data sources")
           }}</TabsTrigger>
+          <TabsTrigger value="image">{{ tr("Bildvorlage", "Image template") }}</TabsTrigger>
           <TabsTrigger value="refresh">{{
             tr("Aktualisierung", "Refresh")
           }}</TabsTrigger>
@@ -191,6 +194,13 @@ const submit = () => {
               >dashboard.onUpdate(async ({ data, output }) =&gt; { … }) ·
               output: mode, width, height, colorMode</FieldDescription
             >
+          </Field>
+        </TabsContent>
+        <TabsContent value="image" class="mt-3">
+          <Field>
+            <FieldLabel for="image-svg">{{ tr("SVG-Bildvorlage", "SVG image template") }}</FieldLabel>
+            <Textarea id="image-svg" v-model="imageSvg" wrap="off" class="min-h-64 font-mono text-sm" spellcheck="false" :disabled="busy" />
+            <FieldDescription>{{ tr("Optional: SVG mit Datenbindungen für PNG-Exporte. Leer lassen, um die HTML-Ansicht als Bild zu exportieren.", "Optional: SVG with data bindings for PNG exports. Leave empty to export the HTML view as an image.") }}</FieldDescription>
           </Field>
         </TabsContent>
         <TabsContent value="sources" class="mt-3">

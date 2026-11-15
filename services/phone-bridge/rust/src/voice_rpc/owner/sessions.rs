@@ -73,8 +73,7 @@ impl PhoneCodexVoice {
             failed: false,
             realtime_requested: false,
             started: false,
-            items: bounded_history(&items, 24000, 126)?,
-            transcript_ids: VecDeque::new(),
+            items: Transcript::from_items(&items)?,
             speaker_voice_id: None,
         }));
         let owner = self.0.clone();
@@ -146,12 +145,10 @@ impl PhoneCodexVoice {
                 if let Some(session) = owner.session(&call_id) {
                     let mut session = session.lock().unwrap();
                     if session.thread_id == thread_id {
-                        let mut items = session.items.clone();
-                        items.push(IvyJson::object([
+                        session.items.push(IvyJson::object([
                             ("role", "user".into()),
                             ("text", prompt.into()),
-                        ]));
-                        session.items = bounded_history(&items, 24000, 126)?;
+                        ]))?;
                     }
                 }
                 Ok(())
@@ -338,14 +335,10 @@ impl Inner {
         crate::diagnostics::voice_start_timing(&call_id, "speaker_catalog", catalog_started);
         let speaker = match self.journal.selected_speaker_voice(call_id.clone()).await? {
             Some(id) => id,
-            None => text(&speakers, "defaultVoiceId")?,
+            None => speakers.default_voice_id.clone(),
         };
         require(
-            field(&speakers, "voices")?
-                .as_array()
-                .ok_or_else(IvyError::internal)?
-                .iter()
-                .any(|v| v.get("id") == Some(&speaker.clone().into())),
+            speakers.contains(&speaker),
             "phone_speaker_voice_invalid",
             "Selected speaker voice is outside the current native catalog.",
         )?;
@@ -423,7 +416,7 @@ impl Inner {
             ]));
             let mut params = IvyJson::object([
                 ("threadId", id.clone().into()),
-                ("version", field(&speakers,"protocol")?.clone()),
+                ("version", speakers.protocol.clone().into()),
                 ("outputModality", "audio".into()),
                 (
                     "transport",
@@ -605,7 +598,7 @@ impl Inner {
                 s.realtime_requested,
                 s.started,
                 s.failed,
-                s.items.clone(),
+                s.items.snapshot(),
             )
         };
         if let Some(prompt) = self
@@ -714,7 +707,7 @@ impl Inner {
             if !preserve_work {
                 state
                     .pending_inputs
-                    .retain(|(_, r)| r.params.get("threadId") != Some(&id.clone().into()));
+                    .retain(|(_, r)| r.request.params.get("threadId") != Some(&id.clone().into()));
             }
         }
         self.release_reservations(&call_id, keep.as_ref());

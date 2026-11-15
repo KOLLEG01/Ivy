@@ -1,6 +1,9 @@
 //! Native envelope admission and process-local replay receipts. The service's
 //! durable journal remains the authority after a native process/epoch is lost.
-use crate::ipc::{FRAME_BYTES, FrameError, MAX_RECEIPTS, has_receipt_capacity, is_read_only};
+use crate::ipc::{
+    FRAME_BYTES, FrameError, MAX_RECEIPT_BYTES, MAX_RECEIPT_RESULT_BYTES, MAX_RECEIPTS,
+    has_receipt_capacity, is_read_only, receipt_reserve,
+};
 use ivy_contracts::{
     IvyJson,
     hash::digest,
@@ -8,7 +11,7 @@ use ivy_contracts::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tokio::sync::Notify;
 mod dispatcher;
@@ -269,14 +272,14 @@ pub(crate) fn root_values(text: &str) -> Vec<&str> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeOutcome {
-    result: Option<String>,
-    error: Option<String>,
+    result: Option<Box<str>>,
+    error: Option<Box<str>>,
 }
 impl NativeOutcome {
     /// Handlers serialize before completing receipts. Over-budget serialization
     /// is uncertain because the effect may already have happened.
     pub fn result(json: String) -> Self {
-        if json.len() > FRAME_BYTES - 512 {
+        if json.len() > MAX_RECEIPT_RESULT_BYTES {
             return Self::error("operation_outcome_unknown");
         }
         if parse_with_options(
@@ -292,11 +295,16 @@ impl NativeOutcome {
             return Self::error("invalid_request");
         }
         Self {
-            result: Some(json),
+            result: Some(json.into_boxed_str()),
             error: None,
         }
     }
     pub fn error(code: &str) -> Self {
+        let code = if code.len() <= 128 {
+            code
+        } else {
+            "operation_outcome_unknown"
+        };
         Self {
             result: None,
             error: Some(code.into()),
@@ -308,6 +316,57 @@ impl NativeOutcome {
     pub fn error_code(&self) -> Option<&str> {
         self.error.as_deref()
     }
+    fn retained_bytes(&self) -> usize {
+        self.result.as_ref().map_or(0, |v| v.len()) + self.error.as_ref().map_or(0, |v| v.len())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeReceiptUsage {
+    pub receipts: usize,
+    pub retained_bytes: usize,
+    pub reserved_bytes: usize,
+    pub limit_bytes: usize,
+}
+impl NativeReceiptUsage {
+    fn json(&self) -> String {
+        format!(
+            "{{\"receipts\":{},\"retainedBytes\":{},\"reservedBytes\":{},\"limitBytes\":{}}}",
+            self.receipts, self.retained_bytes, self.reserved_bytes, self.limit_bytes
+        )
+    }
+}
+
+#[derive(Default)]
+struct ReceiptBytes {
+    retained: usize,
+    reserved: usize,
+}
+struct ReceiptBudget {
+    bytes: Mutex<ReceiptBytes>,
+    limit: usize,
+}
+impl ReceiptBudget {
+    fn reserve(&self, cleanup_bytes: usize) -> bool {
+        let mut bytes = self.bytes.lock().unwrap();
+        if bytes.retained + bytes.reserved + MAX_RECEIPT_RESULT_BYTES + cleanup_bytes > self.limit {
+            return false;
+        }
+        bytes.reserved += MAX_RECEIPT_RESULT_BYTES;
+        true
+    }
+    fn complete(
+        &self,
+        saved: &OnceLock<NativeOutcome>,
+        outcome: NativeOutcome,
+    ) -> Result<(), NativeOutcome> {
+        let retained = outcome.retained_bytes();
+        let mut bytes = self.bytes.lock().unwrap();
+        saved.set(outcome)?;
+        bytes.reserved -= MAX_RECEIPT_RESULT_BYTES;
+        bytes.retained += retained;
+        Ok(())
+    }
 }
 
 /// A receipt holds no request/credentials. Replays share the original pending
@@ -316,13 +375,17 @@ pub struct NativeReceipt {
     hash: String,
     outcome: OnceLock<NativeOutcome>,
     changed: Notify,
+    budget: Option<Arc<ReceiptBudget>>,
 }
 impl NativeReceipt {
     pub fn outcome(&self) -> Option<&NativeOutcome> {
         self.outcome.get()
     }
     pub fn complete(&self, outcome: NativeOutcome) -> Result<(), NativeOutcome> {
-        let result = self.outcome.set(outcome);
+        let result = match &self.budget {
+            Some(budget) => budget.complete(&self.outcome, outcome),
+            None => self.outcome.set(outcome),
+        };
         if result.is_ok() {
             self.changed.notify_waiters();
         }
@@ -353,10 +416,21 @@ pub struct NativeReceipts {
     capacity: usize,
     stopping: bool,
     receipts: HashMap<String, Arc<NativeReceipt>>,
+    budget: Arc<ReceiptBudget>,
 }
 impl NativeReceipts {
     pub fn new(epoch: String, capacity: usize) -> Result<Self, FrameError> {
-        if !guid_d(&epoch) || !(1..=MAX_RECEIPTS).contains(&capacity) {
+        Self::with_byte_limit(epoch, capacity, MAX_RECEIPT_BYTES)
+    }
+    pub fn with_byte_limit(
+        epoch: String,
+        capacity: usize,
+        bytes: usize,
+    ) -> Result<Self, FrameError> {
+        if !guid_d(&epoch)
+            || !(1..=MAX_RECEIPTS).contains(&capacity)
+            || !(MAX_RECEIPT_RESULT_BYTES..=MAX_RECEIPT_BYTES).contains(&bytes)
+        {
             return Err(FrameError::InvalidRequest);
         }
         Ok(Self {
@@ -364,6 +438,10 @@ impl NativeReceipts {
             capacity,
             stopping: false,
             receipts: HashMap::new(),
+            budget: Arc::new(ReceiptBudget {
+                bytes: Mutex::default(),
+                limit: bytes,
+            }),
         })
     }
     pub fn stop(&mut self) {
@@ -374,6 +452,15 @@ impl NativeReceipts {
     }
     pub fn is_empty(&self) -> bool {
         self.receipts.is_empty()
+    }
+    pub fn usage(&self) -> NativeReceiptUsage {
+        let bytes = self.budget.bytes.lock().unwrap();
+        NativeReceiptUsage {
+            receipts: self.len(),
+            retained_bytes: bytes.retained,
+            reserved_bytes: bytes.reserved,
+            limit_bytes: self.budget.limit,
+        }
     }
     /// Recheck just before invocation too: Stop may occur after admission while
     /// the dispatcher yields. Read-only calls still require epoch and live owner.
@@ -405,13 +492,20 @@ impl NativeReceipts {
                 Admission::Reject("operation_conflict")
             };
         }
-        if !has_receipt_capacity(&request.method, self.len(), self.capacity, cleanup_slots()) {
+        let cleanup_slots = cleanup_slots();
+        if !has_receipt_capacity(&request.method, self.len(), self.capacity, cleanup_slots)
+            || !self.budget.reserve(
+                receipt_reserve(&request.method, self.capacity, cleanup_slots)
+                    * MAX_RECEIPT_RESULT_BYTES,
+            )
+        {
             return Admission::Reject("capacity_exceeded");
         }
         let receipt = Arc::new(NativeReceipt {
             hash,
             outcome: OnceLock::new(),
             changed: Notify::new(),
+            budget: Some(self.budget.clone()),
         });
         self.receipts.insert(operation_id.clone(), receipt.clone());
         Admission::Dispatch(Some(receipt))

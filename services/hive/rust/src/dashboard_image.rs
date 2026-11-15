@@ -65,25 +65,20 @@ fn query(value: &JsString) -> IvyResult<(JsString, J)> {
     Ok((node.unwrap().clone(), args))
 }
 
-fn image(value: &J) -> IvyResult<(Vec<u8>, String, u32)> {
+fn metadata(value: &J) -> IvyResult<(String, u32)> {
     let invalid = || {
         IvyError::new(
             "provider_contract_error",
             "Invalid dashboard image response.",
         )
     };
-    let data = value
-        .get("data")
-        .and_then(J::as_js_string)
-        .ok_or_else(invalid)?;
     let metadata = value
         .get("metadata")
         .filter(|v| v.as_object().is_some())
         .ok_or_else(invalid)?;
     require(
         value.get("mimeType") == Some(&"image/png".into())
-            && value.get("encoding") == Some(&"base64".into())
-            && data.0.len() <= 12 * 1024 * 1024,
+            && value.get("encoding") == Some(&"base64".into()),
         "provider_contract_error",
         "Invalid dashboard image response.",
     )?;
@@ -98,6 +93,22 @@ fn image(value: &J) -> IvyResult<(Vec<u8>, String, u32)> {
         "provider_contract_error",
         "Dashboard metadata is too large.",
     )?;
+    Ok((metadata, seconds))
+}
+
+fn image(value: &J) -> IvyResult<(Vec<u8>, String, u32)> {
+    let invalid = || {
+        IvyError::new(
+            "provider_contract_error",
+            "Invalid dashboard image response.",
+        )
+    };
+    let (metadata, seconds) = metadata(value)?;
+    let data = value
+        .get("data")
+        .and_then(J::as_js_string)
+        .filter(|s| s.0.len() <= 12 * 1024 * 1024)
+        .ok_or_else(invalid)?;
     let png = STANDARD
         .decode(data.to_utf8().map_err(|_| invalid())?)
         .map_err(|_| invalid())?;
@@ -137,23 +148,65 @@ where
         return response.end_empty();
     }
     let result = async {
-        let (node, args) = query(search)?;
-        let (png, metadata, seconds) = image(&invoke(node, args).await?)?;
-        let etag = format!("\"{}\"", &digest(&png)[7..]);
+        let (node, mut args) = query(search)?;
+        if method == "HEAD" {
+            args.insert("head", true.into());
+        }
+        if let Some(condition) = if_none_match.filter(|c| c.len() <= 8192) {
+            args.insert("ifNoneMatch", condition.into());
+        }
+        let value = invoke(node, args).await?;
+        let tag = value.get("etag").map(J::as_str).transpose()?;
+        if let Some(tag) = &tag {
+            require(
+                tag.len() == 68
+                    && tag.starts_with("W/\"")
+                    && tag.ends_with('"')
+                    && tag[3..67].bytes().all(|b| b.is_ascii_hexdigit()),
+                "provider_contract_error",
+                "Invalid dashboard ETag.",
+            )?;
+        }
+        let summary = value.get("notModified") == Some(&J::Bool(true))
+            || value.get("head") == Some(&J::Bool(true));
+        let (png, metadata, seconds) = if summary {
+            require(
+                tag.is_some()
+                    && (method == "HEAD" || value.get("notModified") == Some(&J::Bool(true))),
+                "provider_contract_error",
+                "Invalid image summary.",
+            )?;
+            let (metadata, seconds) = metadata(&value)?;
+            (Vec::new(), metadata, seconds)
+        } else {
+            image(&value)?
+        };
+        let etag = tag.unwrap_or_else(|| format!("\"{}\"", &digest(&png)[7..]));
         response.set_header("X-Dashboard-Metadata", &metadata.into())?;
         response.set_header("X-Dashboard-Refresh-Seconds", &seconds.to_string().into())?;
         response.set_header("ETag", &etag.as_str().into())?;
-        if if_none_match.is_some_and(|values| values.split(',').any(|value| value.trim() == etag)) {
+        let matched = if_none_match.is_some_and(|values| {
+            values.split(',').any(|value| {
+                let value = value.trim();
+                value == "*"
+                    || value.strip_prefix("W/").unwrap_or(value)
+                        == etag.strip_prefix("W/").unwrap_or(&etag)
+            })
+        });
+        require(
+            value.get("notModified") != Some(&J::Bool(true)) || matched,
+            "provider_contract_error",
+            "Unexpected conditional image response.",
+        )?;
+        if matched {
             response.write_head(304, J::object([] as [(&str, J); 0]))?;
             return response.end_empty();
         }
-        response.write_head(
-            200,
-            J::object([
-                ("Content-Type", "image/png".into()),
-                ("Content-Length", png.len().to_string().into()),
-            ]),
-        )?;
+        let mut headers = J::object([("Content-Type", "image/png".into())]);
+        if !summary {
+            headers.insert("Content-Length", png.len().to_string().into());
+        }
+        response.write_head(200, headers)?;
         if method == "HEAD" {
             response.end_empty()
         } else {

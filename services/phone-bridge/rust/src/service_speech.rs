@@ -1,18 +1,17 @@
 //! Protected announcement synthesis. A submitted request is never sent twice.
 use crate::{
     journal::PhoneJournal,
+    media::announcement::MAX_WAV_BYTES,
     service_settings::{PhoneConfigurationSection, phone_configuration_section},
 };
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, Outcome,
-    hash::{digest, hash_json},
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome, hash::hash_json};
 use ivy_host_runtime::node_path;
+use sha2::{Digest, Sha256};
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
+use tokio::io::AsyncWriteExt;
 
 fn field<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a IvyJson> {
     value.get(key).ok_or_else(IvyError::internal)
@@ -148,23 +147,18 @@ pub async fn synthesize_announcement(
         if !response.status().is_success() {
             return Err(unknown());
         }
-        let mut wav = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| unknown())? {
-            if wav.len() + chunk.len() > 10 * 1024 * 1024 {
-                return Err(unknown());
-            }
-            wav.extend_from_slice(&chunk);
-        }
-        if wav.len() < 44 || &wav[..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_WAV_BYTES as u64)
+        {
             return Err(unknown());
         }
-        let root = journal.data_root().join("announcements");
-        let file = root.join(format!("{operation}.wav"));
-        let sha = digest(&wav);
-        let target = file.clone();
-        tokio::task::spawn_blocking(move || write_wav(&root, &target, &wav))
-            .await
-            .map_err(|_| unknown())??;
+        let mut wav =
+            WavDownload::new(journal.data_root().join("announcements"), &operation).await?;
+        while let Some(chunk) = response.chunk().await.map_err(|_| unknown())? {
+            wav.push(&chunk).await?;
+        }
+        let (file, sha) = wav.finish().await?;
         Ok(IvyJson::object([
             ("wavPath", node_path::from_native(&file).into()),
             ("sha256", sha.into()),
@@ -190,7 +184,7 @@ pub async fn synthesize_announcement(
         .await?;
     result.map_err(|_| unknown())
 }
-fn write_wav(root: &Path, file: &PathBuf, wav: &[u8]) -> IvyResult<()> {
+fn create_wav(root: &Path, file: &Path) -> IvyResult<std::fs::File> {
     let mut directories = std::fs::DirBuilder::new();
     directories.recursive(true);
     let mut options = std::fs::OpenOptions::new();
@@ -202,8 +196,78 @@ fn write_wav(root: &Path, file: &PathBuf, wav: &[u8]) -> IvyResult<()> {
         options.mode(0o600);
     }
     directories.create(root).map_err(|_| unknown())?;
-    options
-        .open(file)
-        .and_then(|mut file| file.write_all(wav))
-        .map_err(|_| unknown())
+    options.open(file).map_err(|_| unknown())
 }
+
+struct WavDownload {
+    path: PathBuf,
+    file: Option<tokio::fs::File>,
+    digest: Sha256,
+    header: [u8; 12],
+    bytes: usize,
+    committed: bool,
+}
+impl WavDownload {
+    async fn new(root: PathBuf, operation: &str) -> IvyResult<Self> {
+        let path = root.join(format!("{operation}.wav"));
+        let target = path.clone();
+        let file = tokio::task::spawn_blocking(move || create_wav(&root, &target))
+            .await
+            .map_err(|_| unknown())??;
+        Ok(Self {
+            path,
+            file: Some(tokio::fs::File::from_std(file)),
+            digest: Sha256::new(),
+            header: [0; 12],
+            bytes: 0,
+            committed: false,
+        })
+    }
+    async fn push(&mut self, bytes: &[u8]) -> IvyResult<()> {
+        if bytes.len() > MAX_WAV_BYTES - self.bytes {
+            return Err(unknown());
+        }
+        if self.bytes < self.header.len() {
+            let count = bytes.len().min(self.header.len() - self.bytes);
+            self.header[self.bytes..self.bytes + count].copy_from_slice(&bytes[..count]);
+        }
+        // Tokio's file writer copies its submitted slice into a blocking job.
+        // Bound that copy even when the HTTP transport returns a large chunk.
+        for block in bytes.chunks(32768) {
+            self.file
+                .as_mut()
+                .unwrap()
+                .write_all(block)
+                .await
+                .map_err(|_| unknown())?;
+            self.digest.update(block);
+        }
+        self.bytes += bytes.len();
+        Ok(())
+    }
+    async fn finish(mut self) -> IvyResult<(PathBuf, String)> {
+        if self.bytes < 44 || &self.header[..4] != b"RIFF" || &self.header[8..12] != b"WAVE" {
+            return Err(unknown());
+        }
+        let file = self.file.as_mut().unwrap();
+        file.flush().await.map_err(|_| unknown())?;
+        file.sync_all().await.map_err(|_| unknown())?;
+        self.file.take();
+        let hash =
+            ivy_contracts::hash::digest_string(std::mem::take(&mut self.digest).finalize().into());
+        self.committed = true;
+        Ok((self.path.clone(), hash))
+    }
+}
+impl Drop for WavDownload {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/phone_service_speech.rs"]
+mod tests;

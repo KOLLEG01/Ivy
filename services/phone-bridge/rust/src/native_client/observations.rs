@@ -1,4 +1,54 @@
 use super::*;
+
+/// One poll's status observations. Admission, diagnostics and call maintenance
+/// share each original read; a new poll always starts with a fresh root status.
+pub struct PhoneNativeSnapshot {
+    root: IvyJson,
+    calls: BTreeMap<JsString, IvyJson>,
+}
+impl PhoneNativeSnapshot {
+    pub fn new(root: IvyJson) -> Self {
+        Self {
+            root,
+            calls: BTreeMap::new(),
+        }
+    }
+    pub fn root(&self) -> &IvyJson {
+        &self.root
+    }
+    pub async fn for_call(
+        &mut self,
+        native: &PhoneNativeClient,
+        id: &JsString,
+    ) -> IvyResult<&IvyJson> {
+        if self
+            .root
+            .get("call")
+            .and_then(|c| c.get("id"))
+            .and_then(IvyJson::as_js_string)
+            == Some(id)
+        {
+            return Ok(&self.root);
+        }
+        if !self.calls.contains_key(id) {
+            require(
+                self.calls.len() < 64,
+                "phone_status_capacity",
+                "Too many call observations in one poll.",
+            )?;
+            let observed = native.observe(Some(id.clone())).await?;
+            require(
+                observed
+                    .get("call")
+                    .is_some_and(|c| c.is_null() || c.get("id") == Some(&id.clone().into())),
+                "phone_invalid_status",
+                "Native status belongs to another call.",
+            )?;
+            self.calls.insert(id.clone(), observed);
+        }
+        self.calls.get(id).ok_or_else(IvyError::internal)
+    }
+}
 fn field<'a>(v: &'a IvyJson, k: &str) -> IvyResult<&'a IvyJson> {
     v.get(k).ok_or_else(IvyError::internal)
 }

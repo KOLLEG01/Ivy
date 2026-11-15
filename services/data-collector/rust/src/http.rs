@@ -150,14 +150,7 @@ pub async fn body(mut incoming: Incoming, limit: usize) -> Result<IvyJson, BodyE
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| BodyError::Failed)?;
         parse(text, usize::MAX).map_err(|_| BodyError::Failed)
-    }).await.unwrap_or(Err(BodyError::TimedOut))
-}
-pub fn drain(mut body: Incoming) {
-    tokio::spawn(async move {
-        while let Some(frame) = body.frame().await {
-            if frame.is_err() {
-                break;
-            }
-        }
-    });
+    })
+    .await
+    .unwrap_or(Err(BodyError::TimedOut))
 }

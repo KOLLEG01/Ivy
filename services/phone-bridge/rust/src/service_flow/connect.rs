@@ -305,12 +305,12 @@ impl PhoneFlow {
             "phone_voice_unconfigured",
             "Voice requires its Codex runtime.",
         )?;
-        if self.0.state.lock().unwrap().models.is_empty() {
+        if self.0.state.lock().unwrap().models.entries.is_empty() {
             self.voice_model_catalog().await?;
         }
         let id = text(call, "callId")?;
         let selection = self.voice_selection(&id).await?;
-        selection.validate(&IvyJson::Array(self.0.state.lock().unwrap().models.clone()))?;
+        selection.validate(&self.0.state.lock().unwrap().models)?;
         self.0
             .state
             .lock()

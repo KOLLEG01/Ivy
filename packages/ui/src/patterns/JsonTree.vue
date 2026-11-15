@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
+import { Button } from "../components/button";
 
 defineOptions({ name: "JsonTree" });
 const props = withDefaults(
@@ -8,12 +9,30 @@ const props = withDefaults(
     label?: string;
     depth?: number;
     openDepth?: number;
+    stringPreviewLength?: number;
+    showFullLabel?: string;
+    showPreviewLabel?: string;
   }>(),
   {
     label: "value",
     depth: 0,
     openDepth: 1,
+    stringPreviewLength: 256,
+    showFullLabel: "Show full value",
+    showPreviewLabel: "Show preview",
   },
+);
+const expanded = ref(false);
+watch(
+  () => props.value,
+  () => {
+    expanded.value = false;
+  },
+);
+const truncated = computed(
+  () =>
+    typeof props.value === "string" &&
+    props.value.length > Math.max(1, props.stringPreviewLength),
 );
 const object = computed(
   () => props.value !== null && typeof props.value === "object",
@@ -32,7 +51,14 @@ const kind = computed(() =>
         : typeof props.value,
 );
 const preview = computed(() => {
-  if (typeof props.value === "string") return JSON.stringify(props.value);
+  if (typeof props.value === "string")
+    return (
+      JSON.stringify(
+        truncated.value && !expanded.value
+          ? props.value.slice(0, Math.max(1, props.stringPreviewLength))
+          : props.value,
+      ) + (truncated.value && !expanded.value ? "…" : "")
+    );
   if (props.value === null) return "null";
   if (typeof props.value === "number" || typeof props.value === "boolean")
     return String(props.value);
@@ -57,6 +83,9 @@ const preview = computed(() => {
         :label="array ? `[${key}]` : key"
         :depth="depth + 1"
         :open-depth="openDepth"
+        :string-preview-length="stringPreviewLength"
+        :show-full-label="showFullLabel"
+        :show-preview-label="showPreviewLabel"
       />
       <p
         v-if="entries.length === 0"
@@ -80,7 +109,16 @@ const preview = computed(() => {
             ? 'text-muted-foreground'
             : 'text-sky-700 dark:text-sky-300'
       "
-      >{{ preview }}</span
+      >{{ preview
+      }}<Button
+        v-if="truncated"
+        variant="link"
+        size="sm"
+        class="h-auto px-1 py-0 text-xs"
+        :aria-expanded="expanded"
+        @click="expanded = !expanded"
+        >{{ expanded ? showPreviewLabel : showFullLabel }}</Button
+      ></span
     >
   </div>
 </template>

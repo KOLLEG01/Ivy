@@ -69,6 +69,48 @@ const QUERY: &str =
     "node=reference.dashboards&id=dashboard&token=secret&width=120&height=100&colorMode=grayscale";
 
 #[tokio::test]
+async fn native_head_and_conditional_images_need_no_png_transport() {
+    let etag = format!("W/\"{}\"", "a".repeat(64));
+    for (method, condition, status) in [("HEAD", None, 200), ("GET", Some(etag.as_str()), 304)] {
+        let mut reply = Reply::default();
+        let response_etag = etag.clone();
+        dashboard_image::handle(
+            method,
+            &QUERY.into(),
+            condition,
+            |_, args| async move {
+                assert_eq!(args.get("head") == Some(&J::Bool(true)), method == "HEAD");
+                assert_eq!(
+                    args.get("ifNoneMatch")
+                        .and_then(|v| v.as_str().ok())
+                        .as_deref(),
+                    condition
+                );
+                let mut value = image();
+                value.remove("data");
+                value.insert("etag", response_etag.as_str().into());
+                value.insert(
+                    if method == "HEAD" {
+                        "head"
+                    } else {
+                        "notModified"
+                    },
+                    true.into(),
+                );
+                Ok(value)
+            },
+            &mut reply,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.status, status);
+        assert!(reply.body.is_empty());
+        assert_eq!(reply.headers["ETag"], etag);
+        assert_eq!(reply.headers["X-Dashboard-Refresh-Seconds"], "60");
+    }
+}
+
+#[tokio::test]
 async fn public_png_keeps_headers_and_conditional_head_behavior() {
     let mut etag = String::new();
     for (method, conditional, status) in [

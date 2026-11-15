@@ -91,22 +91,22 @@ impl JournalDb<'_> {
         )?;
         let row: Option<String> = self.db.prepare_cached("SELECT operation_id FROM commands WHERE call_id=? AND method=? AND COALESCE(json_extract(value,'$.intent.voiceGeneration'),0)=? ORDER BY rowid LIMIT 1").map_err(error)?
             .query_row(params![call_id.to_utf8()?, method.to_utf8()?, generation], |row| row.get(0)).optional().map_err(error)?;
-        let id = match row {
-            Some(row) => Some(row),
-            None => {
-                let mut key = vec![
-                    IvyJson::String(call_id.clone()),
-                    IvyJson::String(method.clone()),
-                ];
-                if generation != 0 {
-                    key.push(IvyJson::Number(f64::from(generation)));
-                }
-                self.archive.read(
-                    "call-command",
-                    &canonical(&IvyJson::Array(key), MANAGEMENT_FRAME_BYTES)?,
-                )?
+        // The earliest original may already be in a completed maintenance page
+        // while newer commands of the same call still reside in the active table.
+        let archived = {
+            let mut key = vec![
+                IvyJson::String(call_id.clone()),
+                IvyJson::String(method.clone()),
+            ];
+            if generation != 0 {
+                key.push(IvyJson::Number(f64::from(generation)));
             }
+            self.archive.read(
+                "call-command",
+                &canonical(&IvyJson::Array(key), MANAGEMENT_FRAME_BYTES)?,
+            )?
         };
+        let id = archived.or(row);
         match id.filter(|id| !id.is_empty()) {
             Some(id) => self.operation(&id.into()),
             None => Ok(None),

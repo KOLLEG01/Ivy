@@ -6,13 +6,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readPhoneEvsBuild, installPhoneEvs, preparePhoneEvs } from '../tools/package/phone-evs-package.mjs';
 import { stagePhoneCompatibility } from '../tools/build/build-phone-runtime.mjs';
+import { compilerEnvironment } from '../tools/build/compiler-environment.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const libraryName = process.platform === 'linux' ? 'libivy_phone_evs.so' : 'ivy_phone_evs.dll';
+
+test('native compilers receive usable temporary directories from Windows host paths', () => {
+  const original = { TEMP: '\\\\?\\C:\\build temp', Tmp: '\\\\?\\UNC\\server\\share\\temp',
+    TMPDIR: 'C:\\ordinary', PATH: 'original tool selection', IVY_BUILD_ID: 'original identity' };
+  assert.deepEqual(compilerEnvironment(original, 'win32'), {
+    TEMP: 'C:\\build temp', Tmp: '\\\\server\\share\\temp', TMPDIR: 'C:\\ordinary',
+    PATH: 'original tool selection', IVY_BUILD_ID: 'original identity' });
+  assert.deepEqual(compilerEnvironment(original, 'linux'), original);
+  assert.equal(original.TEMP, '\\\\?\\C:\\build temp');
+});
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'ivy-evs-package-')), work = join(root, 'build');
   await mkdir(join(root, 'services/phone-bridge/native/evs'), { recursive: true }); await mkdir(work);
   await mkdir(join(root, 'tools/build'), { recursive: true }); await writeFile(join(root, 'tools/build/build-phone-evs.mjs'), 'synthetic recipe; must never execute');
+  await writeFile(join(root, 'tools/build/compiler-environment.mjs'), 'synthetic compiler environment recipe');
   await mkdir(join(root, 'tools/package'), { recursive: true }); await writeFile(join(root, 'tools/package/phone-evs-package.mjs'), 'synthetic packaging recipe');
   const authoredInputs = {};
   for (const [key, file] of Object.entries({ adapter: 'phone_evs.c', header: 'phone_evs.h', test: 'phone_evs_test.c' })) {

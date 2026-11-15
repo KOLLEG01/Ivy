@@ -203,10 +203,10 @@ impl VoiceControl {
     pub fn is_stopping(&self) -> bool {
         self.owner.state.lock().unwrap().closed
     }
-    pub async fn models(&self) -> IvyResult<IvyJson> {
+    pub async fn models(&self) -> IvyResult<Arc<super::VoiceModels>> {
         self.models.models().await
     }
-    pub async fn speaker_voices(&self) -> IvyResult<IvyJson> {
+    pub async fn speaker_voices(&self) -> IvyResult<Arc<super::VoiceSpeakers>> {
         self.speakers.speaker_voices().await
     }
 

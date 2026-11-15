@@ -181,13 +181,14 @@ impl PhoneBridge {
                 if let Some(id) = &id {
                     self.original(caller, id.clone()).await?;
                 }
-                let mut catalog = self.flow.speaker_voice_catalog().await?;
+                let catalog = self.flow.speaker_voice_catalog().await?;
                 let selection = match id {
                     Some(id) => self.flow.speaker_voice_state(id, &catalog).await?,
                     None => IvyJson::Null,
                 };
-                catalog.insert("selection", selection);
-                catalog
+                let mut result = catalog.to_wire();
+                result.insert("selection", selection);
+                result
             }
             "selectSpeakerVoice" => {
                 self.flow
@@ -507,7 +508,7 @@ impl PhoneBridge {
             .iter()
             .find(|c| self.flow.call_route(c) == "voice".into());
         let (models, models_error) = match self.flow.voice_model_catalog().await {
-            Ok(m) => (m, IvyJson::Null),
+            Ok(m) => (m.to_wire(), IvyJson::Null),
             Err(e) => (IvyJson::Array(vec![]), e.code.into()),
         };
         let mut speaker = IvyJson::Null;

@@ -130,7 +130,11 @@ impl AgentHandlers {
                         || name == JsString::from("agent.release")
                     {
                         work.control_handler(handler)
-                    } else if name == JsString::from("agent.invoke") {
+                    } else if name == JsString::from("agent.read") {
+                        work.read_handler(handler)
+                    } else if name == JsString::from("agent.invoke")
+                        || name == JsString::from("agent.interact")
+                    {
                         work.invoke_handler(handler)
                     } else if tracked {
                         work.handler(handler)
@@ -145,9 +149,18 @@ impl AgentHandlers {
                 .json_handlers()
                 .into_iter()
                 .map(|(name, handler)| {
-                    let handler = if name.eq_str("codex.turn/interrupt")
-                        || name.eq_str("codex.thread/unsubscribe")
-                    {
+                    let method = name.to_utf8().ok().and_then(|name| {
+                        name.split_once('.')
+                            .map(|(_, method)| JsString::from(method))
+                    });
+                    let read_only = method
+                        .as_ref()
+                        .is_some_and(ivy_contracts::native_contract::is_read_only_native_method);
+                    let handler = if read_only {
+                        work.read_handler(handler)
+                    } else if method.as_ref().is_some_and(|method| {
+                        method.eq_str("turn/interrupt") || method.eq_str("thread/unsubscribe")
+                    }) {
                         work.control_handler(handler)
                     } else {
                         work.handler(handler)
@@ -446,7 +459,7 @@ async fn prepare_backend(
         journal,
         readiness: BackendReadiness::new(closing.clone()),
         closing,
-        retiring: AtomicBool::new(false),
+        retiring: Arc::new(AtomicBool::new(false)),
         interactions: slot(),
         handlers: slot(),
         startup: watch::channel(None).0,
@@ -693,6 +706,7 @@ async fn launch_backend(
     let status_environment = environment.clone();
     let status_readiness = resources.readiness.clone();
     let status_closing = closing.clone();
+    let status_retiring = resources.retiring.clone();
     let status_failure = resources.failure.clone();
     let status = Arc::new(AgentStatus::new(
         StatusConfig {
@@ -708,7 +722,8 @@ async fn launch_backend(
             let environment = status_environment.status()?;
             Ok(StatusState {
                 owner: status_owner.clone(),
-                closing: status_closing.load(Ordering::Acquire),
+                closing: status_closing.load(Ordering::Acquire)
+                    || status_retiring.load(Ordering::Acquire),
                 connected: status_rpc.connected(),
                 ready: status_readiness.ready(),
                 inventory_code: status_failure

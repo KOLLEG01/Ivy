@@ -165,6 +165,24 @@ async fn native_receipt_replays_one_actual_host_release_after_all_original_waite
     let parsed = ivy_contracts::json::parse(&reply.to_json().unwrap(), 65536).unwrap();
     assert_eq!(parsed.get("requestId").unwrap().as_f64(), Some(3.0));
     assert_eq!(parsed.get("ok").unwrap().as_bool(), Some(true));
+    let usage = reply.receipt_usage();
+    assert_eq!(usage.receipts, 1);
+    assert_eq!(usage.reserved_bytes, 0);
+    assert_eq!(
+        usage.retained_bytes,
+        reply.outcome().result_json().unwrap().len()
+    );
+    assert_eq!(usage.limit_bytes, 16 * 1024 * 1024);
+    assert_eq!(
+        parsed
+            .get("receiptUsage")
+            .unwrap()
+            .get("retainedBytes")
+            .unwrap()
+            .as_f64(),
+        Some(usage.retained_bytes as f64)
+    );
+    ivy_phone_bridge::native_client::validate_phone("Response", &parsed).unwrap();
     assert!(host.observation().calls.is_empty());
     // A replay cannot act on a newly prepared owner with the same visible ID.
     let next = Arc::new(Media {
@@ -335,6 +353,28 @@ impl NativeHandler for DepthHandler {
         let json = format!("{}0{}", "[".repeat(self.0), "]".repeat(self.0));
         Box::pin(async move { NativeOutcome::result(json) })
     }
+}
+struct MaximumResult;
+impl NativeHandler for MaximumResult {
+    fn cleanup_slots(&self) -> usize {
+        0
+    }
+    fn invoke(&self, _: NativeRequest) -> NativeInvocation {
+        Box::pin(async { NativeOutcome::result(format!("\"{}\"", "x".repeat(65_022))) })
+    }
+}
+#[tokio::test]
+async fn maximum_original_result_and_usage_fit_the_original_frame_bound() {
+    let dispatcher = NativeDispatcher::new(EPOCH.into(), 1, Arc::new(MaximumResult)).unwrap();
+    let reply = dispatcher
+        .execute(request("call.dial", Some(OP), "{}", 1))
+        .await;
+    let json = reply.to_json().unwrap();
+    assert!(json.len() <= 65_536);
+    assert_eq!(reply.outcome().result_json().unwrap().len(), 65_024);
+    assert_eq!(reply.receipt_usage().retained_bytes, 65_024);
+    let parsed = ivy_contracts::json::parse(&json, 65_536).unwrap();
+    ivy_phone_bridge::native_client::validate_phone("Response", &parsed).unwrap();
 }
 #[tokio::test]
 async fn final_response_envelope_preserves_original_native_write_depth_boundary() {

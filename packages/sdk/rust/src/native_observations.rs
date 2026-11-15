@@ -55,7 +55,7 @@ pub struct NativeThreadState {
     pub state: JsString,
 }
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ItemLayout {
+pub enum ItemLayout {
     Direct,
     TurnWrapper,
 }
@@ -65,6 +65,79 @@ impl ItemLayout {
             Self::Direct => entry,
             Self::TurnWrapper => entry.get("item").expect("verified native item envelope"),
         }
+    }
+    /// Discover a raw item-page layout from the owning connection's output schema.
+    /// Callers still validate replies at that connection's original boundary.
+    pub fn from_schema(schema: &IvyJson) -> IvyResult<Self> {
+        let data = resolve(schema, properties(schema, Some(schema))?.get("data"))?;
+        if !text_is(data.get("type"), "array") {
+            return Err(shape("Native item pages require the selected data array."));
+        }
+        let item = resolve(schema, data.get("items"))?;
+        if text_is(item.get("type"), "object") {
+            let fields = properties(schema, Some(item))?;
+            if fields.get("item").is_none()
+                || fields.get("turnId").is_none()
+                || !required(item, &["item", "turnId"])
+            {
+                return Err(shape("Unknown native item envelope."));
+            }
+            Ok(Self::TurnWrapper)
+        } else {
+            let variants = item
+                .get("oneOf")
+                .filter(|v| !v.is_null())
+                .or_else(|| item.get("anyOf"));
+            let variants = variants
+                .and_then(IvyJson::as_array)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| shape("Unknown native item union."))?;
+            for variant in variants {
+                let variant = resolve(schema, Some(variant))?;
+                let fields = properties(schema, Some(variant))?;
+                if fields.get("type").is_none()
+                    || fields.get("id").is_none()
+                    || !required(variant, &["type", "id"])
+                {
+                    return Err(shape("Unknown native item union."));
+                }
+            }
+            Ok(Self::Direct)
+        }
+    }
+    /// Borrow exact original items, retaining wrapper turn-identity checks.
+    pub fn item_refs<'a>(
+        self,
+        result: &'a IvyJson,
+        turn_id: &JsString,
+    ) -> IvyResult<Vec<&'a IvyJson>> {
+        if turn_id.0.is_empty() {
+            return Err(IvyError::new(
+                "native_turn_mismatch",
+                "Native item interpretation requires the original turn ID.",
+            ));
+        }
+        let data = record(Some(result))?
+            .get("data")
+            .and_then(IvyJson::as_array)
+            .ok_or_else(|| shape("Native page lacks its complete data array."))?;
+        data.iter()
+            .map(|value| {
+                let entry = record(Some(value))?;
+                match self {
+                    Self::Direct => Ok(entry),
+                    Self::TurnWrapper => {
+                        if entry.get("turnId").and_then(IvyJson::as_js_string) != Some(turn_id) {
+                            return Err(IvyError::new(
+                                "native_turn_mismatch",
+                                "Native item belongs to another turn.",
+                            ));
+                        }
+                        record(entry.get("item"))
+                    }
+                }
+            })
+            .collect()
     }
 }
 
@@ -118,41 +191,7 @@ impl<'a> NativeObservations<'a> {
         let schema = record(Some(
             self.contract.output_schema(&"thread/items/list".into())?,
         ))?;
-        let data = resolve(schema, properties(schema, Some(schema))?.get("data"))?;
-        if !text_is(data.get("type"), "array") {
-            return Err(shape("Native item pages require the selected data array."));
-        }
-        let item = resolve(schema, data.get("items"))?;
-        let selected = if text_is(item.get("type"), "object") {
-            let fields = properties(schema, Some(item))?;
-            if fields.get("item").is_none()
-                || fields.get("turnId").is_none()
-                || !required(item, &["item", "turnId"])
-            {
-                return Err(shape("Unknown native item envelope."));
-            }
-            ItemLayout::TurnWrapper
-        } else {
-            let variants = item
-                .get("oneOf")
-                .filter(|v| !v.is_null())
-                .or_else(|| item.get("anyOf"));
-            let variants = variants
-                .and_then(IvyJson::as_array)
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| shape("Unknown native item union."))?;
-            for variant in variants {
-                let variant = resolve(schema, Some(variant))?;
-                let fields = properties(schema, Some(variant))?;
-                if fields.get("type").is_none()
-                    || fields.get("id").is_none()
-                    || !required(variant, &["type", "id"])
-                {
-                    return Err(shape("Unknown native item union."));
-                }
-            }
-            ItemLayout::Direct
-        };
+        let selected = ItemLayout::from_schema(schema)?;
         let _ = self.items.set(selected);
         Ok(selected)
     }
@@ -179,27 +218,6 @@ impl<'a> NativeObservations<'a> {
                 "Native item interpretation requires the original turn ID.",
             ));
         }
-        let layout = self.item_layout()?;
-        let data = record(Some(result))?
-            .get("data")
-            .and_then(IvyJson::as_array)
-            .ok_or_else(|| shape("Native page lacks its complete data array."))?;
-        data.iter()
-            .map(|value| {
-                let entry = record(Some(value))?;
-                match layout {
-                    ItemLayout::Direct => Ok(entry),
-                    ItemLayout::TurnWrapper => {
-                        if entry.get("turnId").and_then(IvyJson::as_js_string) != Some(turn_id) {
-                            return Err(IvyError::new(
-                                "native_turn_mismatch",
-                                "Native item belongs to another turn.",
-                            ));
-                        }
-                        record(entry.get("item"))
-                    }
-                }
-            })
-            .collect()
+        self.item_layout()?.item_refs(result, turn_id)
     }
 }

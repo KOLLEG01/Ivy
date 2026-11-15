@@ -27,6 +27,12 @@ async fn stop_signal() -> IvyResult<()> {
 }
 
 async fn run(args: &[OsString]) -> IvyResult<Option<IvyJson>> {
+    if args.first().is_some_and(|arg| arg == "--recover-native-stop") {
+        let request = args.get(1).map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| IvyError::new("invalid_arguments", "Use --recover-native-stop ABSOLUTE_REQUEST_PATH."))?;
+        return ivy_agent_manager::native_stop_recovery::recover(request).await.map(Some);
+    }
     if args.first().is_some_and(|arg| arg == "--claude-stdio") {
         if args.get(1).is_some_and(|arg| arg == "--help") {
             println!("claude-codex-adapter app-server (Rust owner)");

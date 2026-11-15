@@ -228,7 +228,8 @@ impl HostResources {
                         .collect::<Vec<_>>();
                     for backend in host.backends() {
                         let observation = backend.readiness.observation()?;
-                        let available = backend.readiness.ready();
+                        let available =
+                            backend.readiness.ready() && !backend.retiring.load(Ordering::Acquire);
                         ready |= available;
                         let observation = observation.unwrap_or_else(|| {
                             let mut snapshot = crate::reconciliation::readiness_snapshot(

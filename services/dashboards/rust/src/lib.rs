@@ -5,6 +5,7 @@ pub mod browser;
 pub mod cdp;
 pub mod document;
 pub mod handlers;
+pub mod image_template;
 pub mod png;
 pub mod raster;
 pub mod sources;

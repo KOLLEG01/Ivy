@@ -13,7 +13,7 @@ use ivy_phone_bridge::{
     service_bridge::PhoneBridge,
     service_flow::{FlowFuture, PhoneFlow, PhoneFlowVoice},
     service_speech::synthesize_announcement,
-    voice_rpc::{VoiceAsyncGuard, VoiceSelectionCommand},
+    voice_rpc::{VoiceAsyncGuard, VoiceModels, VoiceSelectionCommand, VoiceSpeakers},
     voice_selection::VoiceSelection,
 };
 use std::{
@@ -89,21 +89,31 @@ impl Voice {
     }
 }
 impl PhoneFlowVoice for Voice {
-    fn models(&self) -> FlowFuture<IvyJson> {
+    fn models(&self) -> FlowFuture<Arc<VoiceModels>> {
         Box::pin(async {
-            Ok(IvyJson::Array(vec![object([
-                ("model", "gpt-6.1-sol".into()),
-                (
-                    "supportedReasoningEfforts",
-                    IvyJson::Array(vec![object([("reasoningEffort", "high".into())])]),
-                ),
-            ])]))
+            Ok(Arc::new(VoiceModels::from_wire(&IvyJson::Array(vec![
+                object([
+                    ("model", "gpt-6.1-sol".into()),
+                    ("displayName", "Fixture model".into()),
+                    ("description", "Fixture catalog".into()),
+                    ("defaultReasoningEffort", "high".into()),
+                    ("isDefault", false.into()),
+                    (
+                        "supportedReasoningEfforts",
+                        IvyJson::Array(vec![object([
+                            ("reasoningEffort", "high".into()),
+                            ("description", "High".into()),
+                        ])]),
+                    ),
+                ]),
+            ]))?))
         })
     }
-    fn speaker_voices(&self) -> FlowFuture<IvyJson> {
+    fn speaker_voices(&self) -> FlowFuture<Arc<VoiceSpeakers>> {
         Box::pin(async {
-            Ok(object([
+            Ok(Arc::new(VoiceSpeakers::from_wire(&object([
                 ("protocol", "v3".into()),
+                ("catalogVersion", "v1".into()),
                 ("defaultVoiceId", "cove".into()),
                 (
                     "voices",
@@ -112,7 +122,7 @@ impl PhoneFlowVoice for Voice {
                         ("displayName", "Cove".into()),
                     ])]),
                 ),
-            ]))
+            ]))?))
         })
     }
     fn speaker_voice(&self, _: &JsString) -> Option<JsString> {

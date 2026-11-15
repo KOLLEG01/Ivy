@@ -120,9 +120,10 @@ async fn token_authorization_precedes_sources_and_rendering_and_preserves_metada
     assert_eq!(client.calls.lock().unwrap().len(), 1);
     assert!(renders.lock().unwrap().is_empty());
     input.insert("token", "a".repeat(32).into());
-    let context = context(None);
-    context.signal.cancel();
-    let result = handlers.invoke("image", input, context).await.unwrap();
+    let result = handlers
+        .invoke("image", input.clone(), context(None))
+        .await
+        .unwrap();
     assert_eq!(result.required("data").unwrap(), &"AQID".into());
     assert_eq!(
         result.required("metadata").unwrap(),
@@ -138,7 +139,18 @@ async fn token_authorization_precedes_sources_and_rendering_and_preserves_metada
         &J::object([("feed", "fresh".into())])
     );
     assert_eq!(renders[0].required("width").unwrap(), &J::Number(800.0));
-    assert_eq!(renders[0].required("cancelled").unwrap(), &J::Bool(true));
+    assert_eq!(renders[0].required("cancelled").unwrap(), &J::Bool(false));
+    drop(renders);
+    let cancelled = context(None);
+    cancelled.signal.cancel();
+    assert_eq!(
+        handlers
+            .invoke("image", input, cancelled)
+            .await
+            .unwrap_err()
+            .code,
+        "cancelled"
+    );
 }
 #[tokio::test]
 async fn write_identity_is_caller_scoped_stable_and_required_before_rpc() {
@@ -192,6 +204,28 @@ async fn offline_precedence_and_data_envelope_do_not_render() {
         &J::object([("feed", "fresh".into())])
     );
     assert!(result.required("dashboard").unwrap().get("value").is_some());
+    let hash = result
+        .required("dashboard")
+        .unwrap()
+        .required("htmlHash")
+        .unwrap()
+        .clone();
+    let next = handlers
+        .invoke(
+            "data",
+            J::object([("id", "id".into()), ("htmlHash", hash)]),
+            context(None),
+        )
+        .await
+        .unwrap();
+    assert!(
+        next.required("dashboard")
+            .unwrap()
+            .required("value")
+            .unwrap()
+            .get("html")
+            .is_none()
+    );
     let time = result.required("observedAt").unwrap().as_str().unwrap();
     assert_eq!(time.len(), 24);
     chrono::DateTime::parse_from_rfc3339(&time).unwrap();
@@ -205,7 +239,67 @@ async fn offline_precedence_and_data_envelope_do_not_render() {
             .code,
         "service_not_ready"
     );
-    assert_eq!(client.calls.lock().unwrap().len(), 2);
+    assert_eq!(client.calls.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn admission_precedes_sources_and_unknown_cleanup_keeps_the_slot() {
+    let client = Arc::new(Client {
+        calls: Mutex::new(vec![]),
+    });
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let started = entered.clone();
+    let handlers = Handlers::new(Arc::new(move |_, _, _, signal| {
+        let entered = entered.clone();
+        Box::pin(async move {
+            entered.notify_one();
+            signal.cancelled().await;
+            Err(ivy_contracts::IvyError::new(
+                "outcome_unknown",
+                "Cleanup not confirmed.",
+            ))
+        })
+    }));
+    handlers.set_store(Some(
+        DashboardStore::new(client.clone(), None, "https://example.test/", "node".into()).unwrap(),
+    ));
+    let copy = handlers.clone();
+    let request = tokio::spawn(async move {
+        copy.invoke("render", J::object([("id", "id".into())]), context(None))
+            .await
+    });
+    started.notified().await;
+    assert_eq!(
+        handlers
+            .invoke("render", J::object([("id", "id".into())]), context(None))
+            .await
+            .unwrap_err()
+            .code,
+        "resource_busy"
+    );
+    request.abort();
+    let _ = request.await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        handlers
+            .invoke("render", J::object([("id", "id".into())]), context(None))
+            .await
+            .unwrap_err()
+            .code,
+        "resource_busy"
+    );
+    assert_eq!(
+        client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.required("params").unwrap().get("objectId") == Some(&"source".into()))
+            .count(),
+        1
+    );
+    handlers.confirm_retirement();
+    handlers.idle().await;
 }
 
 #[tokio::test]

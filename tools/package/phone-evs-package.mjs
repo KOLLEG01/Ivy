@@ -51,7 +51,7 @@ export async function preparePhoneEvs(root, reportPath = process.env.IVY_EVS_BUI
   // A source-keyed pointer lets prepare/check/publish reuse one dependency build within a
   // source snapshot. Different C inputs or builder recipe never select the same pointer.
   const inputs = await Promise.all(['services/phone-bridge/native/evs/phone_evs.c', 'services/phone-bridge/native/evs/phone_evs.h', 'services/phone-bridge/native/evs/phone_evs_test.c',
-    'tools/build/build-phone-evs.mjs', 'tools/package/phone-evs-package.mjs'].map(async path => [path, hash(await readFile(join(root, path)))]));
+    'tools/build/build-phone-evs.mjs', 'tools/build/compiler-environment.mjs', 'tools/package/phone-evs-package.mjs'].map(async path => [path, hash(await readFile(join(root, path)))]));
   const input = hash(JSON.stringify([process.platform, process.arch, inputs]));
   const pointer = join(root, '.local/phone-evs-cache', input + '.json');
   const sharedRoot = process.env.IVY_BUILD_CACHE_ROOT;

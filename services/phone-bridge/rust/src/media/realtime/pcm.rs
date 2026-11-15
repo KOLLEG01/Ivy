@@ -9,32 +9,38 @@ use std::{
     time::Duration,
 };
 
-// MediaCodec must not reenter Core's non-reentrant mutex. This bounded working
-// buffer exists only during a codec invocation under Core's authority lock.
+// MediaCodec must not reenter Core's non-reentrant mutex. Its port writes directly
+// into the reserved receive ring while that same authority lock excludes readers.
 struct Frame {
     state: PcmAudioState,
     captured: [f32; 960],
-    received: Vec<Vec<f32>>,
+    received: AudioQueue,
+    blocks: usize,
 }
 struct CodecPort(Mutex<Frame>);
 impl CodecPort {
-    fn new() -> Self {
+    fn new(received: AudioQueue) -> Self {
         Self(Mutex::new(Frame {
             state: PcmAudioState {
                 open: false,
                 generation: 0,
             },
             captured: [0.0; 960],
-            received: Vec::with_capacity(8),
+            received,
+            blocks: 0,
         }))
     }
     fn begin(&self, state: PcmAudioState) {
         let mut frame = self.0.lock().unwrap();
         frame.state = state;
         frame.captured.fill(0.0);
-        for chunk in &mut frame.received {
-            chunk.fill(0.0);
-        }
+        frame.blocks = 0;
+    }
+    fn clear(&self, state: PcmAudioState) {
+        let mut frame = self.0.lock().unwrap();
+        frame.state = state;
+        frame.captured.fill(0.0);
+        frame.blocks = 0;
         frame.received.clear();
     }
 }
@@ -59,10 +65,11 @@ impl PcmAudioPort for CodecPort {
         }
         // Opus recovery is bounded to 120 ms plus the admitted packet. The
         // existing decoder emits at most six PLC blocks, FEC and one packet.
-        if frame.received.len() == 8 || input.len() > 5760 {
+        if frame.blocks == 8 || input.len() > 5760 {
             return false;
         }
-        frame.received.push(input.to_vec());
+        frame.blocks += 1;
+        frame.received.write(input);
         true
     }
 }
@@ -70,9 +77,7 @@ impl Drop for CodecPort {
     fn drop(&mut self) {
         let frame = self.0.get_mut().unwrap_or_else(|p| p.into_inner());
         frame.captured.fill(0.0);
-        for chunk in &mut frame.received {
-            chunk.fill(0.0);
-        }
+        frame.received.clear();
     }
 }
 
@@ -80,7 +85,6 @@ pub(super) struct Core {
     pub queue_ms: u16,
     pub prebuffer_ms: u16,
     permitted: Arc<dyn Fn() -> bool + Send + Sync>,
-    received: AudioQueue,
     outgoing: AudioQueue,
     packets: RtpReceiveQueue,
     port: Arc<CodecPort>,
@@ -120,10 +124,9 @@ impl Core {
             queue_ms,
             prebuffer_ms,
             permitted,
-            received: queue()?,
             outgoing: queue()?,
             packets: RtpReceiveQueue::new(20).map_err(|_| RealtimeError::InvalidRequest)?,
-            port: Arc::new(CodecPort::new()),
+            port: Arc::new(CodecPort::new(queue()?)),
             encoder: None,
             decoder: None,
             format: None,
@@ -154,17 +157,16 @@ impl Core {
     }
     pub fn clear(&mut self, force: bool) {
         let dirty = self.had_authority
-            || self.received.count() != 0
+            || self.port.0.lock().unwrap().received.count() != 0
             || self.outgoing.count() != 0
             || self.packets.status().queued_packets != 0;
-        self.received.clear();
         self.outgoing.clear();
         self.packets.clear();
         self.had_authority = false;
         if dirty || force {
             self.generation = self.generation.wrapping_add(1);
         }
-        self.port.begin(PcmAudioState {
+        self.port.clear(PcmAudioState {
             open: false,
             generation: self.generation,
         });
@@ -240,12 +242,17 @@ impl Core {
         result
     }
     fn drain(&mut self, playout: usize) -> Result<()> {
-        while let Some((mut packet, _)) = self
-            .packets
-            .take(self.now, self.received.count() < playout)
-            .map_err(|_| RealtimeError::Failed)?
-        {
+        loop {
+            let needs_playout = self.port.0.lock().unwrap().received.count() < playout;
+            let Some((mut packet, _)) = self
+                .packets
+                .take(self.now, needs_playout)
+                .map_err(|_| RealtimeError::Failed)?
+            else {
+                break;
+            };
             let state = self.state();
+            let prior_dropped = self.port.0.lock().unwrap().received.dropped();
             self.port.begin(state);
             let result = self
                 .decoder
@@ -258,16 +265,13 @@ impl Core {
                 });
             packet.payload.fill(0);
             let admitted = self.state() == state && state.open;
-            let mut frame = self.port.0.lock().unwrap();
-            for chunk in &mut frame.received {
-                if admitted {
-                    self.received.write(chunk);
-                }
-                chunk.fill(0.0);
-            }
-            frame.received.clear();
-            drop(frame);
             if !admitted {
+                self.port
+                    .0
+                    .lock()
+                    .unwrap()
+                    .received
+                    .restore_dropped(prior_dropped);
                 self.clear(false);
                 return Ok(());
             }
@@ -312,6 +316,7 @@ impl Core {
         } else {
             "suspended"
         };
+        let frame = self.port.0.lock().unwrap();
         IvyJson::object([
             ("state", state.into()),
             ("sourceMode", "webrtc".into()),
@@ -319,7 +324,7 @@ impl Core {
             ("channels", IvyJson::Number(1.0)),
             (
                 "captureDroppedSamples",
-                IvyJson::Number(self.received.dropped() as i64 as f64),
+                IvyJson::Number(frame.received.dropped() as i64 as f64),
             ),
             (
                 "renderDroppedSamples",
@@ -327,7 +332,7 @@ impl Core {
             ),
             (
                 "captureQueuedSamples",
-                IvyJson::Number(self.received.count() as f64),
+                IvyJson::Number(frame.received.count() as f64),
             ),
             (
                 "renderQueuedSamples",
@@ -347,7 +352,10 @@ impl Core {
             .map_or(0, MediaCodec::concealed_samples)
     }
     pub fn underruns(&self) -> (u64, u64) {
-        (self.received.underruns(), self.outgoing.underruns())
+        (
+            self.port.0.lock().unwrap().received.underruns(),
+            self.outgoing.underruns(),
+        )
     }
 }
 
@@ -389,7 +397,8 @@ impl PcmAudioPort for RealtimeAudio {
             output.fill(0.0);
             return 0;
         }
-        core.received.read(output)
+        let length = core.port.0.lock().unwrap().received.read(output);
+        length
     }
     fn write_received(&self, input: &[f32], generation: u64) -> bool {
         let mut core = self.0.lock().unwrap();

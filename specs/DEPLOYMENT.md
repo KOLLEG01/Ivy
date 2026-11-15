@@ -152,12 +152,12 @@ instances. Use a separate account or explicit directories when sharing a host.
 | ChatBridge                    | One-second polling, English fallback                                                                                                                                                              | Channel/account, verified native project and plan, WhatsApp configuration; optional language                      |
 | Secretary                     | Two-second polling, two records per tick; five-minute research, normal Main urgency, questions-only WhatsApp, no voice escalation                                                                 | Identity/scope and explicit sources; native execution configuration                                               |
 | DataCollector                 | 512 MiB task memory ceiling, empty secret inventory; existing retention/concurrency defaults                                                                                                      | Task scripts and any assigned secrets or ingress                                                                  |
-| Dashboards                    | No preselected parent object                                                                                                                                                                      | Verified Chromium executable                                                                                      |
+| Dashboards                    | No preselected parent object                                                                                                                                                                      | Optional Chromium for HTML image exports                                                                          |
 | PhoneBridge                   | SIP port 5070 on loopback, UDP; EVS/G722/PCMA/PCMU, 20 ms packets; 60-second ringing, one-second polling; empty recipient/incoming policies                                                       | Windows audio, native/Voice setup, SIP account, protected credentials and permitted callers/recipients            |
 
 On Linux, native AgentManager and Dashboards use separate unprivileged service
-accounts created by the host. Install the OS ACL tools and provision a readable
-Chromium executable for Dashboards, or its service account's Playwright cache.
+accounts created by the host. Install the OS ACL tools and, for HTML image exports,
+provision a readable Chromium executable or the service account's Playwright cache.
 Keep Chromium's sandbox enabled.
 
 In-memory caches charge retained strings and container capacities. JSON trees

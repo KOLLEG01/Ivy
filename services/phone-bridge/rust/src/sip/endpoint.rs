@@ -196,6 +196,7 @@ pub struct SipEndpoint {
     endpoint: Endpoint,
     routes: FinalResponses,
     serving: Option<JoinHandle<Result<(), SipIoError>>>,
+    retirements: Mutex<Arc<super::retirement::Retirements>>,
 }
 
 /// The confirmed original flow, retained independently of an ACK send task.
@@ -247,7 +248,14 @@ impl SipEndpoint {
             endpoint,
             routes,
             serving: Some(serving),
+            retirements: Mutex::new(super::retirement::Retirements::new()),
         }
+    }
+    pub(super) fn set_retirements(&self, retirements: Arc<super::retirement::Retirements>) {
+        *self.retirements.lock().unwrap() = retirements;
+    }
+    pub(super) fn retirements(&self) -> Arc<super::retirement::Retirements> {
+        self.retirements.lock().unwrap().clone()
     }
     pub fn inner(&self) -> &EndpointInnerRef {
         &self.endpoint.inner

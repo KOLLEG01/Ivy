@@ -16,7 +16,10 @@ fn value(text: &str) -> IvyJson {
 }
 fn local_settings(extra: &str) -> IvyJson {
     let mut native = value(extra);
-    native.insert("cwd", if cfg!(windows) { "C:\\work" } else { "/work" }.into());
+    native.insert(
+        "cwd",
+        if cfg!(windows) { "C:\\work" } else { "/work" }.into(),
+    );
     native
 }
 fn empty() -> IvyJson {
@@ -209,7 +212,11 @@ pub(crate) fn fixture(
 ) {
     let (connector, receive, schemas) = connector_fixture(plans);
     let control = VoiceControl::new(
-        settings(native, Style::native(), if cfg!(windows) { "C:\\owner" } else { "/owner" }.into()),
+        settings(
+            native,
+            Style::native(),
+            if cfg!(windows) { "C:\\owner" } else { "/owner" }.into(),
+        ),
         connector.clone(),
         schemas.clone(),
         hooks,
@@ -404,11 +411,11 @@ async fn abandoned_open_and_catalogs_share_the_configured_connection() {
     assert!(opened.same_connection(&control.current().unwrap()));
     let models = {
         let control = control.clone();
-        tokio::spawn(async move { control.models().await })
+        tokio::spawn(async move { control.models().await.map(|view| view.to_wire()) })
     };
     let speakers = {
         let control = control.clone();
-        tokio::spawn(async move { control.speaker_voices().await })
+        tokio::spawn(async move { control.speaker_voices().await.map(|view| view.to_wire()) })
     };
     let mut methods = vec![];
     for _ in 0..3 {
@@ -440,12 +447,16 @@ async fn abandoned_open_and_catalogs_share_the_configured_connection() {
             .get("defaultVoiceId"),
         Some(&"ember".into())
     );
-    assert_eq!(control.models().await.unwrap(), IvyJson::Array(vec![]));
+    assert_eq!(
+        control.models().await.map(|view| view.to_wire()).unwrap(),
+        IvyJson::Array(vec![])
+    );
     assert_eq!(
         control
             .speaker_voices()
             .await
             .unwrap()
+            .to_wire()
             .get("defaultVoiceId"),
         Some(&"ember".into())
     );
@@ -554,7 +565,10 @@ async fn cleanup_reconnect_during_drain_is_the_final_connection_closed() {
         let cleanup = active.open_cleanup().wait().await?;
         assert!(cleanup.transport().connected());
         // Ordinary selection remains closed while session cleanup reconnects.
-        assert_eq!(code(active.models().await), "service_not_ready");
+        assert_eq!(
+            code(active.models().await.map(|view| view.to_wire())),
+            "service_not_ready"
+        );
         Ok(())
     }));
     let second_peer = timed(peers.recv()).await.unwrap();
@@ -577,7 +591,7 @@ async fn reconnect_replaces_identity_and_catalog_cache_without_preparing_a_task(
     for pass in 0..2 {
         let request = {
             let control = control.clone();
-            tokio::spawn(async move { control.models().await })
+            tokio::spawn(async move { control.models().await.map(|view| view.to_wire()) })
         };
         let frame = peer.request().await;
         assert_eq!(frame.get("method"), Some(&"model/list".into()));

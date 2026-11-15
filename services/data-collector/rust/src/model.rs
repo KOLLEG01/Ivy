@@ -5,6 +5,25 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult};
 pub type RecordTask = IvyJson;
 pub type Run = IvyJson;
 
+/// The worker boundary normalizes output exactly once. Internal consumers own
+/// this value and still check their publication envelope and retention limits.
+#[derive(Debug)]
+pub struct Output(IvyJson);
+impl Output {
+    pub fn parse(value: &IvyJson) -> IvyResult<Self> {
+        crate::schema::parse_schema("outputSchema", value).map(Self)
+    }
+    pub fn into_json(self) -> IvyJson {
+        self.0
+    }
+}
+impl std::ops::Deref for Output {
+    type Target = IvyJson;
+    fn deref(&self) -> &IvyJson {
+        &self.0
+    }
+}
+
 /// Encode wire strings at the SQLite TEXT boundary. JSON documents and canonical
 /// request identities continue through IvyJson's lossless codec.
 pub fn sqlite_key(value: &IvyJson) -> IvyResult<String> {
