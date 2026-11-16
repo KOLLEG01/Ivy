@@ -750,6 +750,7 @@ impl WhatsAppSocket {
             }
             self.0.journal.access(|j| {
                 j.try_transaction(|j| -> IvyResult<()> {
+                    super::reply_context::record_output(j, &self.0.file_config, &row.id, &row.jid)?;
                     j.mark(&row.id, OutputState::Sending)?;
                     j.set(
                         &key,
@@ -954,6 +955,10 @@ impl WhatsAppSocket {
             .jid
             .parse::<Jid>()
             .map_err(|_| protocol_error("whatsapp_recipient_invalid"))?;
+        self.0.journal.access(|j| {
+            super::reply_context::record_output(j, &self.0.file_config, &row.id, &row.jid)
+        })?;
+        self.0.journal.flush().await?;
         self.client()
             .send_message_with_options(
                 jid,

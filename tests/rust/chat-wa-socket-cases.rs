@@ -40,9 +40,9 @@ use wacore::{
 use waproto::whatsapp as wa;
 use whatsapp_rust::anyhow;
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("ivy-native-socket-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
@@ -219,6 +219,133 @@ fn count(journal: &Journal, table: &str) -> i64 {
                 .unwrap())
         })
         .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn quoted_protocol_input_reaches_the_saved_payload_once_with_account_local_lid_resolution() {
+    use ivy_chat_bridge::whatsapp::{
+        audio_worker::AudioWorker,
+        media::{MediaDependencies, WhatsAppMedia},
+        messages::Translator,
+        native_media::NativeMediaDependencies,
+    };
+    let fixture = Fixture::new();
+    oracle("prepare", &fixture.0);
+    let expected: Vec<String> =
+        serde_json::from_slice(&std::fs::read(fixture.0.join("expected.json")).unwrap()).unwrap();
+    let index = expected
+        .iter()
+        .position(|raw| {
+            parse(raw, usize::MAX)
+                .unwrap()
+                .get("extendedTextMessage")
+                .and_then(|v| v.get("text"))
+                == Some(&Json::from("Try that again"))
+        })
+        .unwrap();
+    let protocol = waproto::codec::message_decode(
+        &std::fs::read(fixture.0.join(format!("wire-{index}.bin"))).unwrap(),
+    )
+    .unwrap();
+    let (socket, journal, backend, clock, network, _) = socket(&fixture.0).await;
+    backend
+        .put_lid_mapping(&LidPnMappingEntry {
+            lid: "100000000000002".into(),
+            phone_number: "15555550102".into(),
+            created_at: 1,
+            updated_at: 1,
+            learning_source: "fixture".into(),
+        })
+        .await
+        .unwrap();
+    let dependencies = Arc::new(
+        NativeMediaDependencies::new(AudioWorker::new(std::env::current_exe().unwrap()))
+            .unwrap()
+            .with_account(backend.clone()),
+    );
+    assert_eq!(
+        dependencies
+            .canonical_jid("100000000000002:61@lid")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("15555550102@s.whatsapp.net")
+    );
+    let mut incoming = incoming(
+        "QUOTED-NEW",
+        "15555550101@s.whatsapp.net",
+        "unused",
+        clock.utc_millis(),
+    );
+    incoming.message = Arc::new(protocol);
+    socket.receive(&[incoming.clone()]).await.unwrap();
+    let row = journal.access(|j| Ok(j.pending()?.remove(0))).unwrap();
+    let original = row.message.clone();
+    assert!(original.contains("quotedMessage") && original.contains("OLD-42"));
+    let media = WhatsAppMedia::new(
+        journal.clone(),
+        config(),
+        fixture.0.clone(),
+        dependencies.clone(),
+        Translator::new(Some(&"de".into())),
+    );
+    let payload = media
+        .payload(&row, &super::replies::Main, false)
+        .await
+        .unwrap();
+    let text = payload.required("text").unwrap().as_str().unwrap();
+    assert!(text.starts_with("Try that again\n\nZitierte Nachricht"));
+    let quote = parse(text.rsplit_once('\n').unwrap().1, usize::MAX).unwrap();
+    assert_eq!(
+        quote.required("text").unwrap(),
+        &"Old task: priority swimlanes".into()
+    );
+    assert!(
+        quote
+            .required("notes")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    socket.receive(&[incoming.clone()]).await.unwrap();
+    assert_eq!(
+        media
+            .payload(&row, &super::replies::Main, false)
+            .await
+            .unwrap(),
+        payload
+    );
+    assert_eq!(
+        journal
+            .access(|j| Ok(j.pending()?.remove(0).message))
+            .unwrap(),
+        original
+    );
+    journal.access(|j| j.finish(&row.id)).unwrap();
+    socket.receive(&[incoming]).await.unwrap();
+    assert!(journal.access(|j| j.pending()).unwrap().is_empty());
+    backend
+        .put_lid_mapping(&LidPnMappingEntry {
+            lid: "100000000000003".into(),
+            phone_number: "15555550102".into(),
+            created_at: 2,
+            updated_at: 2,
+            learning_source: "fixture".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        dependencies
+            .canonical_jid("100000000000002@lid")
+            .await
+            .unwrap()
+            .is_none(),
+        "Conflicting aliases cannot establish a quote author"
+    );
+    assert_eq!(network.calls.load(Ordering::SeqCst), 0);
+    socket.close().await.unwrap();
+    journal.close().await.unwrap();
 }
 
 fn file_workspace() -> Json {
@@ -643,6 +770,19 @@ async fn native_socket_retains_cancelled_attempts_until_a_correlated_receipt_and
             .unwrap()
             .as_f64(),
         Some(1.0)
+    );
+    let scope = journal.get(&format!("out-scope:{first}")).unwrap();
+    assert_eq!(
+        scope.required("accountId").unwrap(),
+        &"synthetic-account".into()
+    );
+    assert_eq!(
+        scope.required("chatJid").unwrap(),
+        &"15555550101@s.whatsapp.net".into()
+    );
+    assert_eq!(
+        scope.required("authorJid").unwrap(),
+        &"15555550102@s.whatsapp.net".into()
     );
     assert!(
         journal

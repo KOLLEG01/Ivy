@@ -302,17 +302,30 @@ impl JournalIo {
             .query_row("SELECT text FROM outgoing WHERE id=?", [&id], |r| r.get(0))
             .optional())
     }
-    pub fn enqueue_attachment(&mut self, id: &str, jid: &str, caption: &str, now: i64) -> IvyResult<()> {
+    pub fn enqueue_attachment(
+        &mut self,
+        id: &str,
+        jid: &str,
+        caption: &str,
+        now: i64,
+    ) -> IvyResult<()> {
         if sql(self.connection().query_row("SELECT 1 FROM outgoing WHERE id=? UNION ALL SELECT 1 FROM retired_outgoing WHERE id=?", [id,id], |_| Ok(())).optional())?.is_some() {
             return Err(conflict("A file must retain its original transport identity."));
         }
-        self.write("INSERT INTO outgoing(id,jid,text) VALUES(?,?,?)", vec![text(id),text(jid),text(caption)])?;
+        self.write(
+            "INSERT INTO outgoing(id,jid,text) VALUES(?,?,?)",
+            vec![text(id), text(jid), text(caption)],
+        )?;
         self.set(&format!("out-created:{id}"), &IvyJson::Number(now as f64))
     }
     pub fn retire_attachment(&mut self, id: &str, request_hash: &str) -> IvyResult<()> {
-        self.write("INSERT OR IGNORE INTO retired_outgoing VALUES(?,?)", vec![text(id),text(format!("file:{request_hash}"))])?;
+        self.write(
+            "INSERT OR IGNORE INTO retired_outgoing VALUES(?,?)",
+            vec![text(id), text(format!("file:{request_hash}"))],
+        )?;
         self.write("UPDATE outgoing SET text='',state=CASE WHEN state='sent' THEN 'sent' ELSE 'failed' END WHERE id=?", vec![text(id)])?;
-        self.set(&format!("out-created:{id}"), &IvyJson::Null)
+        self.set(&format!("out-created:{id}"), &IvyJson::Null)?;
+        self.set(&format!("out-scope:{id}"), &IvyJson::Null)
     }
     pub fn outgoing(&self) -> IvyResult<Vec<Outgoing>> {
         let mut query = sql(self.connection().prepare("SELECT id,jid,text,state,sequence FROM outgoing WHERE state<>'sent' ORDER BY sequence LIMIT 16"))?;
@@ -379,12 +392,12 @@ impl JournalIo {
                 if journal.sent(&ids)? { journal.set(&key,&IvyJson::Bool(true))?; }
                 else { protected_outputs.extend(ids); }
             }
-            let (mut count,mut bytes): (i64,i64) = sql(journal.connection().query_row("SELECT (SELECT COUNT(*) FROM inbox WHERE id NOT IN (SELECT id FROM retired_inbox WHERE retired=1))+(SELECT COUNT(*) FROM outgoing WHERE id NOT IN (SELECT id FROM retired_outgoing))+(SELECT COUNT(*) FROM kv WHERE key LIKE 'message:%') AS count,COALESCE((SELECT SUM(length(CAST(message AS BLOB))) FROM inbox),0)+COALESCE((SELECT SUM(length(CAST(text AS BLOB))) FROM outgoing),0)+COALESCE((SELECT SUM(length(CAST(value AS BLOB))) FROM kv WHERE key LIKE 'message:%'),0) AS bytes",[],|r|Ok((r.get(0)?,r.get(1)?))))?;
+            let (mut count,mut bytes): (i64,i64) = sql(journal.connection().query_row("SELECT (SELECT COUNT(*) FROM inbox WHERE id NOT IN (SELECT id FROM retired_inbox WHERE retired=1))+(SELECT COUNT(*) FROM outgoing WHERE id NOT IN (SELECT id FROM retired_outgoing))+(SELECT COUNT(*) FROM kv WHERE key LIKE 'message:%') AS count,COALESCE((SELECT SUM(length(CAST(message AS BLOB))) FROM inbox),0)+COALESCE((SELECT SUM(length(CAST(text AS BLOB))) FROM outgoing),0)+COALESCE((SELECT SUM(length(CAST(value AS BLOB))) FROM kv WHERE key LIKE 'message:%' OR key LIKE 'out-scope:%'),0) AS bytes",[],|r|Ok((r.get(0)?,r.get(1)?))))?;
             if count <= limits.count && bytes <= limits.bytes { return Ok(()); }
             let mut candidates = Vec::new();
             for (kind,statement) in [
                 (0,"SELECT id,received,length(CAST(message AS BLOB)) FROM inbox WHERE state='done' AND id NOT IN (SELECT id FROM retired_inbox WHERE retired=1)"),
-                (1,"SELECT o.id,COALESCE(CAST(k.value AS INTEGER),0),length(CAST(o.text AS BLOB)) FROM outgoing o LEFT JOIN kv k ON k.key='out-created:'||o.id WHERE o.state='sent' AND o.id NOT IN (SELECT id FROM retired_outgoing)")
+                (1,"SELECT o.id,COALESCE(CAST(k.value AS INTEGER),0),length(CAST(o.text AS BLOB))+COALESCE((SELECT length(CAST(value AS BLOB)) FROM kv WHERE key='out-scope:'||o.id),0) FROM outgoing o LEFT JOIN kv k ON k.key='out-created:'||o.id WHERE o.state='sent' AND o.id NOT IN (SELECT id FROM retired_outgoing)")
             ] {
                 let mut query = sql(journal.connection().prepare(statement))?;
                 let rows = sql(query.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))))?;
@@ -412,7 +425,7 @@ impl JournalIo {
                         let (jid,body):(String,String)=sql(journal.connection().query_row("SELECT jid,text FROM outgoing WHERE id=?",[&id],|r|Ok((r.get(0)?,r.get(1)?))))?;
                         journal.write("INSERT OR IGNORE INTO retired_outgoing VALUES(?,?)",vec![text(&id),text(identity(&[jid.into(),body.into()])?)])?;
                         journal.write("UPDATE outgoing SET text='' WHERE id=?",vec![text(&id)])?;
-                        for prefix in ["out-created:","send-attempt:","out-automatic:"] { journal.set(&format!("{prefix}{id}"),&IvyJson::Null)?; }
+                        for prefix in ["out-created:","send-attempt:","out-automatic:","out-scope:"] { journal.set(&format!("{prefix}{id}"),&IvyJson::Null)?; }
                     }
                     _ => journal.set(&id,&IvyJson::Null)?,
                 }

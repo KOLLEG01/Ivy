@@ -147,6 +147,7 @@ export const rustTests = {
   "tests/secretary-rust/assignment_execution_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_execution_cases::" },
   "tests/secretary-rust/assignment_result_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_result_cases::" },
   "tests/rust/chat-wa-runtime-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "wa_runtime::" },
+  "tests/rust/chat-replies.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "replies::" },
   "tests/rust/chat-native-events.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "native_events::" },
   "tests/rust/chat-session-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "session::" },
   "tests/rust/chat-listener-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "listener::" },

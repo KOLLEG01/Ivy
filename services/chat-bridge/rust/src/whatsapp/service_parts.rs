@@ -64,7 +64,7 @@ pub async fn open(
         }
     };
     let dependencies = match NativeMediaDependencies::new(AudioWorker::new(executable)) {
-        Ok(dependencies) => Arc::new(dependencies),
+        Ok(dependencies) => Arc::new(dependencies.with_account(backend.clone())),
         Err(error) => {
             let _ = socket.close().await;
             let _ = journal.close().await;

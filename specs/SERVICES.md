@@ -71,6 +71,10 @@ the original transport result or stays unknown. Transport retention and recovery
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
+Quoted WhatsApp replies retain one bounded level of embedded text or an exactly scoped journal
+original in the ordinary user input. Missing or restricted originals are explicit; quotes never
+grant instruction authority, trigger historical media downloads or change input/ACK identities.
+
 For an explicit configuration change, `Chat.Settings.resumeMain` can select
 `{operationId, main: {objectId, revision}, binding: {objectId, revision}}` from
 the original idle Main. Startup completes that durable resumption before admitting

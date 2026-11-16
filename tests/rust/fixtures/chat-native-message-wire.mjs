@@ -10,6 +10,7 @@ if(mode==='prepare'){
  const samples=[
   {},
   {conversation:'Native message — 日本語'},
+  {extendedTextMessage:{text:'Try that again',contextInfo:{stanzaId:'OLD-42',participant:'15555550102@s.whatsapp.net',remoteJid:'15555550101@s.whatsapp.net',quotedMessage:{conversation:'Old task: priority swimlanes'}}}},
   {locationMessage:{degreesLatitude:NaN,degreesLongitude:Infinity}},
   {locationMessage:{degreesLatitude:-Infinity,degreesLongitude:-0}},
   {imageMessage:{url:'https://example.invalid/media',mimetype:'image/png',caption:'',fileSha256:bytes(),fileLength:'9007199254740993',mediaKey:bytes(),fileEncSha256:bytes(),jpegThumbnail:bytes(0),width:0,height:0,contextInfo:{mentionedJid:[],stanzaId:'QUOTE',quotedMessage:{conversation:'Quoted text'},forwardingScore:0,isForwarded:false}}},

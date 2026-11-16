@@ -156,8 +156,13 @@ pub struct NativeMediaDependencies {
     downloads: MediaDownloader,
     audio: AudioWorker,
     http: reqwest::Client,
+    account: Option<Arc<super::auth_backend::NativeAuthStore>>,
 }
 impl NativeMediaDependencies {
+    pub fn with_account(mut self, account: Arc<super::auth_backend::NativeAuthStore>) -> Self {
+        self.account = Some(account);
+        self
+    }
     pub fn new(audio: AudioWorker) -> IvyResult<Self> {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(60)))
@@ -177,6 +182,7 @@ impl NativeMediaDependencies {
         http: reqwest::ClientBuilder,
     ) -> IvyResult<Self> {
         Ok(Self {
+            account: None,
             downloads: MediaDownloader::with_default_hosts(downloads, Arc::new(TokioRuntime)),
             audio,
             http: http
@@ -187,6 +193,39 @@ impl NativeMediaDependencies {
     }
 }
 impl MediaDependencies for NativeMediaDependencies {
+    fn canonical_jid<'a>(&'a self, jid: &'a str) -> MediaFuture<'a, Option<String>> {
+        Box::pin(async move {
+            if let Some(phone) = super::reply_context::phone_jid(jid) {
+                return Ok(Some(phone));
+            }
+            let Some(lid) = super::reply_context::lid_user(jid) else {
+                return Ok(None);
+            };
+            let Some(account) = self.account.clone() else {
+                return Ok(None);
+            };
+            tokio::task::spawn_blocking(move || {
+                account
+                    .read(|db| {
+                        let Some(entry) = super::auth_protocol::lid_mapping(db, &lid)? else {
+                            return Ok(None);
+                        };
+                        let reciprocal = super::auth_protocol::pn_mapping(db, &entry.phone_number)?;
+                        Ok(reciprocal.filter(|other| other.lid == lid).and_then(|_| {
+                            super::reply_context::phone_jid(&format!(
+                                "{}@s.whatsapp.net",
+                                entry.phone_number
+                            ))
+                        }))
+                    })
+                    .map_err(|_| {
+                        IvyError::new("storage_unavailable", "WhatsApp identity storage failed.")
+                    })
+            })
+            .await
+            .map_err(|_| IvyError::internal())?
+        })
+    }
     fn download<'a>(
         &'a self,
         media: &'a Json,

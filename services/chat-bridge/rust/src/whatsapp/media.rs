@@ -1,7 +1,7 @@
 //! Original inbound media policy, immutable publication and transport caches.
 //! Account download, killable audio decoding and HTTP remain required owners.
 use super::{journal::Inbox, journal_owner::Journal, messages::Translator, runtime::RuntimeMedia};
-use super::{media_content as content, media_storage::MediaStorage};
+use super::{media_content as content, media_storage::MediaStorage, reply_context};
 use crate::{chat_main::ChatMain, generation::ChatGenerationLease};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
@@ -44,6 +44,10 @@ pub trait TranscriptionResponse: Send {
 /// Adapters must preserve the selected original, deadlines and HTTP form fields:
 /// file=audio.wav (audio/wav), model, response_format=json, optional language.
 pub trait MediaDependencies: Send + Sync {
+    /// Account-local identity lookup only; this must never fetch remote history.
+    fn canonical_jid<'a>(&'a self, jid: &'a str) -> MediaFuture<'a, Option<String>> {
+        Box::pin(async move { Ok(reply_context::phone_jid(jid)) })
+    }
     fn download<'a>(
         &'a self,
         media: &'a Json,
@@ -539,6 +543,16 @@ impl WhatsAppMedia {
             "media.message_limit",
             None,
         )?;
+        text = reply_context::append(
+            &self.journal,
+            &self.config,
+            row,
+            &content,
+            text,
+            self.dependencies.as_ref(),
+            self.translator,
+        )
+        .await?;
         let payload = Json::object([
             ("text", Json::String(text)),
             ("images", Json::Array(images)),
