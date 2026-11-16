@@ -41,7 +41,7 @@ if (!props.backend) try {
 </script>
 
 <template>
-  <div class="mx-auto w-full max-w-3xl px-4 pt-4">
+  <div class="ivy-page-width mx-auto w-full max-w-3xl px-4 pt-4">
     <Label for="agent-account">Provider and account</Label>
     <OptionSelect id="agent-account" :model-value="selection" class="mt-2 w-full" @update:model-value="choose">
       <option value="" disabled>{{ backend ? 'Original account unavailable' : 'Choose an account' }}</option>
@@ -54,7 +54,7 @@ if (!props.backend) try {
     <p v-for="error in discovery.value.value?.errors" :key="error" class="mt-2 text-sm text-muted-foreground">{{ error }}</p>
     <p v-if="!backend && legacyRetained" class="mt-2 text-sm text-muted-foreground">The unfinished launch keeps its original unscoped owner. It cannot be assigned to another account.</p>
   </div>
-  <Collapsible v-if="selected" :key="selection" v-model:open="historyOpen" class="mx-auto w-full max-w-3xl px-4 pt-6">
+  <Collapsible v-if="selected" :key="selection" v-model:open="historyOpen" class="ivy-page-width mx-auto w-full max-w-3xl px-4 pt-6">
     <CollapsibleTrigger class="text-sm font-medium underline underline-offset-4">{{ tr('Aufgabenverlauf ansehen', 'Browse task history') }}</CollapsibleTrigger>
     <CollapsibleContent class="pt-4"><AgentHistory v-if="historyOpen" :key="selection" :node="node" :backend="backend" /></CollapsibleContent>
   </Collapsible>

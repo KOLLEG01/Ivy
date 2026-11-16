@@ -148,3 +148,24 @@ for (const width of [1280, 390])
       assert.deepEqual(f.externalRequests, []);
     },
   );
+
+test("AgentUI full width is opt-in, survives reload and stays separate from other UIs", { timeout: 150000 }, async (t) => {
+  const f = await agentFixture(t, { width: 1440, height: 900 });
+  await f.open("#/host?node=browser-agent");
+  const content = f.page.locator(".new-task-page");
+  const width = async () => (await content.boundingBox()).width;
+  await expect(content).toBeVisible();
+  assert.ok((await width()) <= 769, "The new task page keeps its limited width by default.");
+  await f.page.getByRole("button", { name: "Account", exact: true }).click();
+  await f.page.getByRole("menuitemcheckbox", { name: "Full width", exact: true }).click();
+  await expect.poll(width).toBeGreaterThan(1000);
+  await f.page.reload();
+  await expect(content).toBeVisible();
+  await expect.poll(width).toBeGreaterThan(1000);
+  assert.deepEqual(
+    await f.page.evaluate(() => [localStorage.getItem("ivy.full-width:Agents"), localStorage.getItem("ivy.full-width:TaskBoard")]),
+    ["true", null],
+  );
+  await f.page.setViewportSize({ width: 390, height: 900 });
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+});

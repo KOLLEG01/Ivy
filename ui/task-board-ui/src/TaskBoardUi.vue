@@ -74,6 +74,7 @@ watch(node, (value) => {
   <UiFrame
     v-else
     ui-name="TaskBoard"
+    full-width-option
     :base="base"
     :client="client"
     :navigation="[]"

@@ -2212,7 +2212,7 @@ function boardColumn(t, columnId, swimlane, options = {}) {
     rootObjectId: 'root', role: 'user' }, query: new URLSearchParams('control=user&host=host'),
     column: { id: columnId, title: columnId, states: columnId === 'waiting' ? ['todo', 'waiting'] : ['review'] },
     count: fixture.length, href: id => '#/' + id, disabled: false, active: true, swimlane,
-    lanes: swimlane === 'category' ? ['Alpha', 'Beta', 'Gamma'] : [''], ...options.props }, notifications);
+    lanes: swimlane === 'category' ? ['Alpha', 'Beta', 'Gamma'] : swimlane === 'priority' ? ['priority:4', 'priority:2', 'priority:0'] : [''], ...options.props }, notifications);
   return { api, calls, fixture, notifications, mount, fail: value => { failure = value; } };
 }
 
@@ -2297,12 +2297,16 @@ test('parent hint scopes distinguish top-level objects and preserve bounded fami
   assert.equal(objectParentScope('fixture/value', 'x'.repeat(length + 1)), 'objects/fixture/value');
 });
 
-for (const [columnId, swimlane] of [['waiting', 'none'], ['waiting', 'category'], ['review', 'category']])
+for (const [columnId, swimlane] of [['waiting', 'none'], ['waiting', 'category'], ['review', 'category'], ['review', 'priority']])
 test(`board ${columnId}/${swimlane} retains one bounded page and reaches every group through original cursors`, async t => {
   const { api, calls, fixture } = boardColumn(t, columnId, swimlane); await settle();
   assert.equal(calls.length, 1, 'A continuation never triggers an automatic whole-column collection.');
   assert.equal(api.items.length, 20); assert.equal(api.paginated, true);
   assert.equal(api.pages.value.value.nextCursor, 'opaque-20');
+  if (swimlane === 'priority') {
+    assert.deepEqual(calls[0].orderBy, [{ field: 'data:/fields/priority', direction: 'desc' }, { field: 'object.createdAt', direction: 'desc' }]);
+    assert.deepEqual(api.sections.map(section => [section.id, section.count]), [['priority:4', 20], ['priority:2', 0], ['priority:0', 0]]);
+  }
   assert.match(JSON.stringify(calls[0].where), /object.parentId.*root/);
   assert.match(JSON.stringify(calls[0].where), /data:\/fields\/control.*user/);
   assert.match(JSON.stringify(calls[0].where), /data:\/fields\/executionRequirement\/hostId.*host/);

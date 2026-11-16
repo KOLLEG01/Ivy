@@ -101,7 +101,7 @@ const saveCapabilities = async () => {
 </script>
 
 <template>
-  <div class="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
+  <div class="ivy-page-width mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
     <PageHeader
       :title="`${status.value.value?.hostId ?? node} settings${backend ? ' · ' + nativeBackendLabel(backend) : ''}`"
       :loading="status.loading.value || capabilityProfile.loading.value"

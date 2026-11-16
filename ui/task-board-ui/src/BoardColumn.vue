@@ -3,10 +3,6 @@ import {
   Archive,
   ArrowUpDown,
   Calendar,
-  ChevronDown,
-  ChevronsDown,
-  ChevronsUp,
-  ChevronUp,
   Clock,
   FileCheck2,
   MessageSquare,
@@ -40,6 +36,10 @@ import {
   conditionLabel,
   conditionTone,
   noteworthyCondition,
+  laneOf,
+  laneTitle,
+  priorityIcon,
+  sortLanes,
   waitingGroup,
   waitingGroups,
   priorityLabel,
@@ -49,7 +49,7 @@ import {
   stateLabel,
   transitions,
 } from "./board";
-import type { BoardTransition, Placement, TransitionContext } from "./board";
+import type { BoardTransition, Placement, Swimlane, TransitionContext } from "./board";
 import type { BoardProjection } from './board-actions';
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
@@ -64,7 +64,7 @@ const props = defineProps<{
   projections?: BoardProjection[];
   archiveDisabled?: boolean;
   archiveAllDisabled?: boolean;
-  swimlane: string;
+  swimlane: Swimlane;
   lanes?: string[];
   collapsedLanes?: string[];
   gridColumn?: number;
@@ -127,8 +127,8 @@ const pages = usePage(async (signal, cursor) => {
     ...(props.archived ? { includeArchived: true } : {}),
     orderBy: props.archived ? [{ field: 'object.updatedAt', direction: 'desc' }, { field: 'object.id', direction: 'asc' }]
       : [...(props.swimlane === 'category' ? [{ field: 'data:/fields/category', direction: 'asc' as const }] : []),
-        ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }]
-          : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }])],
+        ...(props.swimlane === 'priority' || !manual.value ? [{ field: 'data:/fields/priority', direction: 'desc' as const }] : []),
+        ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }] : [{ field: 'object.createdAt', direction: 'desc' as const }])],
     // Hive always breaks sort ties by object ID; an explicit fourth field exceeds the query contract.
     limit: 20, ...(cursor ? { cursor } : {}),
   }, signal) as TaskBoard.CardListResult;
@@ -145,7 +145,7 @@ const pages = usePage(async (signal, cursor) => {
 watch([order, () => props.swimlane], pages.reset);
 const paginated = computed(() => !!pages.value.value?.nextCursor || pages.page.value > 1);
 
-type Item = { id: string; category: string; group: string; context: TransitionContext; card: TaskBoard.TaskCardView; placementPending: boolean };
+type Item = { id: string; category: string; priority: unknown; group: string; context: TransitionContext; card: TaskBoard.TaskCardView; placementPending: boolean };
 const dragging = ref<Item | null>(null),
   marker = ref<{ id: string; after: boolean } | null>(null);
 const startDrag = (event: DragEvent, item: Item) => {
@@ -163,7 +163,8 @@ const endDrag = () => {
   marker.value = null;
   emit("drag", null);
 };
-const lane = (category: string) => category || "Uncategorized";
+const laned = computed(() => props.swimlane !== 'none' && !props.archived);
+const lane = (item: { category: string; priority: unknown }) => laneOf(props.swimlane, item);
 const items = computed(() => {
   const values = new Map((pages.value.value?.items ?? []).map(item => [item.id, item]));
   for (const projection of props.projections ?? []) {
@@ -174,17 +175,17 @@ const items = computed(() => {
   }
   return [...values.values()].map(item => ({ ...item, commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount }));
 });
-const sections = computed(() => (props.lanes ?? (props.swimlane === 'category' && !props.archived
-  ? [...new Set(items.value.map(item => lane(item.category)))] : [''])).map(id => {
-  const values = props.swimlane === 'category' && !props.archived ? items.value.filter(item => lane(item.category) === id) : items.value;
+const sections = computed(() => (props.lanes ?? (laned.value
+  ? sortLanes(props.swimlane, new Set(items.value.map(lane))) : [''])).map(id => {
+  const values = laned.value ? items.value.filter(item => lane(item) === id) : items.value;
   const groups = props.column.id === 'waiting' && !props.archived
     ? waitingGroups.map(group => ({ ...group, items: values.filter(item => item.group === group.id) })).filter(group => group.items.length > 0)
     : [{ id: '', title: '', items: values }];
   return { id, groups, count: values.length };
 }));
-// Neighbours within the same swimlane, so ranking never jumps across categories.
+// Neighbours within the same swimlane, so ranking never jumps across lanes.
 const sameLane = (a: Item, b: Item | undefined) =>
-  !!b && !a.placementPending && !b.placementPending && !taskDisabled(a.id) && !taskDisabled(b.id) && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
+  !!b && !a.placementPending && !b.placementPending && !taskDisabled(a.id) && !taskDisabled(b.id) && a.group === b.group && lane(a) === lane(b);
 const previous = (index: number) =>
   sameLane(items.value[index]!, items.value[index - 1]) ? items.value[index - 1] : undefined;
 const next = (index: number) =>
@@ -320,12 +321,12 @@ defineExpose({ refresh: pages.invalidate, reveal, settle,
       :class="
         layout === 'list'
           ? 'overflow-hidden rounded-lg border bg-card mb-3'
-          : 'board-cell flex min-w-0 flex-col gap-2 rounded-lg bg-muted/50 p-2'
+          : ['board-cell flex min-w-0 flex-col gap-2 rounded-lg bg-muted/50', lanes ? 'board-lane-cell p-1.5' : 'p-2']
       "
     >
       <RemoteState v-if="lanes && sectionIndex === 0" :loading="pages.loading.value" :error="pages.error.value" :has-data="!!pages.value.value" @retry="pages.refresh" />
       <Button v-if="lanes && sectionIndex === 0 && pages.error.value && pages.page.value > 1" variant="ghost" size="sm" @click="pages.reset">Restart from first page</Button>
-      <h3 v-if="swimlane === 'category' && !lanes && !archived" class="border-b bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ section.id }}</h3>
+      <h3 v-if="laned && !lanes" class="border-b px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ laneTitle(swimlane, section.id) }}</h3>
       <section v-for="group in section.groups" :key="group.id" :aria-label="group.title || undefined"
         :data-waiting-group="group.id || undefined" class="flex flex-col gap-2"
         >
@@ -375,19 +376,11 @@ defineExpose({ refresh: pages.invalidate, reveal, settle,
           >
             <span v-if="layout !== 'list'">{{ task.taskKey }}</span>
             <span
-              v-if="typeof task.priority === 'number' && task.priority !== 2"
+              v-if="typeof task.priority === 'number' && task.priority !== 2 && swimlane !== 'priority'"
               class="inline-flex items-center gap-1"
               :class="{ 'text-foreground': task.priority >= 3 }"
               ><component
-                :is="
-                  task.priority >= 4
-                    ? ChevronsUp
-                    : task.priority === 3
-                      ? ChevronUp
-                      : task.priority === 1
-                        ? ChevronDown
-                        : ChevronsDown
-                "
+                :is="priorityIcon(task.priority)"
                 class="size-3.5"
                 aria-hidden="true"
               />{{ priorityLabel(task.priority) }}</span
@@ -512,7 +505,8 @@ defineExpose({ refresh: pages.invalidate, reveal, settle,
       </section>
       <p
         v-if="pages.value.value && section.count === 0"
-        class="px-3 py-6 text-center text-xs text-muted-foreground"
+        class="px-3 text-center text-xs text-muted-foreground"
+        :class="lanes ? 'py-2' : 'py-6'"
       >
         {{ paginated ? tr('Keine Aufgaben auf dieser Seite', 'No tasks on this page') : tr('Keine Aufgaben', 'No tasks') }}
       </p>
@@ -523,6 +517,8 @@ defineExpose({ refresh: pages.invalidate, reveal, settle,
 .board-column-grid { display: contents; }
 .board-column-header { min-width: 0; }
 .board-cell { min-height: 5rem; }
+/* Lane rows stay compact; the lane heading separates them without its own surface. */
+.board-cell.board-lane-cell { min-height: 2.5rem; }
 .task-actions {
   opacity: 0;
 }

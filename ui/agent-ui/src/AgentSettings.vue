@@ -9,7 +9,7 @@ defineProps<{ node: string }>();
 </script>
 
 <template>
-  <div class="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
+  <div class="ivy-page-width mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
     <PageHeader title="Hive settings" />
     <SettingsSection :title="tr('Defaults je Account', 'Defaults by account')" :description="tr('Getrennte Vorgaben für jeden Provider und Account.', 'Separate defaults for each provider and account.')"><AgentDefaults /></SettingsSection>
     <SettingsSection

@@ -240,7 +240,7 @@ const save = async () => {
   ><Button variant="ghost" size="icon-sm" as-child>
     <a :href="route('tasks', { node: workspace.serviceNodeId })" :aria-label="tr('Schließen', 'Close')"><X aria-hidden="true" /></a>
   </Button></PageHeader>
-  <section class="mx-auto w-full max-w-4xl">
+  <section class="ivy-page-width mx-auto w-full max-w-4xl">
     <SettingsSection
       :title="tr('Anzeige', 'Display')"
       :description="tr('Diese Einstellungen gelten für deinen Browser. Übernimm Änderungen mit Speichern.', 'These settings apply to your browser. Choose Save to apply changes.')"

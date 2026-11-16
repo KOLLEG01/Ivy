@@ -1376,7 +1376,7 @@ onBeforeUnmount(() => {
         floating
         label="Loading earlier messages…"
       />
-      <div class="agent-message-column ivy-conversation">
+      <div class="agent-message-column ivy-page-width ivy-conversation">
         <RemoteState
           :loading="state.loading.value"
           :error="state.error.value"
@@ -1551,7 +1551,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-    <div class="agent-input-area">
+    <div class="agent-input-area ivy-page-width">
       <Button
         v-if="requestCount"
         variant="outline"

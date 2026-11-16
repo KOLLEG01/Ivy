@@ -25,6 +25,7 @@ const props = defineProps<{
   usageHost?: string | null | undefined;
   usageNode?: string | undefined;
   usageBackend?: Agent.BackendIdentity | undefined;
+  fullWidthOption?: boolean;
 }>();
 const status = useRemote(
   (signal) => props.client.request("system.status", {}, { signal }),
@@ -79,6 +80,7 @@ const embedded = new URLSearchParams(location.search).has("embed");
     :system-href="systemHref"
     :logout-url="logoutUrl"
     :navigation="navigation"
+    :full-width-option="fullWidthOption"
     :connection="
       status.error.value
         ? 'Connection unavailable'

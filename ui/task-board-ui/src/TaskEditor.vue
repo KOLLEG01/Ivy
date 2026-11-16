@@ -723,7 +723,7 @@ const cancel = () => {
 };
 </script>
 <template>
-  <section :class="task ? '' : 'mx-auto w-full max-w-3xl'">
+  <section :class="task ? '' : 'ivy-page-width mx-auto w-full max-w-3xl'">
     <PageHeader v-if="!task" title="New task" />
     <form class="space-y-8" @submit.prevent="save">
       <FieldGroup>

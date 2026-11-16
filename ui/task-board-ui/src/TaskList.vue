@@ -43,11 +43,17 @@ import { useObjectArchive } from "../../../packages/ui-client/src/object-archive
 import { taskFilter } from "./task-filter";
 import {
   boardColumns,
+  laneField,
+  laneIcon,
+  laneOf,
+  laneTitle,
+  sortLanes,
   stateLabel,
+  storedSwimlane,
   taskContext,
   transitions,
 } from "./board";
-import type { BoardTransition, Placement, TransitionContext } from "./board";
+import type { BoardTransition, Placement, Swimlane, TransitionContext } from "./board";
 import BoardColumn from "./BoardColumn.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { useCommentPreferences } from './comment-preferences';
@@ -59,8 +65,15 @@ const props = defineProps<{
 const emit = defineEmits<{ host: [host: string | null | undefined]; agentNode: [node: string | undefined] }>();
 const { preferences } = useCommentPreferences(() => props.workspace);
 const boardElement = ref<HTMLElement | null>(null);
-const categories = ref<string[]>([]);
-const boardLanes = computed(() => swimlane.value === 'category' ? categories.value.length ? categories.value : ['Uncategorized'] : ['']);
+// Lanes and their totals come from the counts of the lane mode they were counted for.
+const counted = ref<{ swimlane: Swimlane; lanes: Map<string, number> } | null>(null);
+const boardLanes = computed(() => {
+  if (swimlane.value === 'none') return [''];
+  const lanes = counted.value?.swimlane === swimlane.value ? [...counted.value.lanes.keys()] : [];
+  return lanes.length ? sortLanes(swimlane.value, lanes)
+    : swimlane.value === 'priority' ? [4, 3, 2, 1, 0].map(priority => laneOf('priority', { priority })) : ['Uncategorized'];
+});
+const laneCount = (lane: string) => counted.value?.swimlane === swimlane.value ? counted.value.lanes.get(lane) ?? 0 : null;
 const collapsedLanes = ref<string[]>([]), backlogOpen = ref(true);
 const search = ref(props.query.get("q") ?? ""),
   status = ref(props.query.get("status") ?? ""),
@@ -75,8 +88,7 @@ const swimlaneKey =
   ":" +
   props.workspace.callerPrincipalId;
 // The board and the backlog keep separate swimlane preferences.
-const storedLane = (key: string) =>
-  localStorage.getItem(key) === "category" ? "category" : "none";
+const storedLane = (key: string) => storedSwimlane(localStorage.getItem(key));
 const swimlane = ref(storedLane(swimlaneKey)),
   backlogSwimlane = ref(storedLane(swimlaneKey + ":backlog"));
 try {
@@ -87,7 +99,7 @@ try {
 watch(collapsedLanes, value => { try { localStorage.setItem(swimlaneKey + ':collapsed', JSON.stringify(value)); } catch { /* Optional view state. */ } });
 watch(backlogOpen, value => { try { localStorage.setItem(swimlaneKey + ':backlog-open', String(value)); } catch { /* Optional view state. */ } });
 const toggleLane = (lane: string) => { collapsedLanes.value = collapsedLanes.value.includes(lane) ? collapsedLanes.value.filter(value => value !== lane) : [...collapsedLanes.value, lane]; };
-watch(swimlane, (value) => localStorage.setItem(swimlaneKey, value));
+watch(swimlane, (value) => { localStorage.setItem(swimlaneKey, value); void counts.refresh(); });
 watch(backlogSwimlane, (value) =>
   localStorage.setItem(swimlaneKey + ":backlog", value),
 );
@@ -144,7 +156,8 @@ const link = (values: Record<string, string> = {}) => {
 };
 const counts = useRemote(async (signal) => {
   const states = new Map<string, number>(),
-    lanes = new Set<string>(),
+    mode = swimlane.value,
+    lanes = new Map<string, number>(),
     cursors = new Set<string>();
   let cursor: string | null = null;
   do {
@@ -153,7 +166,7 @@ const counts = useRemote(async (signal) => {
       {
         contractKey: "task-board/task",
         where: taskFilter(props.workspace.rootObjectId, props.query),
-        groupBy: ["data:/workflowState", "data:/fields/category"],
+        groupBy: ["data:/workflowState", laneField(mode)],
         limit: 200,
         ...(cursor ? { cursor } : {}),
       },
@@ -162,14 +175,17 @@ const counts = useRemote(async (signal) => {
     for (const item of page.items) {
       const state = String(item.values["data:/workflowState"]);
       states.set(state, (states.get(state) ?? 0) + item.count);
-      if (item.values['data:/workflowState'] !== 'backlog') lanes.add(String(item.values['data:/fields/category'] || 'Uncategorized'));
+      if (state !== 'backlog') {
+        const lane = laneOf(mode, { category: item.values['data:/fields/category'], priority: item.values['data:/fields/priority'] });
+        lanes.set(lane, (lanes.get(lane) ?? 0) + item.count);
+      }
     }
     cursor = page.nextCursor;
     if (cursor && cursors.has(cursor))
       throw new Error("Task counts could not finish. Refresh the board.");
     if (cursor) cursors.add(cursor);
   } while (cursor);
-  categories.value = [...lanes].sort((a, b) => a.localeCompare(b));
+  counted.value = { swimlane: mode, lanes };
   return Object.fromEntries(
     [...boardColumns, backlogColumn].map((column) => [
       column.id,
@@ -578,14 +594,16 @@ const drop = (column: string) => {
           ><Label for="swimlane">Board swimlanes</Label
           ><OptionSelect id="swimlane" v-model="swimlane" class="w-full"
             ><option value="none">No swimlanes</option>
-            <option value="category">By category</option></OptionSelect
+            <option value="category">By category</option>
+            <option value="priority">By priority</option></OptionSelect
           ></Field
         >
         <Field
           ><Label for="backlog-swimlane">Backlog swimlanes</Label
           ><OptionSelect id="backlog-swimlane" v-model="backlogSwimlane" class="w-full"
             ><option value="none">No swimlanes</option>
-            <option value="category">By category</option></OptionSelect
+            <option value="category">By category</option>
+            <option value="priority">By priority</option></OptionSelect
           ></Field
         >
       </PopoverContent>
@@ -645,10 +663,14 @@ const drop = (column: string) => {
     ref="boardElement"
   >
     <div class="task-board-grid" :style="{ gridTemplateColumns: 'repeat(' + columns.length + ', minmax(16rem, 1fr))' }">
-    <template v-if="swimlane === 'category'">
+    <template v-if="swimlane !== 'none'">
       <div v-for="(lane, index) in boardLanes" :key="lane" class="board-swimlane-heading" :style="{ gridRow: 2 + index * 2 }">
-        <Button variant="ghost" size="sm" class="sticky left-0 h-8 max-w-[80vw] justify-start" :aria-expanded="!collapsedLanes.includes(lane)" @click="toggleLane(lane)">
-          <ChevronRight class="size-4 transition-transform" :class="{ 'rotate-90': !collapsedLanes.includes(lane) }" aria-hidden="true" /><span class="truncate">{{ lane === 'Uncategorized' ? tr('Ohne Kategorie', 'Uncategorized') : lane }}</span>
+        <Button variant="ghost" size="sm" class="sticky left-0 h-7 max-w-[80vw] justify-start gap-1.5 px-1.5 pointer-coarse:h-9" :aria-expanded="!collapsedLanes.includes(lane)"
+          :aria-label="laneTitle(swimlane, lane)" @click="toggleLane(lane)">
+          <ChevronRight class="size-4 text-muted-foreground transition-transform" :class="{ 'rotate-90': !collapsedLanes.includes(lane) }" aria-hidden="true" />
+          <component :is="laneIcon(swimlane, lane)" v-if="laneIcon(swimlane, lane)" class="size-4 text-muted-foreground" aria-hidden="true" />
+          <span class="truncate">{{ laneTitle(swimlane, lane) }}</span>
+          <span v-if="laneCount(lane) !== null" class="font-normal text-muted-foreground">{{ laneCount(lane) }}</span>
         </Button>
       </div>
     </template>
@@ -797,7 +819,7 @@ const drop = (column: string) => {
   align-items: stretch;
 }
 .board-lane { display: contents; }
-.board-swimlane-heading { grid-column: 1 / -1; min-width: 0; border-block: 1px solid var(--border); background: var(--muted); }
+.board-swimlane-heading { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--border); padding-top: .25rem; }
 .drop-target {
   outline: 2px dashed var(--ring);
   outline-offset: 2px;

@@ -68,6 +68,7 @@ for (const width of [1440, 390]) test(`board swimlanes align across columns and 
   await f.invoke({ action: 'transition', taskId: working.objectId, expectedRevision: working.revision, workflowState: 'in_progress', detail: null });
   await create('Beta waiting', 'Beta');
   await create('Backlog idea', 'Alpha', { workflowState: 'backlog' });
+  await f.invoke({ action: 'create', fields: { ...fields('Urgent fix'), category: 'Beta', priority: 4 } });
   await f.open('#/tasks?node=browser-task-board');
   await f.page.getByRole('button', { name: 'Display options', exact: true }).click();
   await choose(f.page.getByLabel('Board swimlanes', { exact: true }), 'category');
@@ -96,6 +97,50 @@ for (const width of [1440, 390]) test(`board swimlanes align across columns and 
   await backlog.click();
   await expect(f.page.getByRole('link', { name: 'Backlog idea', exact: true })).toBeVisible();
   assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  // Priority lanes: highest first, each card once in its lane, totals in compact headings without their own surface.
+  await f.page.getByRole('button', { name: 'Display options', exact: true }).click();
+  await choose(f.page.getByLabel('Board swimlanes', { exact: true }), 'priority');
+  await f.page.keyboard.press('Escape');
+  const headings = f.page.locator('.board-swimlane-heading');
+  await expect(headings.getByRole('button')).toHaveText([/Urgent\s*1/, /Medium\s*4/]);
+  await expect(f.page.locator('[data-board-cell="priority:4"]').getByRole('link')).toHaveText(['Urgent fix']);
+  await expect(f.page.locator('[data-board-cell="priority:2"]').getByRole('link')).toHaveCount(4);
+  const heading = await headings.first().evaluate(element => ({ background: getComputedStyle(element).backgroundColor, height: element.getBoundingClientRect().height }));
+  assert.equal(heading.background, 'rgba(0, 0, 0, 0)');
+  assert.ok(heading.height <= 36, 'Lane headings stay compact.');
+  await f.page.reload();
+  await expect(headings.getByRole('button')).toHaveText([/Urgent\s*1/, /Medium\s*4/]);
+  await headings.getByRole('button', { name: 'Urgent', exact: true }).click();
+  for (const cell of await f.page.locator('[data-board-cell="priority:4"]').all()) await expect(cell).toBeHidden();
+  await expect(f.page.getByRole('link', { name: 'Alpha working', exact: true })).toBeVisible();
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.pageErrors, []);
+});
+
+test('full width is an opt-in TaskBoard preference that survives reload', { timeout: 180000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width: 1440, height: 900 } });
+  await f.open('#/new?node=browser-task-board');
+  const content = f.page.locator('.ivy-page-width').first();
+  const width = async () => (await content.boundingBox()).width;
+  await expect(content).toBeVisible();
+  assert.ok(await width() <= 769, 'The page keeps its limited width by default.');
+  const toggle = async checked => {
+    await f.page.getByRole('button', { name: 'Account', exact: true }).click();
+    const item = f.page.getByRole('menuitemcheckbox', { name: 'Full width', exact: true });
+    await expect(item).toHaveAttribute('aria-checked', String(!checked));
+    await item.click();
+  };
+  await toggle(true);
+  await expect.poll(width).toBeGreaterThan(1000);
+  await f.page.reload();
+  await expect(content).toBeVisible();
+  await expect.poll(width).toBeGreaterThan(1000);
+  assert.deepEqual(await f.page.evaluate(() => [localStorage.getItem('ivy.full-width:TaskBoard'), localStorage.getItem('ivy.full-width:Agents')]), ['true', null]);
+  await f.page.setViewportSize({ width: 390, height: 900 });
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await f.page.setViewportSize({ width: 1440, height: 900 });
+  await toggle(false);
+  await expect.poll(width).toBeLessThanOrEqual(769);
   assert.deepEqual(f.pageErrors, []);
 });
 

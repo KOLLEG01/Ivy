@@ -1266,7 +1266,7 @@ const showArrived = async () => {
         class="ivy-chat-surface ivy-conversation m-0 min-h-0 flex-1 overflow-hidden"
         aria-label="Conversation"
       >
-        <div class="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col gap-1">
+        <div class="ivy-page-width mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col gap-1">
           <template v-for="section in commentSections" :key="section">
             <template v-if="section === 'comments'">
               <PageControls v-if="conversation.hasOlder.value || conversation.historical.value"

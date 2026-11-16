@@ -477,7 +477,7 @@ watch(() => action.saved.value?.phase, (phase) => {
 });
 </script>
 <template>
-  <div class="new-task-page mx-auto flex w-full max-w-3xl flex-col px-4">
+  <div class="new-task-page ivy-page-width mx-auto flex w-full max-w-3xl flex-col px-4">
     <RemoteState
       :loading="status.loading.value"
       :error="status.error.value"

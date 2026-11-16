@@ -52,7 +52,7 @@ const taskName = (summary: unknown, id: string) =>
 </script>
 
 <template>
-  <div class="agent-overview mx-auto w-full max-w-5xl">
+  <div class="agent-overview ivy-page-width mx-auto w-full max-w-5xl">
     <PageHeader
       title="All hosts"
       description="Browse tasks and hosts in this workspace."

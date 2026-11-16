@@ -1,4 +1,4 @@
-import { Circle, CircleCheck, CircleDashed, CircleDot, CircleEllipsis, CirclePause, CircleX } from '@lucide/vue';
+import { ChevronDown, ChevronsDown, ChevronsUp, ChevronUp, Circle, CircleCheck, CircleDashed, CircleDot, CircleEllipsis, CirclePause, CircleX, Minus } from '@lucide/vue';
 import { tr, type TaskBoard } from './runtime';
 
 export const boardColumns = [
@@ -59,6 +59,23 @@ export const stateLabels: Record<string, string> = { backlog: 'Backlog', todo: '
 export const stateLabel = (state: string) => stateLabels[state] ?? state.replaceAll('_', ' ');
 export const priorityLabels: Record<number, string> = { 4: 'Urgent', 3: 'High', 2: 'Medium', 1: 'Low', 0: 'Lowest' };
 export const priorityLabel = (priority: unknown) => typeof priority === 'number' ? priorityLabels[priority] ?? 'P' + priority : 'None';
+export const priorityIcon = (priority: number) => priority >= 4 ? ChevronsUp : priority === 3 ? ChevronUp : priority === 2 ? Minus : priority === 1 ? ChevronDown : ChevronsDown;
+export type Swimlane = 'none' | 'category' | 'priority';
+export const storedSwimlane = (value: string | null): Swimlane => value === 'category' || value === 'priority' ? value : 'none';
+/** Lane field counted per workflow state; Hive groups counts by at most two fields. */
+export const laneField = (swimlane: Swimlane) => swimlane === 'priority' ? 'data:/fields/priority' : 'data:/fields/category';
+/** A Task's lane. Priority lanes carry a prefix so a category of the same name keeps its own collapse state. */
+export const laneOf = (swimlane: Swimlane, task: { category?: unknown; priority?: unknown }) =>
+  swimlane === 'category' ? String(task.category || 'Uncategorized')
+    : swimlane === 'priority' ? 'priority:' + (typeof task.priority === 'number' ? task.priority : 'none') : '';
+const lanePriority = (lane: string) => { const value = Number(lane.slice('priority:'.length)); return lane === 'priority:none' ? -Infinity : value; };
+/** Category lanes read alphabetically; priority lanes start with the highest priority. */
+export const sortLanes = (swimlane: Swimlane, lanes: Iterable<string>) => [...lanes].sort(swimlane === 'priority'
+  ? (a, b) => lanePriority(b) - lanePriority(a) : (a, b) => a.localeCompare(b));
+export const laneIcon = (swimlane: Swimlane, lane: string) => swimlane === 'priority' && lane !== 'priority:none' ? priorityIcon(lanePriority(lane)) : null;
+export const laneTitle = (swimlane: Swimlane, lane: string) => swimlane === 'priority'
+  ? priorityLabel(lane === 'priority:none' ? undefined : lanePriority(lane))
+  : lane === 'Uncategorized' ? tr('Ohne Kategorie', 'Uncategorized') : lane;
 export const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 export const stateIcons = { backlog: CircleDashed, todo: Circle, in_progress: CircleDot, waiting: CirclePause, review: CircleEllipsis, done: CircleCheck, cancelled: CircleX } as Record<string, typeof Circle>;
 export const stateColors: Record<string, string> = { in_progress: 'text-amber-500', review: 'text-sky-500', done: 'text-emerald-500', cancelled: 'text-muted-foreground' };

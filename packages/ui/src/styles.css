@@ -425,6 +425,10 @@
   padding: 1.25rem 1rem;
   outline: none;
 }
+/* Pages mark their width-limited content; the shell's full-width choice lifts the limit. */
+.ivy-shell[data-width="full"] .ivy-page-width {
+  max-width: none;
+}
 /* An embedded UI fills its frame; conversation pages size themselves to it. */
 .ivy-embedded {
   --conversation-height: 100dvh;

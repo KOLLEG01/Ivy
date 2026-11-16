@@ -65,6 +65,7 @@ const switchHref = (node: string) =>
 <template>
   <UiFrame
     ui-name="TaskBoard"
+    full-width-option
     :base="base"
     :client="client"
     :navigation="[]"

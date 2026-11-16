@@ -435,6 +435,7 @@ const toggleGroup = (id: string) => {
   <UiFrame
     ui-name="Agents"
     layout="conversation"
+    full-width-option
     :settings-href="node && selectedOwner ? route('host-settings', nativeRouteQuery(selectedOwner)) : route('settings')"
     :base="base"
     :client="client"

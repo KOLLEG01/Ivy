@@ -14,6 +14,7 @@ import {
 } from "@lucide/vue";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -76,6 +77,8 @@ const props = defineProps<{
   connectionTone?: "good" | "bad" | "warning" | "neutral";
   /** Embedded in another Ivy UI: only the page, without rail, navigation or top bar. */
   embedded?: boolean;
+  /** Offers the per-UI choice to drop the page width limits of `.ivy-page-width` content. */
+  fullWidthOption?: boolean;
 }>();
 const rail = computed(() => [
   ...(props.apps ?? []).map((app) => ({
@@ -105,9 +108,13 @@ const viewportChanged = () => {
 };
 const { height: installBannerHeight } = useElementSize(installBanner);
 const sidebarKey = computed(() => `ivy.sidebar.collapsed:${props.uiName}`);
-// Read the collapsed state before the first render so the layout does not jump.
+const fullWidthKey = computed(() => `ivy.full-width:${props.uiName}`);
+const fullWidth = ref(false);
+const width = computed(() => props.fullWidthOption && fullWidth.value ? "full" : undefined);
+// Read the view state before the first render so the layout does not jump.
 try {
   sidebarOpen.value = localStorage.getItem(sidebarKey.value) !== "true";
+  fullWidth.value = localStorage.getItem(fullWidthKey.value) === "true";
 } catch {
   /* Optional view state. */
 }
@@ -142,6 +149,14 @@ const toggleTheme = () => {
     /* Theme storage is optional. */
   }
 };
+watch(fullWidth, (full) => {
+  try {
+    if (full) localStorage.setItem(fullWidthKey.value, "true");
+    else localStorage.removeItem(fullWidthKey.value);
+  } catch {
+    /* Optional view state. */
+  }
+});
 watch(sidebarOpen, (open) => {
   try {
     if (open) localStorage.removeItem(sidebarKey.value);
@@ -150,8 +165,9 @@ watch(sidebarOpen, (open) => {
     /* Optional view state. */
   }
 });
-// Follow theme changes made in other documents of this origin, including an embedding UI.
+// Follow theme and width changes made in other documents of this origin, including an embedding UI.
 const followTheme = (event: StorageEvent) => {
+  if (event.key === fullWidthKey.value) fullWidth.value = event.newValue === "true";
   if (event.key !== "ivy.theme" || !event.newValue) return;
   dark.value = event.newValue === "dark";
   applyTheme();
@@ -180,6 +196,7 @@ onMounted(() => {
     v-if="embedded"
     :data-ui="uiName"
     :data-layout="layout ?? 'default'"
+    :data-width="width"
     class="ivy-shell ivy-embedded"
     :style="{ '--conversation-height': viewportHeight }"
   >
@@ -209,6 +226,7 @@ onMounted(() => {
     }"
     :data-ui="uiName"
     :data-layout="layout ?? 'default'"
+    :data-width="width"
     class="ivy-shell"
   >
     <!-- shadcn sidebar-09: a permanent app rail beside the collapsible page navigation. -->
@@ -302,6 +320,9 @@ onMounted(() => {
                       />{{
                         dark ? "Use light theme" : "Use dark theme"
                       }}</DropdownMenuItem
+                    >
+                    <DropdownMenuCheckboxItem v-if="fullWidthOption" v-model="fullWidth"
+                      >Full width</DropdownMenuCheckboxItem
                     >
                     <DropdownMenuSeparator />
                     <DropdownMenuItem @select="logout?.submit()"
