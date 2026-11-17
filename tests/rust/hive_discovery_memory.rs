@@ -5,6 +5,7 @@ use std::{path::Path, sync::atomic::Ordering as AtomicOrdering};
 fn discovery() -> Discovery {
     Discovery {
         indexes: vec![], index_bytes: 0, core_index: vec![], core_bindings: CoreCalls::default(),
+        instructions_cache: None,
     }
 }
 

@@ -6,6 +6,7 @@ fn discovery() -> Discovery {
         index_bytes: 0,
         core_index: vec![],
         core_bindings: CoreCalls::default(),
+        instructions_cache: None,
     }
 }
 fn index(identity: String) -> Index {

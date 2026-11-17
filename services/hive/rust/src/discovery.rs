@@ -485,6 +485,7 @@ pub struct Discovery {
     index_bytes: usize,
     core_index: Vec<IndexedTool>,
     core_bindings: CoreCalls,
+    instructions_cache: Option<(String, IvyJson)>,
 }
 impl Discovery {
     pub fn new(runtime: &dyn Runtime) -> IvyResult<Self> {
@@ -524,6 +525,7 @@ impl Discovery {
             index_bytes: 0,
             core_index,
             core_bindings: CoreCalls::default(),
+            instructions_cache: None,
         })
     }
     pub fn core_binding(&mut self, qualified: &JsString) -> IvyResult<IvyJson> {
@@ -1370,6 +1372,32 @@ impl Discovery {
         _now: f64,
     ) -> IvyResult<IvyJson> {
         let nodes = registry.catalog_providers(store)?;
+        // Guides depend on the retained registry contents and which providers are
+        // available. Heartbeats alone do not change the composed instructions.
+        let identity = {
+            let mut statement = store.connection()
+                .prepare_cached("SELECT identity FROM registry_identities WHERE node_id=?")
+                .map_err(|error| store.query_error(error))?;
+            let mut providers = Vec::with_capacity(nodes.len());
+            for node in &nodes {
+                let registry_identity = statement
+                    .query_row([text(&node.service_node_id)], |row| row.get::<_, String>(0))
+                    .optional()
+                    .map_err(|error| store.query_error(error))?;
+                providers.push(IvyJson::Array(vec![
+                    node.service_node_id.clone().into(),
+                    node.service_name.clone().into(),
+                    node.available.into(),
+                    registry_identity.map_or(IvyJson::Null, IvyJson::from),
+                ]));
+            }
+            hash_json(&IvyJson::Array(providers))?
+        };
+        if let Some((cached_identity, result)) = &self.instructions_cache
+            && cached_identity == &identity
+        {
+            return Ok(result.clone());
+        }
         let mut guides = mcp_guides(store, registry, &nodes, runtime)?;
         let mut hints: Vec<(JsString, Vec<JsString>)> = vec![];
         for node in nodes {
@@ -1439,7 +1467,9 @@ impl Discovery {
             "limit_exceeded",
             "Composed Hive instructions exceed 32 KiB.",
         )?;
-        Ok(IvyJson::object([("instructions", IvyJson::String(value))]))
+        let result = IvyJson::object([("instructions", IvyJson::String(value))]);
+        self.instructions_cache = Some((identity, result.clone()));
+        Ok(result)
     }
     pub fn instructions_page(
         &mut self,
