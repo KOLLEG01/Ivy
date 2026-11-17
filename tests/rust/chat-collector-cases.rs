@@ -783,6 +783,167 @@ async fn original_collector_replay_retry_results_and_publication() {
         "Original collector differential: {workflows} workflows, {steps} steps, {gates} required shared boundary comparisons; retained SQLite, read identity, Result text and publisher execute in Rust."
     );
 }
+#[tokio::test]
+async fn original_collector_recollects_terminal_status_with_bounded_retries() {
+    let corpus = oracle();
+    let seed = field(field(corpus, "seeds"), "0.159.2");
+    let templates = array(corpus, "cases")
+        .iter()
+        .find(|case| text(case, "label") == "catalog-read-and-full-fallback-0.159.2")
+        .unwrap();
+    let original = array(corpus, "cases")
+        .iter()
+        .find(|case| text(case, "label") == "collect-reopen-publish-and-release")
+        .unwrap();
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let bytes = STANDARD.decode(text(corpus, "instructions")).unwrap();
+    let instructions = parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX)
+        .unwrap()
+        .as_js_string()
+        .unwrap()
+        .clone();
+    let validation =
+        ivy_chat_bridge::native_plan::ChatNativeValidation::new(&catalogs, &instructions);
+    for recovers in [true, false] {
+        let path = Fixture::new(field(seed, "database"));
+        let client = Arc::new(Client::new(array(seed, "records").to_vec()));
+        let clock = Arc::new(Time(AtomicI64::new(number(corpus, "now") as i64)));
+        let live = Mutex::new(Live {
+            controls: Json::object([("epoch", "original-epoch".into())]),
+            events: vec![],
+            observations: VecDeque::new(),
+        });
+        let mut previous: Option<Json> = None;
+        for attempt in 1..=if recovers { 2 } else { 3 } {
+            let store =
+                ChatStore::with_clock(client.clone(), None, Some(path.0.clone()), clock.clone())
+                    .await
+                    .unwrap();
+            let admission = ChatAdmission::new(field(seed, "definition")).unwrap();
+            let ops = ChatOperations::new(&store, &admission).unwrap();
+            let evidence = ChatNativeEvidence::new(
+                &store,
+                field(seed, "definition"),
+                &catalogs,
+                &validation,
+                &instructions,
+            )
+            .unwrap();
+            let runtime = Runtime {
+                store: &store,
+                operations: &ops,
+                binding: reference(field(seed, "binding")),
+                live: &live,
+                clock: &clock,
+            };
+            let collector = ChatCollector::new(&ops, &evidence, &runtime, &catalogs);
+            // Use the current native catalog and an original interrupted-to-completed
+            // race, followed either by stable completion or by repeated inconsistency.
+            for index in 0..3 {
+                let mut observed =
+                    array(templates, "observations")[if index == 2 { 3 } else { index }].clone();
+                if index == 1 {
+                    observed.insert(
+                        "reply",
+                        field(&array(original, "observations")[1], "reply").clone(),
+                    );
+                } else if index == 0 && (!recovers || attempt == 1) {
+                    let Json::Array(turns) =
+                        member(member(member(&mut observed, "reply"), "result"), "data")
+                    else {
+                        panic!("Expected original turn page")
+                    };
+                    turns[0].insert("status", "interrupted".into());
+                }
+                observed.insert(
+                    "observationId",
+                    format!("attempt-{attempt}-read-{index}").into(),
+                );
+                observed.insert(
+                    "observedAt",
+                    ivy_sdk::clock::date_to_iso(clock.utc_millis() as f64)
+                        .unwrap()
+                        .into(),
+                );
+                live.lock().unwrap().observations.push_back(observed);
+            }
+            for _ in 0..3 {
+                collector.step("original-input").await.unwrap();
+            }
+            let current = collector.find("original-input").await.unwrap().unwrap();
+            assert_eq!(number(&current.value, "attempt"), attempt);
+            assert_eq!(
+                current.value.get("previousAttempt"),
+                Some(&previous.clone().unwrap_or(Json::Null))
+            );
+            if recovers && attempt == 2 {
+                assert_eq!(text(&current.value, "state"), "ready");
+                let complete = collector.step("original-input").await.unwrap().unwrap();
+                assert_eq!(text(&complete.value, "state"), "complete");
+                let result = store
+                    .read_in(
+                        "chat-bridge/result",
+                        Reference::Pinned(&reference(field(&complete.value, "result"))),
+                        Some("original-input"),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    ivy_chat_bridge::result_text::read_chat_result_text(
+                        &store,
+                        &"original-input".into(),
+                        &result.value,
+                    )
+                    .await
+                    .unwrap(),
+                    "Original reply\n😀".into(),
+                );
+                let mut publisher = ChatPublisher::new(&ops, &collector);
+                for _ in 0..5 {
+                    publisher.step().await.unwrap();
+                }
+                assert!(
+                    array(
+                        &ChatQueue::new(&ops, None).main().await.unwrap().value,
+                        "queue"
+                    )
+                    .is_empty()
+                );
+            } else {
+                assert_eq!(text(&current.value, "state"), "failed");
+                assert_eq!(
+                    text(field(&current.value, "error"), "code"),
+                    "chat_collection_changed"
+                );
+                assert_eq!(current.value.get("result"), Some(&Json::Null));
+                assert_eq!(
+                    array(
+                        &ChatQueue::new(&ops, None).main().await.unwrap().value,
+                        "queue"
+                    )
+                    .len(),
+                    1
+                );
+                if attempt < 3 {
+                    clock
+                        .0
+                        .fetch_add((1000_i64 << attempt) - 1, Ordering::Relaxed);
+                    let delayed = collector.step("original-input").await.unwrap().unwrap();
+                    assert_eq!(delayed.pin, current.pin);
+                    clock.0.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    clock.0.fetch_add(60_000, Ordering::Relaxed);
+                    let exhausted = collector.step("original-input").await.unwrap().unwrap();
+                    assert_eq!(exhausted.pin, current.pin);
+                }
+            }
+            assert!(live.lock().unwrap().observations.is_empty());
+            previous = Some(current.pin.json());
+        }
+    }
+}
+
 fn compare(a: &Json, b: &Json, label: &str, path: &str) {
     match (a, b) {
         (Json::Object(x), Json::Object(y)) => {

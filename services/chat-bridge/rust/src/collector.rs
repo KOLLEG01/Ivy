@@ -652,7 +652,12 @@ impl<'a> ChatCollector<'a> {
                     } else {
                         1000.0 * 2.0_f64.powf(attempt)
                     };
-                    if !(gap || code == Some(&"chat_collection_native_error".into()))
+                    // Native history can briefly report a different terminal status
+                    // while completion is being persisted. Recollect the original
+                    // turn from scratch; never publish the inconsistent read set.
+                    if !(gap
+                        || code == Some(&"chat_collection_native_error".into())
+                        || code == Some(&"chat_collection_changed".into()))
                         || attempt >= if gap { 32.0 } else { 3.0 }
                         || (self.store().now_millis() as f64)
                             < parse_date(string(&selected.value, "updatedAt")?) + delay

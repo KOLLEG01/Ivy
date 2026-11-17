@@ -151,7 +151,7 @@ export const rustTests = {
   "tests/rust/chat-native-events.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "native_events::" },
   "tests/rust/chat-session-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "session::" },
   "tests/rust/chat-listener-cases.rs": { package: "ivy-chat-bridge", test: "chat-journal", filter: "listener::" },
-  "tests/rust/chat-collector-cases.rs": { package: "ivy-chat-bridge", test: "chat-evidence-bytes", filter: "native_evidence::collector::original_collector_replay_retry_results_and_publication" },
+  "tests/rust/chat-collector-cases.rs": { package: "ivy-chat-bridge", test: "chat-evidence-bytes", filter: "native_evidence::collector::original_collector_" },
   "tests/rust/chat-store-cases.rs": { package: "ivy-chat-bridge", test: "chat-storage", filter: "chat_store" },
   "tests/rust/chat-local-metadata.rs": { package: "ivy-chat-bridge", lib: true, filter: "store::local::metadata::tests::" },
   "tests/secretary-rust/assignment_scheduler_cases.rs": { package: "ivy-secretary", test: "delivery", filter: "assignment_scheduler_cases::" },
