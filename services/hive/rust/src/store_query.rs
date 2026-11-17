@@ -4,6 +4,7 @@ use rusqlite::{
     functions::FunctionFlags,
     types::{Value, ValueRef},
 };
+use serde_json::value::RawValue;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -29,6 +30,7 @@ struct State {
     deadline: Option<Instant>,
     cache: HashMap<String, IvyJson>,
     cache_bytes: usize,
+    project_raw: bool,
     error: Option<IvyError>,
     runtime: Option<Arc<dyn QueryRuntime>>,
 }
@@ -41,6 +43,7 @@ impl Drop for BudgetReset {
         state.deadline = None;
         state.cache.clear();
         state.cache_bytes = 0;
+        state.project_raw = false;
         state.error = None;
     }
 }
@@ -70,20 +73,42 @@ impl State {
         if let Some(root) = self.cache.get(content) {
             return Self::project_pointer(root, pointer, project);
         }
+        // Large scans quickly outgrow the tree cache. Borrow unselected fields
+        // so only the value used by this projection needs an IvyJson tree.
+        if self.project_raw && !pointer.is_empty()
+            && let Some(value) = Self::raw_object_value(content, pointer)
+        {
+            return project(&value);
+        }
         let Ok(root) = parse(content, usize::MAX) else {
             return project(&IvyJson::Null);
         };
         let bytes = content.len() + std::mem::size_of::<String>() + root.retained_bytes();
         if bytes > JSON_CACHE_ENTRY_BYTES {
+            self.project_raw = true;
             return Self::project_pointer(&root, pointer, project);
         }
         if self.cache.len() >= 8 || self.cache_bytes + bytes > JSON_CACHE_BYTES {
             self.cache.clear();
             self.cache_bytes = 0;
+            self.project_raw = true;
         }
         let root = self.cache.entry(content.to_owned()).or_insert(root);
         self.cache_bytes += bytes;
         Self::project_pointer(root, pointer, project)
+    }
+
+    fn raw_object_value(mut content: &str, pointer: &str) -> Option<IvyJson> {
+        for key in pointer_parts(&pointer.into()).ok()? {
+            let key = key.to_utf8().ok()?;
+            // Use the full parser for array paths and keys that need decoding.
+            let fields: HashMap<&str, &RawValue> = serde_json::from_str(content).ok()?;
+            let Some(&child) = fields.get(key.as_str()) else {
+                return Some(IvyJson::Null);
+            };
+            content = child.get();
+        }
+        parse(content, usize::MAX).ok()
     }
 
     fn project_pointer<T>(
@@ -281,6 +306,7 @@ impl Store {
             state.deadline = Instant::now().checked_add(duration);
             state.cache.clear();
             state.cache_bytes = 0;
+            state.project_raw = false;
             state.error = None;
         }
         BudgetReset(self.query_state.clone())

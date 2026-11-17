@@ -11,6 +11,31 @@ fn rank(state: &mut State, content: &str) -> IvyJson {
 }
 
 #[test]
+fn scanned_document_projections_match_the_cached_parser() {
+    for (content, pointer) in [
+        (r#"{"thread":{"rank":1,"rank":7}}"#, "/thread/rank"),
+        (r#"{"ra\u006ek":7}"#, "/rank"),
+        (r#"{"items":[{"rank":7}]}"#, "/items/0/rank"),
+        (r#"{"thread":{"name":"\ud800"}}"#, "/thread/name"),
+        (r#"{"thread":{"rank":7}}"#, "/thread/missing"),
+        (r#"{"thread":{"rank":7},"incomplete":}"#, "/thread/rank"),
+    ] {
+        let read = |state: &mut State| {
+            state.project(
+                ValueRef::Text(content.as_bytes()),
+                ValueRef::Text(pointer.as_bytes()),
+                |value| Ok(value.clone()),
+            )
+        };
+        let mut direct = State {
+            project_raw: true,
+            ..Default::default()
+        };
+        assert_eq!(read(&mut direct).unwrap(), read(&mut State::default()).unwrap());
+    }
+}
+
+#[test]
 fn oversized_tree_is_queried_without_displacing_cached_documents() {
     let mut state = State::default();
     assert_eq!(rank(&mut state, r#"{"rank":1}"#), IvyJson::Number(1.0));
