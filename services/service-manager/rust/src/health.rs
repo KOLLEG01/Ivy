@@ -3,7 +3,10 @@ use ivy_host_runtime::{
     config::{CONFIGURATION_BYTES, json_file},
     health::HealthFile,
 };
-use ivy_sdk::{clock::parse_date, service::ServiceState};
+use ivy_sdk::{
+    clock::parse_date,
+    service::{ServiceConnection, ServiceState},
+};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -35,7 +38,6 @@ struct Writes {
     sender: watch::Sender<Option<Publication>>,
     completed: watch::Receiver<(u64, IvyResult<()>)>,
     sequence: u64,
-    generation: Option<u64>,
     final_sequence: Option<u64>,
     sealed: bool,
 }
@@ -72,7 +74,6 @@ impl HealthReporter {
                 sender: writes,
                 completed,
                 sequence: 0,
-                generation: None,
                 final_sequence: None,
                 sealed: false,
             })),
@@ -85,7 +86,7 @@ impl HealthReporter {
         generation: Option<u64>,
         message: ivy_contracts::JsString,
     ) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
-        self.enqueue(ready, generation, message, false)
+        self.enqueue(ready, generation, message, false, || true)
     }
     fn enqueue(
         &self,
@@ -93,6 +94,7 @@ impl HealthReporter {
         generation: Option<u64>,
         message: ivy_contracts::JsString,
         final_write: bool,
+        connection_open: impl FnOnce() -> bool,
     ) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
         let mut writes = self
             .writes
@@ -100,12 +102,13 @@ impl HealthReporter {
             .unwrap_or_else(|error| error.into_inner());
         let through = (|| {
             if final_write && let Some(sequence) = writes.final_sequence { return Ok(sequence); }
-            if !final_write && (writes.sealed || generation.zip(writes.generation).is_some_and(|(new, current)| new < current)) {
+            // Hive can restart its generation counter. Use the connection's
+            // cancellation fence to reject late readiness from a closed socket.
+            if !final_write && (writes.sealed || !connection_open()) {
                 return Err(ivy_contracts::IvyError::new("service_unavailable", "ServiceManager health publication is stopped or superseded."));
             }
             writes.sequence = writes.sequence.checked_add(1).ok_or_else(ivy_contracts::IvyError::internal)?;
             if final_write { writes.sealed = true; writes.final_sequence = Some(writes.sequence); }
-            if let Some(generation) = generation { writes.generation = Some(generation); }
             let sequence = writes.sequence;
             writes.sender.send(Some(Publication { sequence, ready, generation, message, final_write })).map_err(|_| ivy_contracts::IvyError::internal())?;
             Ok(sequence)
@@ -128,7 +131,7 @@ impl HealthReporter {
     /// Seal and enqueue the final unready write under the same lock, so even a
     /// readiness callback accepted before shutdown cannot publish ready afterward.
     pub fn finalize(&self) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
-        self.enqueue(false, None, "ServiceManager stopped.".into(), true)
+        self.enqueue(false, None, "ServiceManager stopped.".into(), true, || true)
     }
 
     pub fn state(&self, state: ServiceState) {
@@ -150,7 +153,7 @@ impl HealthReporter {
         executor: Option<&IvyJson>,
         host_id: IvyJson,
         service_node_id: IvyJson,
-        generation: u64,
+        connection: &ServiceConnection,
         now_ms: i64,
     ) -> IvyResult<IvyJson> {
         let ready = executor.is_some_and(|value| {
@@ -165,7 +168,15 @@ impl HealthReporter {
         let now = chrono::DateTime::from_timestamp_millis(now_ms)
             .ok_or_else(ivy_contracts::IvyError::internal)?
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.write(ready, Some(generation), message.into()).await?;
+        let signal = connection.signal();
+        self.enqueue(
+            ready,
+            Some(connection.generation()),
+            message.into(),
+            false,
+            || !signal.is_cancelled(),
+        )
+        .await?;
         Ok(IvyJson::object([
             ("ready", ready.into()),
             (

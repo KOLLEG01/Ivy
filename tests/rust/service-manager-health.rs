@@ -21,7 +21,12 @@ async fn slow_writer_coalesces_pulses_and_confirms_one_final_unready() {
     entered.notified().await;
     for _ in 0..10_000 { drop(reporter.write(true, Some(1), "pulse".into())); }
     drop(reporter.write(true, Some(2), "new generation".into()));
-    assert!(reporter.write(false, Some(1), "late old generation".into()).await.is_err());
+    assert!(
+        reporter
+            .enqueue(false, Some(1), "late closed connection".into(), false, || false)
+            .await
+            .is_err()
+    );
     let flush = reporter.flush();
     let final_one = reporter.finalize();
     let final_two = reporter.finalize();
@@ -47,7 +52,31 @@ async fn failed_write_does_not_poison_a_newer_generation() {
     });
     assert!(reporter.write(true, Some(1), "failed".into()).await.is_err());
     reporter.write(true, Some(2), "recovered".into()).await.unwrap();
-    assert!(reporter.write(false, Some(1), "late".into()).await.is_err());
     reporter.finalize().await.unwrap();
     assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn readiness_accepts_a_lower_generation_after_hive_restarts() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let reporter = HealthReporter::with_writer({
+        let seen = seen.clone();
+        move |ready, _, generation| {
+            seen.lock().unwrap().push((ready, generation));
+            async { Ok(()) }
+        }
+    });
+
+    reporter
+        .write(false, Some(42), "Disconnected.".into())
+        .await
+        .unwrap();
+    reporter
+        .enqueue(true, Some(1), "Ready.".into(), false, || true)
+        .await
+        .unwrap();
+
+    let late = reporter.enqueue(true, Some(42), "Closed connection.".into(), false, || false);
+    assert!(late.await.is_err());
+    assert_eq!(*seen.lock().unwrap(), [(false, Some(42)), (true, Some(1))]);
 }

@@ -236,7 +236,7 @@ pub fn options(
                     executor.as_ref(),
                     host_id,
                     service_node_id,
-                    connection.generation(),
+                    &connection,
                     chrono::Utc::now().timestamp_millis(),
                 )
                 .await
