@@ -8,6 +8,7 @@ use ivy_chat_bridge::{
 use ivy_contracts::{
     IvyJson as Json, IvyResult,
     json::{canonical, parse},
+    principal_transfer::PrincipalTransfers,
 };
 use ivy_sdk::{
     clock::Clock,
@@ -183,6 +184,22 @@ async fn original_lookup_distinguishes_expired_absence_and_retains_old_epoch_rec
         ops.read(&caller, &absent).await.err().unwrap().code,
         "operation_expired"
     );
+    let mut definition = admission.definition().clone();
+    definition.insert("principalId", "new-chat".into());
+    let transfers = PrincipalTransfers::from_settings(&Json::object([(
+        "principalTransfers",
+        Json::Array(vec![
+            Json::object([("principalId", "new-chat".into()), ("previousPrincipalId", admission.definition().required("principalId").unwrap().clone())]),
+            Json::object([("principalId", "new-alice".into()), ("previousPrincipalId", Json::String(caller.clone()))]),
+        ]),
+    )])).unwrap();
+    let next = ChatAdmission::with_transfers(&definition, transfers).unwrap();
+    let migrated = ChatOperations::new(&reopened, &next).unwrap();
+    let successor = "new-alice".into();
+    assert_eq!(migrated.read(&successor, &retained).await.unwrap().value, pending.value);
+    assert!(migrated.find(&successor, &retained).await.unwrap().is_none());
+    assert_eq!(migrated.read(&"bob".into(), &retained).await.err().unwrap().code, "operation_expired");
+    assert_eq!(next.authorize(&successor, &admission.expected(&caller), None).err().unwrap().code, "chat_definition_mismatch");
     reopened.close().await.unwrap();
 }
 #[tokio::test]

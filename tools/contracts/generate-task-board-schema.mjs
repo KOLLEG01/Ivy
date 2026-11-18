@@ -329,6 +329,7 @@ defs.Settings = obj({ principalId: id, rootObjectId: nullable(id),
   scheduler: obj({ enabled: bool, intervalMs: integer(1000, 3600000), pageSize: integer(1, 50),
     stallWarningMs: { ...integer(60000, 86400000), default: 300000 } }, ['enabled', 'intervalMs', 'pageSize']),
   phoneTarget: nullable(ref('PhoneTarget')) });
+defs.Settings.properties.principalTransfers = array(obj({ principalId: id, previousPrincipalId: id }), 16);
 defs.WorkspaceQuery = obj({});
 defs.WorkspaceInfo = obj({ serviceNodeId: id, generation: integer(1), principalId: id, rootObjectId: nullable(id),
   callerPrincipalId: id, role: { enum: ['user', 'worker', 'observer'] }, recovered: bool, observedAt: timestamp,

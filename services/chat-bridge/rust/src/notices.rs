@@ -548,7 +548,7 @@ impl<'a> ChatNotices<'a> {
         validate_chat("NoticeQuery", request)?;
         let operation = self
             .operations
-            .find(caller, string(request, "operationId")?)
+            .find_history(caller, string(request, "operationId")?)
             .await?;
         require(
             operation

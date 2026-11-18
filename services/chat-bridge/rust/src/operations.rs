@@ -55,12 +55,21 @@ impl<'a> ChatOperations<'a> {
         Ok(Self { store, admission })
     }
     pub fn name(&self, caller: &JsString, operation_id: &JsString) -> IvyResult<String> {
+        self.name_for(self.admission.principal(), caller, operation_id)
+    }
+
+    fn name_for(
+        &self,
+        principal: &JsString,
+        caller: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<String> {
         Ok(format!(
             "Chat operation {}",
             &hash_json(&Json::object([
                 (
                     "principalId",
-                    self.admission.definition().required("principalId")?.clone()
+                    Json::String(principal.clone())
                 ),
                 (
                     "workspaceId",
@@ -72,6 +81,10 @@ impl<'a> ChatOperations<'a> {
         ))
     }
     pub fn check(&self, value: &Json) -> IvyResult<()> {
+        self.check_for(value, self.admission.principal())
+    }
+
+    fn check_for(&self, value: &Json, principal: &JsString) -> IvyResult<()> {
         let request = object_field(Some(value), "request")?;
         // Read request.action before other checks, as the original role selection does.
         let action = object_field(request, "action")?;
@@ -85,7 +98,8 @@ impl<'a> ChatOperations<'a> {
                     == Some(&Json::from(hash_json(
                         request.ok_or_else(IvyError::internal)?,
                     )?))
-                && object_field(original, "principalId")? == definition.get("principalId")
+                && object_field(original, "principalId")?.and_then(Json::as_js_string)
+                    == Some(principal)
                 && object_field(original, "callerPrincipalId")? == value.get("callerPrincipalId")
                 && object_field(original, "workspaceId")? == definition.get("workspaceId"),
             "chat_identity_conflict",
@@ -106,13 +120,22 @@ impl<'a> ChatOperations<'a> {
         caller: &JsString,
         operation_id: &JsString,
     ) -> IvyResult<Option<Document>> {
+        self.find_for(self.admission.principal(), caller, operation_id).await
+    }
+
+    async fn find_for(
+        &self,
+        principal: &JsString,
+        caller: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<Option<Document>> {
         let result = self
             .store
-            .named("chat-bridge/operation", &self.name(caller, operation_id)?)
+            .named("chat-bridge/operation", &self.name_for(principal, caller, operation_id)?)
             .await
             .map_err(|e| e.into_ivy())?;
         if let Some(result) = &result {
-            self.check(&result.value)?;
+            self.check_for(&result.value, principal)?;
             require(
                 result.value.get("callerPrincipalId") == Some(&Json::String(caller.clone()))
                     && result.value.get("operationId") == Some(&Json::String(operation_id.clone())),
@@ -122,8 +145,46 @@ impl<'a> ChatOperations<'a> {
         }
         Ok(result)
     }
+
+    pub(crate) async fn find_previous(
+        &self,
+        caller: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<Option<Document>> {
+        let principal = self.admission.principal();
+        let previous_principal = self.admission.transfers.previous(principal);
+        let previous_caller = self.admission.transfers.previous(caller);
+        let mut result = None;
+        for (owner, original_caller) in [
+            previous_principal.map(|owner| (owner, caller)),
+            previous_caller.map(|original| (principal, original)),
+            previous_principal.zip(previous_caller),
+        ].into_iter().flatten() {
+            if let Some(found) = self.find_for(owner, original_caller, operation_id).await? {
+                require(
+                    result.is_none(),
+                    "chat_identity_conflict",
+                    "More than one retained operation has this identity.",
+                )?;
+                result = Some(found);
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn find_history(
+        &self,
+        caller: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<Option<Document>> {
+        if let Some(current) = self.find(caller, operation_id).await? {
+            Ok(Some(current))
+        } else {
+            self.find_previous(caller, operation_id).await
+        }
+    }
     pub async fn read(&self, caller: &JsString, operation_id: &JsString) -> IvyResult<Document> {
-        if let Some(original) = self.find(caller, operation_id).await? {
+        if let Some(original) = self.find_history(caller, operation_id).await? {
             return Ok(original);
         }
         // Absence outside the receipt ring cannot authorize another notification.

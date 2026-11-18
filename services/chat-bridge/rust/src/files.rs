@@ -328,8 +328,17 @@ impl ChatFiles {
         if query.get("fileTarget") == Some(&true.into()) {
             return self.target(&bridge.workspace(caller).await?);
         }
-        self.read_operation(caller, string(query, "fileOperationId")?)
-            .await
+        let operation = string(query, "fileOperationId")?;
+        match self.read_operation(caller, operation).await {
+            Err(error) if error.code == "not_found" => {
+                if let Some(previous) = bridge.main.admission().transfers.previous(caller) {
+                    self.read_operation(previous, operation).await
+                } else {
+                    Err(error)
+                }
+            }
+            result => result,
+        }
     }
     pub async fn read_operation(&self, caller: &JsString, operation: &JsString) -> IvyResult<Json> {
         self.prune()?;

@@ -35,7 +35,7 @@ impl<'a> ChatQueries<'a> {
         let admission = self.operations.admission;
         let store = self.operations.store;
         let expected = expected_bridge(request)?;
-        admission.authorize(caller, expected, None)?;
+        admission.authorize_history(caller, expected, None)?;
         validate_chat("InputQuery", request)?;
         let configured = admission.channels_for(caller);
         let mut channels = Vec::new();
@@ -82,7 +82,7 @@ impl<'a> ChatQueries<'a> {
                                         "data:/workspaceId",
                                         admission.definition().required("workspaceId")?.clone(),
                                     ),
-                                    eq("data:/definitionHash", admission.definition_hash().into()),
+                                    admission.history_filter(),
                                     predicates("or", group.to_vec()),
                                 ],
                             ),
@@ -125,15 +125,14 @@ impl<'a> ChatQueries<'a> {
             .get("identity")
             .filter(|v| !v.is_null())
             .ok_or_else(IvyError::internal)?;
-        admission.authorize(
+        admission.authorize_history(
             caller,
             expected,
             identity.get("channel").filter(|v| !(v).is_null()),
         )?;
         require(
             input.value.get("workspaceId") == admission.definition().get("workspaceId")
-                && input.value.get("definitionHash")
-                    == Some(&Json::from(admission.definition_hash())),
+                && admission.matches_history_hash(input.value.get("definitionHash")),
             "chat_scope_mismatch",
             "Input queries require the original configured workspace.",
         )?;

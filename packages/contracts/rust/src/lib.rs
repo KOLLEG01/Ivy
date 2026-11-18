@@ -21,6 +21,7 @@ mod native_catalog_path;
 pub mod native_contract;
 pub mod native_backend;
 pub mod operation;
+pub mod principal_transfer;
 pub mod published_contracts;
 pub mod re2;
 pub mod read_request;

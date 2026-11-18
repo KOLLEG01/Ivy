@@ -156,11 +156,28 @@ impl<'a> ChatBridge<'a> {
             )?;
             let operation_id = operation_id.unwrap();
             let retained = self.main.operations.find(caller, operation_id).await?;
+            if retained.is_none() {
+                require(
+                    self.main.operations.find_previous(caller, operation_id).await?.is_none(),
+                    "operation_expired",
+                    "A retained operation from a previous principal is only available for reading.",
+                )?;
+            }
             let file_exists = self
                 .files
                 .map(|files| files.has(caller, operation_id))
                 .transpose()?
                 .unwrap_or(false);
+            if let (Some(files), Some(previous)) = (
+                self.files,
+                self.main.admission().transfers.previous(caller),
+            ) {
+                require(
+                    !files.has(previous, operation_id)?,
+                    "operation_expired",
+                    "A retained file operation from a previous principal is only available for reading.",
+                )?;
+            }
             require(
                 if name == "sendFile" {
                     retained.is_none()
@@ -202,7 +219,7 @@ impl<'a> ChatBridge<'a> {
             "operation" => {
                 self.main
                     .admission()
-                    .authorize(caller, args.required("expectedBridge")?, None)?;
+                    .authorize_history(caller, args.required("expectedBridge")?, None)?;
                 let operation_id = args
                     .required("operationId")?
                     .as_js_string()

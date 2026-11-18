@@ -113,6 +113,10 @@ defs.Settings.properties.whatsappConfigPath = string(4096, 1);
 defs.Settings.properties.language = { enum: ["en", "de"] };
 defs.Settings.properties.diagnosticNotifications = { type: "boolean", default: false };
 defs.Settings.properties.resumeMain = nullable(ref("ConfiguredMainResume"));
+defs.Settings.properties.principalTransfers = array(
+  object({ principalId: string(200, 1), previousPrincipalId: string(200, 1) }),
+  16,
+);
 defs.Payload.properties.turnOptions = {
   type: "object",
   additionalProperties: false,

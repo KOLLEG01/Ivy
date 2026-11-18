@@ -171,6 +171,7 @@ impl<'a> ChatOutbox<'a> {
         after: f64,
         limit: f64,
         through: f64,
+        definition_hash: &Json,
     ) -> IvyResult<Page> {
         let admission = self.operations.admission;
         require(
@@ -192,11 +193,7 @@ impl<'a> ChatOutbox<'a> {
                 "data:/workspaceId",
                 field(admission.definition(), "workspaceId")?.clone(),
             ),
-            predicate(
-                "eq",
-                "data:/definitionHash",
-                admission.definition_hash().into(),
-            ),
+            predicate("eq", "data:/definitionHash", definition_hash.clone()),
         ];
         for (name, value) in channel.as_object().ok_or_else(IvyError::internal)? {
             filters.push(predicate(
@@ -230,7 +227,7 @@ impl<'a> ChatOutbox<'a> {
             } else {
                 self.read(key, Reference::Pinned(&selected)).await?
             };
-            self.scope(&document.value, channel, None)?;
+            self.scope(&document.value, channel, Some(definition_hash))?;
             entries.push(document);
         }
         let mut previous = after;
@@ -268,6 +265,7 @@ impl<'a> ChatOutbox<'a> {
         channel: &Json,
         after: f64,
         limit: f64,
+        definition_hash: &Json,
     ) -> IvyResult<Vec<Page>> {
         for _ in 0..8 {
             let before = self.boundary().await?;
@@ -306,7 +304,7 @@ impl<'a> ChatOutbox<'a> {
                 );
             }
             let pages = map_concurrent(keys.to_vec(), 8, |key, _| {
-                self.entries(key, channel, after, limit, through)
+                self.entries(key, channel, after, limit, through, definition_hash)
             })
             .await?;
             let after = self.boundary().await?;
@@ -561,18 +559,23 @@ impl<'a> ChatOutbox<'a> {
         Ok(())
     }
     pub async fn history(&self, caller: &JsString, request: &Json) -> IvyResult<Json> {
-        self.operations.admission.authorize(
+        let expected = expected_bridge(request)?;
+        let admission = self.operations.admission;
+        admission.authorize_history(
             caller,
-            expected_bridge(request)?,
+            expected,
             request.get("channel").filter(|v| !(v).is_null()),
         )?;
         validate_chat("HistoryQuery", request)?;
+        let current_hash = Json::from(admission.definition_hash());
+        let definition_hash = expected.get("definitionHash").filter(|hash| admission.matches_history_hash(Some(hash))).unwrap_or(&current_hash);
         let pages = self
             .visible(
                 &["chat-bridge/input", "chat-bridge/reply"],
                 field(request, "channel")?,
                 number(request, "afterSequence")?,
                 number(request, "limit")?,
+                definition_hash,
             )
             .await?;
         let mut through = MAXIMUM_SEQUENCE;
@@ -888,12 +891,14 @@ impl<'a> ChatOutbox<'a> {
         let name = format!("Chat offer {scope}");
         let mut saved = self.named("chat-bridge/offer", &name).await?;
         if saved.is_none() {
+            let definition_hash = Json::from(self.operations.admission.definition_hash());
             let page = self
                 .visible(
                     &["chat-bridge/reply"],
                     field(&request, "channel")?,
                     number(&request, "afterSequence")?,
                     number(&request, "limit")?,
+                    &definition_hash,
                 )
                 .await?
                 .remove(0);

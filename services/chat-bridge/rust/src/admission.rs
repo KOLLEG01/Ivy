@@ -2,6 +2,7 @@
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat, hash::hash_json,
     json::canonical, limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
+    principal_transfer::PrincipalTransfers,
 };
 use std::collections::HashSet;
 
@@ -26,6 +27,8 @@ pub(crate) fn expected_bridge(request: &Json) -> IvyResult<&Json> {
 pub struct ChatAdmission {
     definition: Json,
     definition_hash: String,
+    previous_definition_hash: Option<String>,
+    pub(crate) transfers: PrincipalTransfers,
 }
 pub struct AdmittedSend {
     pub identity: Json,
@@ -33,6 +36,13 @@ pub struct AdmittedSend {
 }
 impl ChatAdmission {
     pub fn new(definition: &Json) -> IvyResult<Self> {
+        Self::with_transfers(definition, PrincipalTransfers::default())
+    }
+
+    pub fn with_transfers(
+        definition: &Json,
+        transfers: PrincipalTransfers,
+    ) -> IvyResult<Self> {
         validate_chat("Definition", definition)?;
         if canonical(definition, MANAGEMENT_FRAME_BYTES)?.len() > 128 * 1024 {
             return Err(IvyError::new(
@@ -60,9 +70,39 @@ impl ChatAdmission {
                 ));
             }
         }
+        let previous_definition_hash = transfers
+            .previous(definition.required("principalId")?.as_js_string().unwrap())
+            .map(|principal| {
+                let mut previous = definition.clone();
+                previous.insert("principalId", Json::String(principal.clone()));
+                hash_json(&previous)
+            })
+            .transpose()?;
         Ok(Self {
             definition: definition.clone(),
             definition_hash: hash_json(definition)?,
+            previous_definition_hash,
+            transfers,
+        })
+    }
+    pub(crate) fn principal(&self) -> &JsString {
+        self.definition.get("principalId").unwrap().as_js_string().unwrap()
+    }
+    pub(crate) fn history_filter(&self) -> Json {
+        let (op, value) = match self.previous_definition_hash.as_deref() {
+            Some(previous) => ("in", Json::Array(vec![self.definition_hash().into(), previous.into()])),
+            None => ("eq", self.definition_hash().into()),
+        };
+        Json::object([
+            ("op", op.into()),
+            ("field", "data:/definitionHash".into()),
+            ("value", value),
+        ])
+    }
+    pub(crate) fn matches_history_hash(&self, value: Option<&Json>) -> bool {
+        value.is_some_and(|value| {
+            value.is_str(self.definition_hash())
+                || self.previous_definition_hash.as_ref().is_some_and(|old| value.is_str(old))
         })
     }
     pub fn definition(&self) -> &Json {
@@ -95,13 +135,36 @@ impl ChatAdmission {
         expected: &Json,
         channel: Option<&Json>,
     ) -> IvyResult<()> {
-        let actual = self.expected(caller);
+        self.authorize_scope(caller, expected, channel, false)
+    }
+
+    pub(crate) fn authorize_history(
+        &self,
+        caller: &JsString,
+        expected: &Json,
+        channel: Option<&Json>,
+    ) -> IvyResult<()> {
+        self.authorize_scope(caller, expected, channel, true)
+    }
+
+    fn authorize_scope(
+        &self,
+        caller: &JsString,
+        expected: &Json,
+        channel: Option<&Json>,
+        historical: bool,
+    ) -> IvyResult<()> {
         validate_chat("ExpectedBridge", expected)?;
         // Retained requests may contain an earlier definition hash. Only these
         // three fields establish the current Main/caller scope.
-        if ["principalId", "callerPrincipalId", "workspaceId"]
-            .iter()
-            .any(|key| actual.get(key) != expected.get(key))
+        let owns = |current: &JsString, key| {
+            expected.get(key).and_then(Json::as_js_string).is_some_and(|recorded| {
+                current == recorded || historical && self.transfers.owns(current, recorded)
+            })
+        };
+        if !owns(self.principal(), "principalId")
+            || !owns(caller, "callerPrincipalId")
+            || self.definition.get("workspaceId") != expected.get("workspaceId")
         {
             return Err(IvyError::new(
                 "chat_definition_mismatch",

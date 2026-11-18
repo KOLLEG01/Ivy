@@ -16,6 +16,7 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts, hash::hash_json,
     native_backend::BackendIdentity,
+    principal_transfer::PrincipalTransfers,
 };
 use ivy_sdk::{
     native_plan::{NativePlanKind, save_native_plan, validate_native_plan_draft},
@@ -53,6 +54,7 @@ pub struct EngineAdmission<'a, S, C, P, E> {
     owner: &'a EngineOwner,
     runtime: &'a AdmissionRuntime<'a, P>,
     execution: &'a E,
+    transfers: PrincipalTransfers,
 }
 fn f<'a>(value: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -103,6 +105,7 @@ impl<'a, S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>
             owner,
             runtime,
             execution,
+            transfers: PrincipalTransfers::from_settings(settings)?,
         })
     }
     pub async fn verify_owner(&self) -> IvyResult<()> {
@@ -115,6 +118,9 @@ impl<'a, S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>
     }
     pub fn settings(&self) -> &Json {
         self.settings
+    }
+    pub(crate) fn previous_principal(&self, caller: &JsString) -> Option<&JsString> {
+        self.transfers.previous(caller)
     }
     pub fn owner(&self) -> &EngineOwner {
         self.owner

@@ -130,7 +130,17 @@ impl<
                     .ok_or_else(|| {
                         IvyError::new("invalid_arguments", "operationId must be a string.")
                     })?;
-                self.reads.operation(id, &read_context, true).await
+                match self.reads.operation(id, &read_context, true).await {
+                    Err(error) if error.code == "not_found" => {
+                        if let Some(previous) = self.admission.previous_principal(&context.caller_principal_id) {
+                            let original = ReadContext { caller_principal_id: previous, ..read_context };
+                            self.reads.operation(id, &original, true).await
+                        } else {
+                            Err(error)
+                        }
+                    }
+                    result => result,
+                }
             }
             "configuration" => self.admission.configuration().await,
             "read" => {

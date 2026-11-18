@@ -6862,6 +6862,26 @@
               "type": "null"
             }
           ]
+        },
+        "principalTransfers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "principalId": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              },
+              "previousPrincipalId": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              }
+            },
+            "required": [
+              "principalId",
+              "previousPrincipalId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 16
         }
       },
       "required": [

@@ -9,6 +9,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, checked_native_contract::CheckedNativeContracts,
+    principal_transfer::PrincipalTransfers,
 };
 use ivy_host_runtime::{
     config::{InstanceConfig, configuration_path, native_instance_config},
@@ -39,7 +40,10 @@ impl ChatStartup {
             let settings = service_settings(source)?;
             let distribution = owner.artifact_root().join("dist");
             Ok(Arc::new(ChatGenerationConfig {
-                admission: ChatAdmission::new(settings.required("definition")?)?,
+                admission: ChatAdmission::with_transfers(
+                    settings.required("definition")?,
+                    PrincipalTransfers::from_settings(settings)?,
+                )?,
                 catalogs: CheckedNativeContracts::new(&distribution),
                 instructions: load_main_instructions(&distribution)?,
                 notice_instructions: NoticeInstructions::load(&distribution)?,

@@ -147,6 +147,30 @@
               "type": "null"
             }
           ]
+        },
+        "principalTransfers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "principalId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "previousPrincipalId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "principalId",
+              "previousPrincipalId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 16
         }
       },
       "required": [
