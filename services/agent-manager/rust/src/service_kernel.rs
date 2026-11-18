@@ -53,6 +53,7 @@ use ivy_sdk::{
 };
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -467,12 +468,71 @@ async fn prepare_backend(
     }))
 }
 
+fn retryable_native_start(error: &IvyError) -> bool {
+    match error.code.as_str() {
+        "native_unavailable"
+        | "native_connection_closed"
+        | "native_read_failed"
+        | "native_write_failed"
+        | "native_deadline_exceeded"
+        | "native_daemon_start_failed" => true,
+        "native_environment_unavailable" => error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("mcpCode"))
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|code| {
+                [
+                    "outcome_unknown",
+                    "service_unavailable",
+                    "deadline_exceeded",
+                    // The Hive edge can serve a non-JSON error while Hive restarts.
+                    "invalid_frame",
+                ]
+                .iter()
+                .any(|retryable| code.eq_str(retryable))
+            }),
+        _ => false,
+    }
+}
+
+async fn start_native_with_retry<T, F: Future<Output = IvyResult<T>>>(
+    mut stopping: watch::Receiver<bool>,
+    failure: &Mutex<Option<JsString>>,
+    mut start: impl FnMut() -> F,
+) -> IvyResult<T> {
+    let mut delay = Duration::from_secs(1);
+    while !*stopping.borrow() {
+        match start().await {
+            Ok(native) => {
+                *failure.lock().map_err(|_| IvyError::internal())? = None;
+                return Ok(native);
+            }
+            Err(error) if retryable_native_start(&error) => {
+                *failure.lock().map_err(|_| IvyError::internal())? = Some(error.code_js());
+            }
+            Err(error) => return Err(error),
+        }
+        tokio::select! {
+            biased;
+            _ = stopping.wait_for(|stopping| *stopping) => break,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
+    Err(IvyError::new(
+        "native_owner_stopping",
+        "Backend startup is retiring.",
+    ))
+}
+
 async fn launch_backend(
     resources: Arc<BackendResources>,
     bindings: AgentRuntimeBindings,
     health: AgentHealth,
     service_link: ServiceLink,
     catalog: Arc<IvyJson>,
+    retry_until_stopped: Option<watch::Receiver<bool>>,
 ) -> IvyResult<()> {
     resources.ensure_starting()?;
     let service_link = service_link.scoped(resources.backend.clone(), resources.readiness.clone());
@@ -506,55 +566,60 @@ async fn launch_backend(
         skills_comparator: bindings.skills_comparator.clone(),
     });
     put(&resources.environment, environment.clone())?;
-    let events = ServiceEvents::new(ServiceEventSettings {
-        service_node_id: service_node.clone(),
-        service: service_link.clone(),
-        closing: closing.clone(),
-        operations: operations.clone(),
-        state: state.clone(),
-        receipts: resources.receipts.clone(),
-        notifications: notifications.clone(),
-        policy: policy.clone(),
-        query: bindings.form_query.clone(),
-    });
-    put(&resources.events, events.clone())?;
     let paths = bindings.home.paths.clone();
     let account_home = bindings.home.account_home.clone();
-    let begin = events.clone();
     let prepare_environment =
         managed_environment_before_launch(environment.clone(), bindings.bootstrap.clone());
     let starting = Arc::downgrade(&resources);
-    let native = Arc::new(
-        start_validated_native_process(
+    let before_launch: Arc<crate::native_launch::BeforeNativeLaunch> = Arc::new(move |home| {
+        let prepare = prepare_environment.clone();
+        let starting = starting.clone();
+        Box::pin(async move {
+            let owner = starting.upgrade().ok_or_else(IvyError::internal)?;
+            owner.ensure_starting()?;
+            prepare(home).await?;
+            owner.ensure_starting()
+        })
+    });
+    let start_native = || async {
+        let events = ServiceEvents::new(ServiceEventSettings {
+            service_node_id: service_node.clone(),
+            service: service_link.clone(),
+            closing: closing.clone(),
+            operations: operations.clone(),
+            state: state.clone(),
+            receipts: resources.receipts.clone(),
+            notifications: notifications.clone(),
+            policy: policy.clone(),
+            query: bindings.form_query.clone(),
+        });
+        let begin = events.clone();
+        let native = start_validated_native_process(
             NativeProcessOptions {
                 artifact_root: artifact_root.clone(),
                 data_root: data_root.clone(),
                 settings: settings.clone(),
                 client_version: text(value, "version")?,
-                hive_credential: credential,
+                hive_credential: credential.clone(),
                 home_inputs: bindings.home.clone(),
-                before_launch: Some(Arc::new(move |home| {
-                    let prepare = prepare_environment.clone();
-                    let starting = starting.clone();
-                    Box::pin(async move {
-                        starting
-                            .upgrade()
-                            .ok_or_else(IvyError::internal)?
-                            .ensure_starting()?;
-                        prepare(home).await?;
-                        starting
-                            .upgrade()
-                            .ok_or_else(IvyError::internal)?
-                            .ensure_starting()
-                    })
-                })),
+                before_launch: Some(before_launch.clone()),
                 begin_epoch: Arc::new(move |epoch| begin.begin_epoch(epoch)),
             },
             catalog.clone(),
         )
-        .await?,
-    );
+        .await?;
+        Ok((Arc::new(native), events))
+    };
+    // Retry only before a native owner has been admitted. The launcher settles
+    // failed connections before returning, and each attempt has its own events.
+    let (native, events) = match retry_until_stopped {
+        Some(stopping) => {
+            start_native_with_retry(stopping, &resources.failure, start_native).await?
+        }
+        None => start_native().await?,
+    };
     put(&resources.native, native.clone())?;
+    put(&resources.events, events.clone())?;
     let home = node_path::from_native(&native.native_home);
     let mut protected = vec![artifact_root, home.clone()];
     for key in ["workRoot", "logsRoot"] {
@@ -999,9 +1064,17 @@ async fn start(
             let bindings = bindings.clone();
             let health = health.clone();
             let service_link = service_link.clone();
+            let retry_until_stopped = hosted.then(|| resources.stop_timer.subscribe());
             tokio::spawn(async move {
-                let result =
-                    launch_backend(owner.clone(), bindings, health, service_link, catalog).await;
+                let result = launch_backend(
+                    owner.clone(),
+                    bindings,
+                    health,
+                    service_link,
+                    catalog,
+                    retry_until_stopped,
+                )
+                .await;
                 if let Err(error) = &result {
                     *owner.failure.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(error.code_js());

@@ -310,7 +310,11 @@ impl ManagedEnvironment {
                         return Err(IvyError::new(
                             "native_environment_unavailable",
                             "Claude adapter MCP configuration was not applied.",
-                        ));
+                        )
+                        .with_details(IvyJson::object([(
+                            "mcpCode",
+                            status.get("code").cloned().unwrap_or(IvyJson::Null),
+                        )])));
                     }
                 }
                 owner

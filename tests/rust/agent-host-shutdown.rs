@@ -1,22 +1,28 @@
-//! Exercise the actual host shutdown with a failed owner and another live writer.
-use super::prepare_backend;
+//! Exercise shared AgentManager startup and shutdown with independent backends.
+use super::{prepare_backend, start_native_with_retry};
 use crate::{
     agent_health::AgentHealth,
     backend_runtime::{BackendResources, slot},
+    environment_defaults::load_environment_defaults,
+    environment_manager::{EnvironmentManagerSettings, ManagedEnvironment},
     host_service::HostResources,
     local_state::{Limits, LocalAgentState},
 };
 use ivy_contracts::{
-    IvyJson as J, JsString, Outcome,
+    IvyError, IvyJson as J, JsString, Outcome,
     hash::digest,
     json::parse,
     native_backend::{BackendIdentity, NativeProvider},
 };
 use ivy_host_runtime::{config::InstanceConfig, health::HealthFile, native_path};
+use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{
-    fs,
+    fs, future,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{oneshot, watch};
@@ -94,6 +100,119 @@ async fn owner(root: &Root, name: &str, health: &AgentHealth) -> Arc<BackendReso
     // Preparation is real; this fixture owns no provider process or Hive connection.
     owner.startup.send_replace(Some(Ok(())));
     owner
+}
+
+fn mcp_failure(code: &str) -> IvyError {
+    IvyError::new("native_environment_unavailable", "MCP setup failed.")
+        .with_details(J::object([("mcpCode", code.into())]))
+}
+
+#[derive(Default)]
+struct RecoveringHive(AtomicUsize);
+impl RpcClient for RecoveringHive {
+    fn request<'a>(&'a self, method: &'a str, args: J, _: RequestOptions) -> RequestFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(method, "objects.stat");
+            if args.get("path") == Some(&"/ivy-agent-mcp".into()) {
+                match self.0.fetch_add(1, Ordering::Relaxed) {
+                    0 => return Err(IvyError::new("outcome_unknown", "Connection dropped.")),
+                    1 => return Err(IvyError::new("invalid_frame", "Hive edge returned HTML.")),
+                    _ => {}
+                }
+            }
+            Err(IvyError::new("not_found", "Use the packaged defaults."))
+        })
+    }
+}
+
+#[tokio::test]
+async fn transient_startup_failures_retry_independently() {
+    let root = Root::new();
+    let data_root = native_path::from_native(&root.0);
+    let native_home = root.0.join("native-home");
+    fs::create_dir(&native_home).unwrap();
+    let url = JsString::from("https://ivy.invalid");
+    let environment = ManagedEnvironment::new(EnvironmentManagerSettings {
+        settings: J::object([("appServer", J::object([("mode", "claude-adapter".into())]))]),
+        defaults: load_environment_defaults(&data_root, &url).unwrap(),
+        data_root,
+        host_id: "test".into(),
+        hive_url: url,
+        credential: "fixture".into(),
+        english_hint_comparator: Arc::new(|left, right| {
+            crate::runtime::compare_names(left, right, true)
+        }),
+        skills_comparator: Arc::new(|left, right| {
+            crate::runtime::compare_names(left, right, false)
+        }),
+    });
+    let hive = Arc::new(RecoveringHive::default());
+    let (_stop, stopping) = watch::channel(false);
+    let codex_failure = Mutex::new(None);
+    let claude_failure = Mutex::new(None);
+    let mut codex_error = Some(IvyError::new("native_connection_closed", "Proxy closed."));
+    let (codex, claude) = tokio::join!(
+        start_native_with_retry(stopping.clone(), &codex_failure, || {
+            future::ready(codex_error.take().map_or(Ok("codex"), Err))
+        }),
+        start_native_with_retry(stopping, &claude_failure, || async {
+            environment
+                .before_launch(native_path::from_native(&native_home), hive.clone())?
+                .wait()
+                .await
+        }),
+    );
+    assert_eq!(codex.unwrap(), "codex");
+    claude.unwrap();
+    assert_eq!(hive.0.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        environment.status().unwrap().unwrap().mcp.get("state"),
+        Some(&"applied".into())
+    );
+    assert_eq!(*codex_failure.lock().unwrap(), None);
+    assert_eq!(*claude_failure.lock().unwrap(), None);
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_startup_backoff() {
+    let (stop, stopping) = watch::channel(false);
+    let (attempted, first_attempt) = oneshot::channel();
+    let mut attempted = Some(attempted);
+    let failure = Mutex::new(None);
+    let (result, ()) = tokio::join!(
+        start_native_with_retry(stopping, &failure, || {
+            attempted.take().expect("one attempt").send(()).unwrap();
+            future::ready(Err::<(), _>(mcp_failure("service_unavailable")))
+        }),
+        async {
+            first_attempt.await.unwrap();
+            assert_eq!(
+                *failure.lock().unwrap(),
+                Some("native_environment_unavailable".into())
+            );
+            stop.send_replace(true);
+        },
+    );
+    assert_eq!(result.unwrap_err().code, "native_owner_stopping");
+}
+
+#[tokio::test]
+async fn permanent_or_uncertain_native_startup_failure_does_not_retry() {
+    let (_stop, stopping) = watch::channel(false);
+    for error in [
+        mcp_failure("target_conflict"),
+        IvyError::new("native_build_mismatch", "Binary identity changed."),
+        IvyError::new("outcome_unknown", "Native process stop is unconfirmed."),
+    ] {
+        let expected = error.code.clone();
+        let mut first = Some(error);
+        let failure = Mutex::new(None);
+        let result = start_native_with_retry(stopping.clone(), &failure, || {
+            future::ready(Err::<(), _>(first.take().expect("one attempt")))
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, expected);
+    }
 }
 
 #[tokio::test]
